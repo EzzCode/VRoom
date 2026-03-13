@@ -145,11 +145,11 @@ def draw_mask_overlay(image, masks, alpha=0.5):
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 def run_pipeline(args):
-    """Full pipeline: SAM → filter → merge → split → save masks + debug viz."""
+    """Full pipeline: SAM → filter background → merge → split → save masks + debug visualization."""
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     mask_dir = output_dir / "masks"
-    vis_dir = output_dir / "debug_vis"
+    vis_dir = output_dir / "visible_masks"
 
     if not input_dir.exists():
         sys.exit(logger.error(f"Input directory missing: {input_dir}"))
@@ -157,7 +157,7 @@ def run_pipeline(args):
     mask_dir.mkdir(parents=True, exist_ok=True)
     vis_dir.mkdir(parents=True, exist_ok=True)
 
-    # SAM 2
+    # SAM2
     mask_generator = load_sam(
         args.model_cfg, args.sam_ckpt, args.device,
         points_per_side=args.points_per_side,
@@ -182,24 +182,24 @@ def run_pipeline(args):
             logger.warning(f"Could not read image: {img_path}")
             continue
 
-        h, w = frame.shape[:2]
+        frame_h, frame_w = frame.shape[:2]
 
         # SAM inference
         raw_masks = generate_masks(mask_generator, frame)
 
         # Post-processing chain: filter → merge → split
         fg_masks = filter_background_masks(
-            raw_masks, h, w, 
+            raw_masks, frame_h, frame_w, 
             max_area_ratio=args.max_area, 
             border_touch_threshold=args.border_touch
         )
-        merged = merge_overlapping_masks(fg_masks, containment_thresh=args.merge_thresh)
-        final_masks = split_disconnected_masks(merged, min_area=100)
+        merged_masks = merge_overlapping_masks(fg_masks, containment_thresh=args.merge_thresh)
+        final_masks = split_disconnected_masks(merged_masks, min_area=100)
 
         logger.info(
             f"Frame {frame_idx:05d} ({img_path.name}) | "
             f"Raw: {len(raw_masks)}, FG: {len(fg_masks)}, "
-            f"Merged: {len(merged)}, Final: {len(final_masks)}"
+            f"Merged: {len(merged_masks)}, Final: {len(final_masks)}"
         )
 
         # Save masks

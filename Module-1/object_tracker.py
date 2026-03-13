@@ -199,10 +199,10 @@ def run_pipeline(args):
         h, w = frame.shape[:2]
         tracked_objects = tracker.update(frame, fg_masks)
         
-        # Save 16-bit ID map (named after source image so vote.py can match COLMAP names)
-        id_map = np.zeros((h, w), dtype=np.uint16)
+        # Save 8-bit ID map (named after source image so vote.py can match COLMAP names)
+        id_map = np.zeros((h, w), dtype=np.uint8)
         for obj_id, mask in tracked_objects.items():
-            id_layer = (mask.astype(np.uint16) * obj_id)
+            id_layer = (mask.astype(np.uint8) * obj_id)
             empty = (id_map == 0)
             id_map[empty] = id_layer[empty]
 
