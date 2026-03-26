@@ -31,4 +31,5 @@ wheels/
 .env
 .venv
 venv/
+\temp_deps
 
