@@ -246,6 +246,7 @@ def detect_spatial_holes(
     gaussians,
     camera,
     coverage_threshold: float = 0.3,
+    object_label_id: int = None,
 ) -> np.ndarray:
     """Detect holes by projecting anchor bounding boxes to screen space.
 
@@ -258,6 +259,7 @@ def detect_spatial_holes(
         gaussians: Loaded GaussianModel.
         camera: VirtualCamera.
         coverage_threshold: Fraction below which a tile is "hole".
+        object_label_id: Int. If set, only computes holes for this object.
 
     Returns:
         (H, W) float32 array: per-pixel coverage score [0, 1].
@@ -266,6 +268,11 @@ def detect_spatial_holes(
     H, W = camera.image_height, camera.image_width
     anchor_xyz = get_anchor_positions(gaussians)
     anchor_scales = np.exp(get_anchor_scales(gaussians)[:, :3])  # voxel extents
+
+    if object_label_id is not None:
+        mask = gaussians.label_ids.squeeze(-1).cpu().numpy() == object_label_id
+        anchor_xyz = anchor_xyz[mask]
+        anchor_scales = anchor_scales[mask]
 
     R, T = camera.R, camera.T.flatten()
     K = np.array([[camera.fx, 0, camera.cx], [0, camera.fy, camera.cy], [0, 0, 1]], dtype=np.float32)
