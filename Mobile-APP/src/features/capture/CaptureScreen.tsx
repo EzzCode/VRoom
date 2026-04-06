@@ -52,6 +52,8 @@ export default function CaptureScreen() {
 
   // Ref mirrors isRecording for worklet access
   const isRecordingRef = useRef(false);
+  const isBlurryRef = useRef(false);
+  const blurScoreRef = useRef(0);
 
   const handleCapture = useCallback(async () => {
     if (!camera.current || !isRecordingRef.current) return;
@@ -81,13 +83,13 @@ export default function CaptureScreen() {
           up: [0, 1, 0],
           timestamp: Date.now(),
         },
-        blurScore,
+        blurScore: blurScoreRef.current,
         index: keyframes.length,
       });
     } catch (e) {
       console.error('Failed to save frame:', e);
     }
-  }, [extractor, currentPose, addKeyframe, keyframes.length, blurScore]);
+  }, [extractor, currentPose, addKeyframe, keyframes.length]);
 
   useEffect(() => {
     if (!isRecording) {
@@ -95,7 +97,7 @@ export default function CaptureScreen() {
     }
 
     const intervalId = setInterval(() => {
-      if (!isBlurry) {
+      if (!isBlurryRef.current) {
         void handleCapture();
       }
     }, captureIntervalMs);
@@ -103,10 +105,12 @@ export default function CaptureScreen() {
     return () => {
       clearInterval(intervalId);
     };
-  }, [isRecording, isBlurry, handleCapture]);
+  }, [isRecording, handleCapture]);
 
   const updateBlurOnJS = useRunOnJS(
     (blurry: boolean, score: number) => {
+      isBlurryRef.current = blurry;
+      blurScoreRef.current = score;
       setIsBlurry(blurry);
       setBlurScore(score);
     },

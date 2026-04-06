@@ -20,7 +20,7 @@
     "expo-file-system": "~55.0.11",
     "expo-status-bar": "~55.0.4",
     "react": "19.2.0",
-    "react-native": "0.83.2",
+    "react-native": "^0.83.4",
     "react-native-fast-opencv": "^0.4.8",
     "react-native-reanimated": "4.2.1",
     "react-native-vision-camera": "^4.7.3",
