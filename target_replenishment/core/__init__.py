@@ -1,1 +1,2 @@
-# Core modules: renderer, inpainting, projection, optimizer
+# target_replenishment.core
+"""Core pipeline modules for object enhancement."""

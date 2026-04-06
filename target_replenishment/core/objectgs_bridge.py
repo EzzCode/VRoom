@@ -93,6 +93,12 @@ def load_gaussians(model_path: str, iteration: int = -1) -> tuple:
     gaussians.load_ply(str(ply_path))
     gaussians.load_mlp_checkpoints(str(iter_dir))
     gaussians.id_encoder = OneHotEncoder(gaussians.label_ids)
+    
+    # Initialize the optimizer strictly matching original training configuration 
+    # to prevent gradient explosiveness and catastrophic forgetting.
+    if hasattr(op, 'position_lr_init'):
+        gaussians.training_setup(op)
+        
     gaussians.eval()
     gaussians.explicit_gs = False
 

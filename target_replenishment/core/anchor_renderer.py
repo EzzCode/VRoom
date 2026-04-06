@@ -1,31 +1,35 @@
 """
 VRoom Anchor Renderer — Defect Detection & Anchor View Rendering (Production)
 
-Detects two types of defects in a trained ObjectGS 2DGS model:
-  Type A — Holes:    Missing geometry (transparent gaps via spatial coverage).
-  Type B — Degraded: Low-quality rendered regions (via anchor ID map + normal map).
+Designed for the object enhancement pipeline: select an object, separate it from
+the scene, find defects, and prepare inpainting data for model re-training.
 
-Places an optimal "anchor" camera facing the worst defect region and renders
-RGB, Alpha, Normal, Depth maps plus a unified repair mask for downstream inpainting.
+Detects two types of defects in a trained ObjectGS 2DGS model:
+  Type A — Holes:    Missing geometry (low alpha inside object's projected bbox).
+  Type B — Degraded: Low-quality rendered regions (via Anchor ID map + normal map).
+
+Selects anchor views from the perspective graph of existing training cameras
+and provides neighbor views for downstream content propagation.
 
 Architecture decisions:
-  - Normal consistency scored on RENDERED normal map, not anchor quaternions.
-  - Holes detected spatially by projecting anchor bboxes (no MLP invocation).
-  - Degraded regions identified via Anchor ID buffer from patched ObjectGS render.
-  - The rasterizer will be reimplemented later — until then, ObjectGS gsplat is used.
+  - Multi-view quality scoring from top-K training cameras (max per anchor).
+  - Holes detected via alpha inside projected object bbox (not full-scene comparison).
+  - Normal wrinkling scored on interior surface pixels, silhouette edges excluded.
+  - Defect indices returned in GLOBAL anchor space for consistency.
+  - Anchor view selected with frontality weighting (head-on to defect surface).
 
 Public API:
-    compute_quality_scores(gaussians, pipe, anchor_camera)  -> per-anchor scores
-    detect_defect_regions(anchor_xyz, quality_scores)        -> ranked defect regions
-    compute_anchor_camera(defect_region, anchor_xyz)         -> camera params dict
-    render_anchor_views(gaussians, camera, pipe, ...)        -> renders + repair mask
-    run_anchor_detection(model_path, ...)                    -> end-to-end pipeline
+    compute_quality_scores(gaussians, pipe, cam, ...)  -> per-anchor scores
+    detect_defect_regions(anchor_xyz, scores, ...)     -> ranked defect regions
+    render_anchor_views(gaussians, cam, pipe, ...)     -> renders + repair mask
+    run_anchor_detection(model_path, ...)              -> end-to-end pipeline
 """
 
 __all__ = [
+    'compute_static_signals',
     'compute_quality_scores',
+    'compute_multiview_quality',
     'detect_defect_regions',
-    'compute_anchor_camera',
     'render_anchor_views',
     'run_anchor_detection',
 ]
@@ -54,94 +58,88 @@ def compute_static_signals(gaussians, n_neighbors: int = 16) -> dict:
     """Compute camera-independent geometry signals for all anchors once."""
     from target_replenishment.core.objectgs_bridge import get_anchor_positions, get_anchor_scales
     from scipy.spatial import cKDTree
-    
+
     xyz = get_anchor_positions(gaussians)
     n = len(xyz)
-    signals = {}
-    
-    # Scale signal (raw values)
+
     scales = get_anchor_scales(gaussians)
-    signals['scale_raw'] = np.exp(scales).max(axis=1)
-    
-    # Density signal (raw values)
+    scale_raw = np.exp(scales).max(axis=1)
+
     logger.info(f"Building KD-tree for {n} anchors (n_neighbors={n_neighbors})...")
     tree = cKDTree(xyz)
     distances, _ = tree.query(xyz, k=n_neighbors + 1)
-    signals['density_raw'] = distances[:, 1:].mean(axis=1)
-    
-    return signals
+    density_raw = distances[:, 1:].mean(axis=1)
+
+    return {'scale_raw': scale_raw, 'density_raw': density_raw}
 
 
 def compute_quality_scores(
     gaussians,
     pipe_config,
-    anchor_camera_params: dict,
+    camera_params: dict,
     n_neighbors: int = 16,
     weights: dict | None = None,
-    object_id: int = None,
+    object_id: int | None = None,
     static_signals: dict | None = None,
 ) -> np.ndarray:
     """Compute per-anchor quality score in [0, 1]. 0 = perfect, 1 = severely degraded.
 
-    Three geometry signals (no MLP invocation):
-        1. scale         — Oversized anchor voxels (blur/smear)
-        2. density       — Sparse neighborhoods (isolated anchors)
-        3. spatial_holes — Low spatial coverage from projected anchor bboxes
-
-    Two render-based signals (single render from anchor camera):
-        4. alpha_deficit  — Low alpha at anchor projections in the rendered view
-        5. normal_wrinkling — High-frequency normal deviations in rendered normal map
-
-    Signal 4 and 5 require the anchor camera → a single render, not multi-view probes.
+    Scores anchors from a SINGLE camera view. For full-object coverage,
+    call this from multiple views and take max per anchor.
 
     Returns:
-        (N,) float32 quality score per anchor.
+        (N_global,) float32 quality score per anchor.
     """
     import torch
     from target_replenishment.core.objectgs_bridge import (
-        get_anchor_positions, create_virtual_camera, render_view, 
+        get_anchor_positions, create_virtual_camera, render_view,
         detect_spatial_holes, build_anchor_id_map,
     )
 
-    VALID_SIGNAL_KEYS = {'scale', 'density', 'spatial_holes', 'alpha_deficit', 'normal_wrinkling'}
+    VALID_KEYS = {'scale', 'density', 'spatial_holes', 'alpha_deficit', 'normal_wrinkling'}
     if weights:
-        if not set(weights).issubset(VALID_SIGNAL_KEYS):
-            raise ValueError(f"Unknown weight keys: {set(weights) - VALID_SIGNAL_KEYS}")
+        if not set(weights).issubset(VALID_KEYS):
+            raise ValueError(f"Unknown weight keys: {set(weights) - VALID_KEYS}")
     else:
-        weights = {'scale': 0.20, 'density': 0.20, 'spatial_holes': 0.25, 'alpha_deficit': 0.20, 'normal_wrinkling': 0.15}
+        # NOTE: alpha_deficit removed from defaults — it was self-fulfilling:
+        # anchors not visible from this camera get alpha=0 → score=1.0 → masked.
+        # Holes are already caught by _detect_object_holes separately.
+        weights = {
+            'scale': 0.15, 'density': 0.20, 'spatial_holes': 0.30,
+            'normal_wrinkling': 0.35,
+        }
+
+    sum_w = sum(weights.values())
+    if sum_w != 1.0:
+        weights = {k: v / sum_w for k, v in weights.items()}
 
     xyz = get_anchor_positions(gaussians)
     n = len(xyz)
     signals = {}
     bg_color = torch.zeros(3, dtype=torch.float32, device="cuda")
-    
-    # Use provided static signals or compute them
+
+    # ── Static signals ──
     if static_signals and 'scale_raw' in static_signals:
-        scale_raw = static_signals['scale_raw']
-        density_raw = static_signals['density_raw']
+        scale_raw, density_raw = static_signals['scale_raw'], static_signals['density_raw']
     else:
         static = compute_static_signals(gaussians, n_neighbors=n_neighbors)
-        scale_raw = static['scale_raw']
-        density_raw = static['density_raw']
+        scale_raw, density_raw = static['scale_raw'], static['density_raw']
 
-    # Local normalization logic
     if object_id is not None:
         labels = gaussians.label_ids.squeeze(-1).cpu().numpy()
-        mask = labels == object_id
-        
+        obj_mask = labels == object_id
         signals['scale'] = np.zeros(n, dtype=np.float32)
         signals['density'] = np.zeros(n, dtype=np.float32)
-        
-        if mask.any():
-            signals['scale'][mask] = _normalize_signal(scale_raw[mask])
-            signals['density'][mask] = _normalize_signal(density_raw[mask])
+        if obj_mask.any():
+            signals['scale'][obj_mask] = _normalize_signal(scale_raw[obj_mask])
+            signals['density'][obj_mask] = _normalize_signal(density_raw[obj_mask])
     else:
         signals['scale'] = _normalize_signal(scale_raw)
         signals['density'] = _normalize_signal(density_raw)
 
-    # ── Signal 3: Spatial holes ──
-    R, T, K = anchor_camera_params['R'], anchor_camera_params['T'], anchor_camera_params['K']
-    W, H = anchor_camera_params['width'], anchor_camera_params['height']
+    # ── Spatial holes (absolute coverage) ──
+    R, T, K = camera_params['R'], camera_params['T'], camera_params['K']
+    W, H = camera_params['width'], camera_params['height']
     cam = create_virtual_camera(R, T, K, W, H)
 
     coverage = detect_spatial_holes(gaussians, cam, coverage_threshold=0.1, object_label_id=object_id)
@@ -150,54 +148,57 @@ def compute_quality_scores(
     in_idx = np.where(visible)[0]
     if len(in_idx) > 0:
         anchor_coverage[in_idx] = coverage[vi[in_idx], ui[in_idx]]
-    signals['spatial_holes'] = 1.0 - anchor_coverage
+    signals['spatial_holes'] = np.clip(1.0 - anchor_coverage, 0, 1)
 
-    # ── Signal 4 & 5: Render-based (single render from anchor camera) ──
+    # ── Render-based signals (single render) ──
     result = render_view(gaussians, cam, pipe_config, bg_color, object_label_id=object_id)
 
-    # Alpha deficit: low alpha where anchors project
     alpha_map = result['alpha'].squeeze(0).cpu().numpy()
     anchor_alpha = np.zeros(n, dtype=np.float32)
     if len(in_idx) > 0:
         anchor_alpha[in_idx] = alpha_map[vi[in_idx], ui[in_idx]]
     signals['alpha_deficit'] = 1.0 - anchor_alpha
 
-    # Normal wrinkling: per-anchor normal roughness from rendered normal map
-    normal_map = result.get('normal')
-    if normal_map is not None:
-        normal_np = normal_map.squeeze(0).cpu().numpy()  # (H, W, 3)
+    # Normal wrinkling (silhouette edges excluded)
+    normal_tensor = result.get('normal')
+    if normal_tensor is not None:
+        normal_np = normal_tensor.squeeze(0).cpu().numpy()
         if normal_np.ndim == 4:
             normal_np = normal_np.squeeze(0)
-        if normal_np.shape[0] == 3:  # channel-first → channel-last
+        if normal_np.shape[0] == 3:
             normal_np = np.transpose(normal_np, (1, 2, 0))
 
-        # Compute per-pixel normal gradient magnitude (Laplacian proxy for wrinkling)
-        nx = normal_np[..., 0]
-        ny = normal_np[..., 1]
-        nz = normal_np[..., 2]
-        laplacian = (
-            np.abs(cv2.Laplacian(nx, cv2.CV_32F)) +
-            np.abs(cv2.Laplacian(ny, cv2.CV_32F)) +
-            np.abs(cv2.Laplacian(nz, cv2.CV_32F))
-        )
+        # Mathematically principled surface roughness: 1 - ||E[N]||
+        # A perfectly smooth surface has locally identical normals, so ||E[N]|| = 1.
+        # Wildly varying normals average towards 0, resulting in roughness near 1.
+        w_size = max(3, int(min(H, W) * 0.005))
+        mean_nx = cv2.boxFilter(normal_np[..., 0], cv2.CV_32F, (w_size, w_size))
+        mean_ny = cv2.boxFilter(normal_np[..., 1], cv2.CV_32F, (w_size, w_size))
+        mean_nz = cv2.boxFilter(normal_np[..., 2], cv2.CV_32F, (w_size, w_size))
+        
+        mean_norm = np.clip(np.sqrt(mean_nx**2 + mean_ny**2 + mean_nz**2), 0.0, 1.0)
+        laplacian = 1.0 - mean_norm
 
-        # Map per-pixel wrinkling to per-anchor via anchor ID map
+        alpha_grad = np.abs(cv2.Laplacian(alpha_map, cv2.CV_32F))
+        silhouette_mask = alpha_grad > 0.1
+        interior_mask = (alpha_map > 0.5) & (~silhouette_mask)
+        laplacian[~interior_mask] = 0.0
+
         anchor_id_map = build_anchor_id_map(result, H, W, n)
         anchor_wrinkling = np.zeros(n, dtype=np.float32)
         anchor_wrinkle_count = np.zeros(n, dtype=np.float32)
-        
-        # Fast vectorized aggregation
-        valid_px = anchor_id_map >= 0
-        aids = anchor_id_map[valid_px]
-        lap_vals = laplacian[valid_px]
-        np.add.at(anchor_wrinkling, aids, lap_vals)
-        np.add.at(anchor_wrinkle_count, aids, 1.0)
-        
-        mask = anchor_wrinkle_count > 0
-        anchor_wrinkling[mask] /= anchor_wrinkle_count[mask]
+
+        valid_px = (anchor_id_map >= 0) & interior_mask
+        if valid_px.any():
+            aids = anchor_id_map[valid_px]
+            np.add.at(anchor_wrinkling, aids, laplacian[valid_px])
+            np.add.at(anchor_wrinkle_count, aids, 1.0)
+
+        nonzero = anchor_wrinkle_count > 0
+        anchor_wrinkling[nonzero] /= anchor_wrinkle_count[nonzero]
         signals['normal_wrinkling'] = _normalize_signal(anchor_wrinkling)
     else:
-        signals['normal_wrinkling'] = np.full(n, 0.5, dtype=np.float32)
+        signals['normal_wrinkling'] = np.full(n, 0.0, dtype=np.float32)
 
     # ── Weighted combination ──
     quality_score = np.zeros(n, dtype=np.float32)
@@ -213,6 +214,42 @@ def compute_quality_scores(
     return quality_score
 
 
+def compute_multiview_quality(
+    gaussians,
+    pipe_config,
+    camera_list: list,
+    object_id: int = None,
+    static_signals: dict | None = None,
+    **kwargs,
+) -> np.ndarray:
+    """Score from multiple training cameras, take MAX per anchor.
+
+    This ensures all sides of the object are checked — defects on the back
+    are caught by cameras facing that side.
+
+    Args:
+        camera_list: List of camera param dicts (from get_top_k_views_for_object).
+
+    Returns:
+        (N_global,) float32 worst-case quality score per anchor.
+    """
+    from target_replenishment.core.objectgs_bridge import get_anchor_positions
+    n = len(get_anchor_positions(gaussians))
+    combined = np.zeros(n, dtype=np.float32)
+
+    for i, cam_params in enumerate(camera_list):
+        logger.info(f"Scoring from view {i+1}/{len(camera_list)}...")
+        scores = compute_quality_scores(
+            gaussians, pipe_config, cam_params,
+            object_id=object_id, static_signals=static_signals, **kwargs,
+        )
+        combined = np.maximum(combined, scores)
+
+    logger.info(f"Multi-view scores: mean={combined.mean():.3f}, "
+                f"degraded (>0.5): {(combined > 0.5).sum()} / {n}")
+    return combined
+
+
 # ── Defect Region Detection ──────────────────────────────────────────────────
 
 def detect_defect_regions(
@@ -221,53 +258,60 @@ def detect_defect_regions(
     quality_threshold: float = 0.2,
     voxel_size: float = 0.02,
     min_region_anchors: int = 10,
+    global_index_offset: np.ndarray = None,
 ) -> list:
-    """Detect coherent defect regions by clustering degraded anchors + holes.
+    """Detect coherent defect regions by clustering degraded anchors.
 
-    Returns list of dicts sorted by severity (worst first):
-        'center', 'boundary_indices', 'defect_indices', 'severity'
+    Holes are detected from the rendered alpha map in render_anchor_views(),
+    not here. This function only clusters degraded anchors in 3D.
+
+    Args:
+        anchor_xyz: (N,3) positions of this object's anchors.
+        quality_scores: (N,) scores for this object's anchors.
+        global_index_offset: (N,) int array mapping local indices → global anchor IDs.
+            If provided, defect_indices in the output will be GLOBAL indices.
+
+    Returns:
+        List of dicts sorted by severity (worst first):
+            'center', 'boundary_indices', 'defect_indices', 'severity'
     """
     from scipy.spatial import cKDTree
-    from scipy.ndimage import label as ndimage_label, binary_fill_holes
+    from scipy.ndimage import label as ndimage_label
 
     n = len(anchor_xyz)
-    is_degraded = quality_scores > quality_threshold
+    # Adaptive Z-score thresholding: target the top ~15% worst anchors mathematically
+    mean_score = quality_scores.mean()
+    std_score = quality_scores.std()
+    effective_threshold = mean_score + 1.0 * std_score
+
+    is_degraded = quality_scores > effective_threshold
     degraded_indices = np.where(is_degraded)[0]
     healthy_indices = np.where(~is_degraded)[0]
     logger.info(f"Degraded anchors: {len(degraded_indices)} / {n}")
 
-    xyz_min = anchor_xyz.min(axis=0)
-    xyz_max = anchor_xyz.max(axis=0)
-    # Dynamically cap voxel grid to ~100^3 to avoid OOM from stray floaters
-    max_extent = np.max(xyz_max - xyz_min)
-    effective_voxel_size = max(voxel_size, max_extent / 100.0)
-    
-    xyz_min -= effective_voxel_size
-    xyz_max += effective_voxel_size
-    grid_dims = np.ceil((xyz_max - xyz_min) / effective_voxel_size).astype(int)
+    if len(degraded_indices) == 0:
+        return []
 
-    voxel_coords = ((anchor_xyz - xyz_min) / effective_voxel_size).astype(int)
+    # Dynamic voxel grid (capped at ~100^3) robust to floater artifacts
+    xyz_min = np.percentile(anchor_xyz, 1, axis=0)
+    xyz_max = np.percentile(anchor_xyz, 99, axis=0)
+    max_extent = np.max(xyz_max - xyz_min)
+    effective_vs = max(voxel_size, max_extent / 100.0)
+
+    xyz_min -= effective_vs
+    xyz_max += effective_vs
+    grid_dims = np.ceil((xyz_max - xyz_min) / effective_vs).astype(int)
+
+    voxel_coords = ((anchor_xyz - xyz_min) / effective_vs).astype(int)
     voxel_coords = np.clip(voxel_coords, 0, grid_dims - 1)
 
-    occupancy = np.zeros(grid_dims, dtype=np.uint8)
-    occupancy[voxel_coords[:, 0], voxel_coords[:, 1], voxel_coords[:, 2]] = 1
-
+    # Cluster degraded anchors only
     degraded_occ = np.zeros(grid_dims, dtype=np.uint8)
-    if len(degraded_indices) > 0:
-        deg_vox = voxel_coords[degraded_indices]
-        degraded_occ[deg_vox[:, 0], deg_vox[:, 1], deg_vox[:, 2]] = 1
+    deg_vox = voxel_coords[degraded_indices]
+    degraded_occ[deg_vox[:, 0], deg_vox[:, 1], deg_vox[:, 2]] = 1
 
-    healthy_occ = occupancy.copy()
-    healthy_occ[degraded_occ == 1] = 0
-    
-    # Use conservative structural hole filling to avoid convex hulls spanning across concave background gaps (e.g. bananas).
-    filled = binary_fill_holes(healthy_occ)
-        
-    hole_voxels = filled & (~healthy_occ.astype(bool))
-    defect_map = hole_voxels | degraded_occ.astype(bool)
-
-    labeled_array, num_features = ndimage_label(defect_map)
-    logger.info(f"Found {num_features} raw defect cluster(s)")
+    labeled_array, num_features = ndimage_label(degraded_occ)
+    logger.info(f"Found {num_features} degraded cluster(s)")
     if num_features == 0:
         return []
 
@@ -275,123 +319,46 @@ def detect_defect_regions(
     regions = []
 
     for region_id in range(1, num_features + 1):
-        region_voxels = np.argwhere(labeled_array == region_id)
-        region_world = region_voxels * effective_voxel_size + xyz_min
+        labels_at = labeled_array[deg_vox[:, 0], deg_vox[:, 1], deg_vox[:, 2]]
+        local_defect_idx = degraded_indices[labels_at == region_id]
 
-        if len(degraded_indices) > 0:
-            deg_voxels = voxel_coords[degraded_indices]
-            labels_at = labeled_array[deg_voxels[:, 0], deg_voxels[:, 1], deg_voxels[:, 2]]
-            region_defect_indices = degraded_indices[labels_at == region_id]
-        else:
-            region_defect_indices = np.array([], dtype=int)
-
-        if len(region_voxels) < min_region_anchors:
+        if len(local_defect_idx) < min_region_anchors:
             continue
 
-        center = region_world.mean(axis=0).astype(np.float32)
+        defect_xyz = anchor_xyz[local_defect_idx]
+        center = defect_xyz.mean(axis=0).astype(np.float32)
 
-        boundary_indices = np.array([], dtype=int)
-        if tree_healthy is not None and len(region_world) > 0:
-            nearby_sets = tree_healthy.query_ball_point(region_world, r=effective_voxel_size * 3)
+        # Healthy boundary ring
+        boundary_local = np.array([], dtype=int)
+        if tree_healthy is not None:
+            nearby_sets = tree_healthy.query_ball_point(defect_xyz, r=effective_vs * 3)
             nearby_flat = set()
             for s in nearby_sets:
                 nearby_flat.update(s)
             if nearby_flat:
-                boundary_indices = healthy_indices[np.array(sorted(nearby_flat))]
+                boundary_local = healthy_indices[np.array(sorted(nearby_flat))]
 
-        severity = (
-            len(region_voxels) * quality_scores[region_defect_indices].mean()
-            if len(region_defect_indices) > 0 else float(len(region_voxels))
-        )
+        severity = len(local_defect_idx) * quality_scores[local_defect_idx].mean()
+
+        # Convert to global indices if mapping provided
+        if global_index_offset is not None:
+            defect_global = global_index_offset[local_defect_idx]
+            boundary_global = global_index_offset[boundary_local] if len(boundary_local) > 0 else np.array([], dtype=int)
+        else:
+            defect_global = local_defect_idx
+            boundary_global = boundary_local
 
         regions.append({
             'center': center,
-            'boundary_indices': boundary_indices,
-            'defect_indices': region_defect_indices,
+            'boundary_indices': boundary_global,
+            'defect_indices': defect_global,
+            'defect_indices_local': local_defect_idx,
             'severity': severity,
-            'cavity_points': region_world,
         })
 
     regions.sort(key=lambda r: r['severity'], reverse=True)
     logger.info(f"Detected {len(regions)} defect region(s) after filtering")
     return regions
-
-
-# ── Anchor Camera Placement ──────────────────────────────────────────────────
-
-def compute_anchor_camera(
-    defect_region: dict,
-    anchor_xyz: np.ndarray,
-    fov_deg: float = 60.0,
-    render_size: int = 512,
-    standoff_multiplier: float = 2.5,
-    force_view_dir=None,
-) -> dict:
-    """Place a virtual camera looking at the defect region.
-
-    Returns dict: 'R', 'T', 'K', 'width', 'height', 'position', 'look_at', 'up'
-    """
-    defect_center = defect_region['center']
-    obj_centroid = anchor_xyz.mean(axis=0)
-
-    if force_view_dir is not None:
-        view_dir = np.array(force_view_dir, dtype=np.float32)
-        view_dir = view_dir / np.linalg.norm(view_dir)
-        dist = np.linalg.norm(defect_center - obj_centroid)
-    else:
-        view_dir = defect_center - obj_centroid
-        dist = np.linalg.norm(view_dir)
-        if dist < 1e-8:
-            view_dir = np.array([0, 0, 1], dtype=np.float32)
-        else:
-            view_dir = view_dir / dist
-
-    boundary_idx = defect_region['boundary_indices']
-    if len(boundary_idx) > 3:
-        boundary_pos = anchor_xyz[boundary_idx]
-        extent = np.linalg.norm(boundary_pos.max(axis=0) - boundary_pos.min(axis=0))
-        centered = boundary_pos - boundary_pos.mean(axis=0)
-        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-        pca_up = Vt[1]
-    else:
-        extent = dist * 0.5
-        pca_up = np.array([0, 1, 0], dtype=np.float32)
-
-    standoff = max(extent * standoff_multiplier, 0.5)
-    cam_pos = defect_center + view_dir * standoff
-
-    forward = -view_dir
-    right = np.cross(forward, pca_up)
-    if np.linalg.norm(right) < 1e-6:
-        pca_up = np.array([0, 0, 1], dtype=np.float32)
-        right = np.cross(forward, pca_up)
-    right /= np.linalg.norm(right)
-    up = np.cross(right, forward)
-    up /= np.linalg.norm(up)
-
-    R = np.stack([right, -up, forward], axis=0).astype(np.float32)
-    T = (-R @ cam_pos).reshape(3, 1).astype(np.float32)
-
-    fov_rad = np.radians(fov_deg)
-    focal = render_size / (2 * np.tan(fov_rad / 2))
-    K = np.array([
-        [focal, 0, render_size / 2.0],
-        [0, focal, render_size / 2.0],
-        [0, 0, 1],
-    ], dtype=np.float32)
-
-    logger.info(
-        f"Anchor camera: pos={cam_pos}, standoff={standoff:.3f}, "
-        f"fov={fov_deg}°, res={render_size}x{render_size}"
-    )
-
-    return {
-        'R': R, 'T': T, 'K': K,
-        'width': render_size, 'height': render_size,
-        'position': cam_pos.astype(np.float32),
-        'look_at': defect_center.astype(np.float32),
-        'up': up.astype(np.float32),
-    }
 
 
 # ── Anchor View Rendering + Repair Mask ──────────────────────────────────────
@@ -402,19 +369,23 @@ def render_anchor_views(
     pipe_config,
     bg_color,
     quality_scores: np.ndarray,
-    defect_region: dict,
-    quality_threshold: float = 0.5,
+    quality_threshold: float = 0.2,
     mask_dilation_px: int = 5,
-    object_id: int = None,
+    object_id: int | None = None,
+    object_anchors: np.ndarray = None,
 ) -> dict:
     """Render anchor view via ObjectGS and build the repair mask.
 
     Repair mask = union of:
-      - Hole pixels (alpha < 0.5)
-      - Degraded anchor pixels (from Anchor ID map + quality scores)
+      - Type A: Hole pixels (low alpha inside object's projected bounding box)
+      - Type B: Degraded anchor pixels (from Anchor ID map + quality scores)
 
-    Returns dict: 'rgb', 'alpha', 'normal', 'depth', 'repair_mask',
-                  'anchor_id_map', 'camera_params'
+    Args:
+        quality_scores: GLOBAL-space per-anchor quality scores.
+        object_anchors: (N_obj, 3) object anchor positions for bbox hole detection.
+
+    Returns dict: 'rgb_full', 'rgb_isolated', 'rgb', 'alpha', 'normal', 'depth',
+                  'repair_mask', 'anchor_id_map', 'camera_params'
     """
     import torch
     from target_replenishment.core.objectgs_bridge import (
@@ -424,13 +395,11 @@ def render_anchor_views(
 
     H, W = camera_params['height'], camera_params['width']
     R, T, K = camera_params['R'], camera_params['T'], camera_params['K']
-
     cam = create_virtual_camera(R, T, K, W, H)
-    
-    # Render 1: Isolated object (for pristine hole detection and isolated alpha/normals)
+
+    # Render 1: Isolated object
     result_obj = render_view(gaussians, cam, pipe_config, bg_color, object_label_id=object_id)
-    
-    # Render 2: Full scene context (for the inpainter's background reference)
+    # Render 2: Full scene context
     result_full = render_view(gaussians, cam, pipe_config, bg_color)
 
     n_anchors = get_anchor_positions(gaussians).shape[0]
@@ -444,54 +413,40 @@ def render_anchor_views(
         if result_obj['normal'] is not None
         else np.zeros((H, W, 3), dtype=np.float32)
     )
+    if normal_np.ndim > 2 and normal_np.shape[0] == 3:
+        normal_np = np.transpose(normal_np, (1, 2, 0))
     depth_np = result_obj['depth'].squeeze(0).cpu().numpy() if result_obj['depth'] is not None else None
 
-    # Build Anchor ID map
     anchor_id_map = build_anchor_id_map(result_obj, H, W, n_anchors)
 
     # ── Repair mask ──
-    # Type A: holes from alpha bounded by 3D cavity
-    hole_mask = np.zeros((H, W), dtype=np.uint8)
-    if 'cavity_points' in defect_region and len(defect_region['cavity_points']) > 0:
-        pts = defect_region['cavity_points']
-        
-        # Internal helper for projecting points
-        ui, vi, in_bounds = _project_points(pts, R, T, K, W, H)
-        
-        cavity_mask = np.zeros((H, W), dtype=np.uint8)
-        if in_bounds.sum() > 0:
-            import cv2
-            u_vis, v_vis = ui[in_bounds], vi[in_bounds]
-            cavity_mask[v_vis, u_vis] = 1
-            # Adjust kernel size based on projected cavity extent
-            k_size = max(3, int(W * 0.015))
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
-            cavity_mask = cv2.dilate(cavity_mask, kernel, iterations=2)
-            # Erode to snap strictly inside the body
-            cavity_mask = cv2.erode(cavity_mask, kernel, iterations=4)
-        
-        # Hole is where the ISOLATED object alpha is transparent, BUT we are physically inside the 3D cavity
-        hole_mask = ((alpha_np < 0.5) & (cavity_mask == 1)).astype(np.uint8)
-    else:
-        hole_mask = (alpha_np < 0.5).astype(np.uint8)
 
-    # Type B: degraded anchors via Vectorized Indexing
+    # Type A: Holes via object bounding box projection (strict: alpha < 0.1)
+    hole_mask = _detect_object_holes(alpha_np, object_anchors, R, T, K, W, H)
+
+    # Type B: Degraded anchors via Anchor ID map (vectorized)
     degraded_mask = np.zeros((H, W), dtype=np.uint8)
     valid_px = anchor_id_map >= 0
-    if valid_px.any():
-        aids = anchor_id_map[valid_px]
-        # Strip out background spillage by enforcing alpha > 0.1
-        is_degraded = (quality_scores[aids] > quality_threshold) & (alpha_np[valid_px] > 0.1)
+    aids = anchor_id_map[valid_px] if valid_px.any() else np.array([], dtype=int)
+    if len(aids) > 0:
+        local_scores = quality_scores[aids]
+        # Dynamically scale defect threshold per-view based purely on visible geometry
+        effective_threshold = local_scores.mean() + 1.0 * local_scores.std()
+            
+        is_degraded = (local_scores > effective_threshold) & (alpha_np[valid_px] > 0.3)
         degraded_mask[valid_px] = is_degraded.astype(np.uint8)
 
     repair_mask = np.clip(hole_mask + degraded_mask, 0, 1).astype(np.uint8)
 
     if mask_dilation_px > 0:
-        import cv2
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (mask_dilation_px * 2 + 1, mask_dilation_px * 2 + 1)
         )
         repair_mask = cv2.dilate(repair_mask, kernel, iterations=1)
+        repair_mask = cv2.morphologyEx(repair_mask, cv2.MORPH_CLOSE, kernel)
+
+    # Mask size cap removed to align with PAInpainter's requirement for
+    # large solid canvas masks during structural completion.
 
     logger.info(
         f"Repair mask: {repair_mask.sum()}/{H*W} px "
@@ -502,7 +457,7 @@ def render_anchor_views(
     return {
         'rgb_full': rgb_full_np,
         'rgb_isolated': rgb_isolated_np,
-        'rgb': rgb_full_np,  # Expose full scene context as primary RGB for downstream
+        'rgb': rgb_full_np,
         'alpha': alpha_np,
         'normal': normal_np,
         'depth': depth_np,
@@ -516,6 +471,7 @@ def render_anchor_views(
 
 def _project_points(points, R, T, K, W, H):
     """Project Nx3 world points to pixel coords. Returns (u, v, in_bounds)."""
+    assert T.size == 3, f"T must have size 3, got {T.size}"
     T_flat = T.flatten()
     cam_pts = (R @ points.T).T + T_flat[np.newaxis, :]
     z = cam_pts[:, 2]
@@ -533,116 +489,191 @@ def _project_points(points, R, T, K, W, H):
     return ui, vi, in_bounds
 
 
+def _detect_object_holes(
+    alpha_np: np.ndarray,
+    object_anchors: np.ndarray | None,
+    R, T, K, W, H,
+) -> np.ndarray:
+    """Detect holes by finding empty areas immediately adjacent or inside the object.
+
+    Instead of a Convex Hull (which incorrectly fills large natural empty spaces like 
+    the curve of a crescent), we dilate the existing valid alpha mask. Pockets of low
+    alpha within this dilated perimeter are flagged as holes.
+    """
+    hole_mask = np.zeros((H, W), dtype=np.uint8)
+
+    # 1. Create binary mask of existing geometry
+    valid_geometry = (alpha_np > 0.3).astype(np.uint8)
+    
+    if valid_geometry.sum() < 10:
+        return hole_mask
+        
+    # 2. Dilate the geometry to form a tight boundary "halo"
+    # The halo bridges small physical cracks but rejects massive empty concavities
+    k_size = max(5, int(min(W, H) * 0.02))  # ~2% of image size, e.g. 21px for 1080p
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
+    
+    # Close first to bridge small gaps, then dilate
+    closed_geom = cv2.morphologyEx(valid_geometry, cv2.MORPH_CLOSE, kernel)
+    dilated_geom = cv2.dilate(closed_geom, kernel, iterations=1)
+    
+    # 3. Holes = empty space (alpha < 0.1) INSIDE the dilated boundary
+    hole_mask = ((alpha_np < 0.1) & (dilated_geom == 1)).astype(np.uint8)
+
+    return hole_mask
+
+
 # ── Full Pipeline ────────────────────────────────────────────────────────────
 
 def run_anchor_detection(
     model_path: str,
     output_dir: str | None = None,
     iteration: int = -1,
-    quality_threshold: float = 0.5,
-    fov_deg: float = 60.0,
+    quality_threshold: float = 0.2,
     render_size: int = 512,
+    target_object_ids: list | None = None,
+    scoring_views: int = 4,
+    mask_dilation_px: int = 35,
 ) -> dict:
-    """Run the complete anchor detection pipeline per-object in the scene.
+    """Run the complete object enhancement detection pipeline.
 
-    Flow: load model → extract unique labels → for each object:
-          preliminary camera array → spatial quality scoring → detect regions
-          → final camera at worst defect → render + mask.
+    Flow: load model → build perspective graph → for each target object:
+          multi-view quality scoring → detect defect regions (global indices)
+          → select anchor view with frontality → render + mask.
+
+    Args:
+        target_object_ids: Optional list of object IDs to process. None = all objects.
+        scoring_views: Number of training cameras to use for multi-view scoring.
+
+    Returns:
+        Dict keyed by object_id, each containing:
+            'quality_scores'   — (N_obj,) per-anchor scores
+            'defect_regions'   — list of defect dicts (GLOBAL indices)
+            'camera_params'    — anchor view camera + neighbor list
+            'renders'          — rendered views + repair mask
+            'obj_mask'         — (N_global,) bool mask of this object's anchors
     """
     import torch
     from target_replenishment.core.objectgs_bridge import load_gaussians, get_anchor_positions
+    from target_replenishment.core.perspective_graph import (
+        build_perspective_graph, select_anchor_views, get_top_k_views_for_object,
+    )
 
     gaussians, pipe_config = load_gaussians(model_path, iteration)
     anchor_xyz_global = get_anchor_positions(gaussians)
     bg_color = torch.zeros(3, dtype=torch.float32, device="cuda")
 
-    # Compute static signals once for the entire scene
+    cameras_json = Path(model_path) / "cameras.json"
+    graph = build_perspective_graph(str(cameras_json), anchor_xyz_global, overlap_method='visibility')
+
     static_signals = compute_static_signals(gaussians)
 
     labels = gaussians.label_ids.squeeze(-1).cpu().numpy()
-    unique_ids = np.unique(labels)
-    
+    process_ids = target_object_ids if target_object_ids is not None else np.unique(labels).tolist()
+
     results = {}
 
-    for obj_id in unique_ids:
+    for obj_id in process_ids:
         logger.info(f"--- Processing Object ID {obj_id} ---")
         obj_mask = (labels == obj_id)
         anchor_xyz = anchor_xyz_global[obj_mask]
-        
+        global_indices = np.where(obj_mask)[0]  # mapping: local → global
+
         if len(anchor_xyz) < 10:
             logger.warning(f"Object {obj_id} has too few anchors ({len(anchor_xyz)}). Skipping.")
             continue
 
-        # Preliminary multi-view quality assessment
-        centroid = anchor_xyz.mean(axis=0)
-        prelim_region = {
-            'center': centroid.astype(np.float32),
-            'boundary_indices': np.array([], dtype=int),
-            'defect_indices': np.array([], dtype=int),
-            'severity': 0.0,
-        }
-        
-        # Use the raw global static signals
-        obj_static = {
-            'scale_raw': static_signals['scale_raw'],
-            'density_raw': static_signals['density_raw'],
-        }
-        
-        # Maintain scores in global space
-        quality_scores_full = np.zeros(len(anchor_xyz_global), dtype=np.float32)
-        # 6-axis orthogonal sweep
-        view_dirs = [[1,0,0], [-1,0,0], [0,1,0], [0,-1,0], [0,0,1], [0,0,-1]] 
-        
-        for vd in view_dirs:
-            prelim_camera = compute_anchor_camera(
-                prelim_region, anchor_xyz, fov_deg=fov_deg, render_size=render_size,
-                standoff_multiplier=1.2, force_view_dir=vd
-            )
-            # Normalization happens locally INSIDE compute_quality_scores based on obj_id
-            scores = compute_quality_scores(
-                gaussians, pipe_config, prelim_camera, object_id=obj_id, 
-                static_signals=obj_static
-            )
-            # Update object's quality scores in the global array
-            quality_scores_full[obj_mask] = np.maximum(quality_scores_full[obj_mask], scores[obj_mask])
-
-        # Defect detection on the object's subset
-        quality_scores_obj = quality_scores_full[obj_mask]
-        defect_regions = detect_defect_regions(anchor_xyz, quality_scores_obj, quality_threshold)
-
-        if not defect_regions:
-            logger.warning(f"No defect regions detected for object {obj_id} — model appears healthy.")
-            results[obj_id] = {
-                'quality_scores': quality_scores_obj,
-                'defect_regions': [], 'camera_params': None, 'renders': None,
-            }
+        # Multi-view quality scoring from top-K training cameras
+        top_cams = get_top_k_views_for_object(graph, anchor_xyz, k=scoring_views)
+        if not top_cams:
+            logger.warning(f"No training cameras see object {obj_id}. Skipping.")
             continue
 
-        # Final anchor camera at worst defect
-        primary = defect_regions[0]
-        camera_params = compute_anchor_camera(
-            primary, anchor_xyz, fov_deg=fov_deg, render_size=render_size,
+        cam_param_list = [
+            {'R': c['R'], 'T': c['T'], 'K': c['K'].copy(), 'width': c['width'], 'height': c['height']}
+            for c in top_cams
+        ]
+
+        quality_scores_global = compute_multiview_quality(
+            gaussians, pipe_config, cam_param_list,
+            object_id=obj_id, static_signals=static_signals,
+        )
+        quality_scores_obj = quality_scores_global[obj_mask]
+
+        # Defect detection (returns GLOBAL indices via global_indices mapping)
+        defect_regions = detect_defect_regions(
+            anchor_xyz, quality_scores_obj, quality_threshold,
+            global_index_offset=global_indices,
         )
 
-        # Render uses full global arrays
+        if not defect_regions:
+            logger.warning(f"No degraded clusters for {obj_id}. Using object center to check for structural holes.")
+            primary = {
+                'center': anchor_xyz.mean(axis=0).astype(np.float32),
+                'boundary_indices': np.array([]),
+                'defect_indices': np.array([]),
+                'severity': 0.0
+            }
+            defect_regions = [primary]
+        else:
+            primary = defect_regions[0]
+        defect_normal = _estimate_defect_normal(anchor_xyz_global, primary)
+        anchor_views = select_anchor_views(graph, primary['center'], k=4, defect_normal=defect_normal)
+        anchor_cam = anchor_views[0]
+
+        camera_params = {
+            'R': anchor_cam['R'], 'T': anchor_cam['T'], 'K': anchor_cam['K'],
+            'width': anchor_cam['width'], 'height': anchor_cam['height'],
+            'position': anchor_cam['position'],
+            'look_at': primary['center'],
+            'neighbors': anchor_views[1:],
+        }
+
         renders = render_anchor_views(
             gaussians, camera_params, pipe_config, bg_color,
-            quality_scores_full, primary, quality_threshold=quality_threshold,
-            object_id=obj_id,
+            quality_scores_global, quality_threshold=quality_threshold,
+            object_id=obj_id, object_anchors=anchor_xyz,
+            mask_dilation_px=mask_dilation_px,
         )
 
         if output_dir:
-            obj_out_dir = str(Path(output_dir) / f"obj_{obj_id}")
-            _save_outputs(renders, obj_out_dir)
+            _save_outputs(renders, str(Path(output_dir) / f"obj_{obj_id}"))
 
         results[obj_id] = {
             'quality_scores': quality_scores_obj,
             'defect_regions': defect_regions,
             'camera_params': camera_params,
             'renders': renders,
+            'obj_mask': obj_mask,
         }
 
     return results
+
+
+def _estimate_defect_normal(anchor_xyz_global, defect_region):
+    """Estimate the surface normal at a defect region for frontality scoring.
+
+    Uses PCA on boundary anchors: the smallest principal component
+    is approximately the surface normal.
+    """
+    boundary_idx = defect_region['boundary_indices']
+    if len(boundary_idx) < 5:
+        return None
+
+    boundary_pts = anchor_xyz_global[boundary_idx]
+    centered = boundary_pts - boundary_pts.mean(axis=0)
+    try:
+        _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        # Smallest eigenvector ≈ surface normal
+        normal = Vt[2]
+        # Orient normal to point away from object center (towards outside/camera)
+        object_center = anchor_xyz_global.mean(axis=0)
+        to_outside = boundary_pts.mean(axis=0) - object_center
+        if np.dot(normal, to_outside) < 0:
+            normal = -normal
+        return normal.astype(np.float32)
+    except np.linalg.LinAlgError:
+        return None
 
 
 def _save_outputs(renders: dict, output_dir: str):
@@ -652,22 +683,23 @@ def _save_outputs(renders: dict, output_dir: str):
 
     cv2.imwrite(str(out / "anchor_rgb.png"), cv2.cvtColor(renders['rgb_full'], cv2.COLOR_RGB2BGR))
     cv2.imwrite(str(out / "anchor_rgb_isolated.png"), cv2.cvtColor(renders['rgb_isolated'], cv2.COLOR_RGB2BGR))
-    cv2.imwrite(str(out / "anchor_mask.png"), renders['repair_mask'] * 255)
+    cv2.imwrite(str(out / "anchor_mask.png"), (renders['repair_mask'] * 255).astype(np.uint8))
 
-    normal_vis = ((renders['normal'] + 1) * 0.5 * 255).astype(np.uint8)
-    cv2.imwrite(str(out / "anchor_normal.png"), normal_vis)
+    normal_np = renders['normal']
+    if normal_np is not None and normal_np.size > 0:
+        normal_vis = ((normal_np + 1) * 0.5 * 255).clip(0, 255).astype(np.uint8)
+        cv2.imwrite(str(out / "anchor_normal.png"), normal_vis)
 
     if renders['depth'] is not None:
         depth = renders['depth'].squeeze()
         depth_vis = (depth / (depth.max() + 1e-6) * 255).astype(np.uint8)
         cv2.imwrite(str(out / "anchor_depth.png"), depth_vis)
 
-    # Anchor ID visualization
     aid = renders['anchor_id_map']
-    aid_vis = ((aid - aid.min()) / (aid.max() - aid.min() + 1e-6) * 255).astype(np.uint8)
-    cv2.imwrite(str(out / "anchor_id_map.png"), cv2.applyColorMap(aid_vis, cv2.COLORMAP_TURBO))
+    if aid.max() > aid.min():
+        aid_vis = ((aid - aid.min()) / (aid.max() - aid.min() + 1e-6) * 255).astype(np.uint8)
+        cv2.imwrite(str(out / "anchor_id_map.png"), cv2.applyColorMap(aid_vis, cv2.COLORMAP_TURBO))
 
-    # Overlay (using full scene so context is visible)
     overlay = renders['rgb_full'].copy()
     overlay[renders['repair_mask'] == 1] = [255, 0, 0]
     blended = cv2.addWeighted(overlay, 0.5, renders['rgb_full'], 0.5, 0)
@@ -687,13 +719,14 @@ if __name__ == "__main__":
         datefmt='%H:%M:%S',
     )
 
-    parser = argparse.ArgumentParser(description="VRoom Anchor Renderer — Defect Detection")
+    parser = argparse.ArgumentParser(description="VRoom Anchor Renderer — Object Enhancement")
     parser.add_argument("--model_path", required=True, help="ObjectGS training output directory")
-    parser.add_argument("--iteration", type=int, default=-1, help="Training iteration to load (-1 = latest)")
-    parser.add_argument("--output_dir", default="anchor_output", help="Directory for output images")
-    parser.add_argument("--quality_threshold", type=float, default=0.2, help="Quality score cutoff (0-1)")
-    parser.add_argument("--fov", type=float, default=60.0, help="FOV in degrees")
-    parser.add_argument("--render_size", type=int, default=512, help="Render resolution (square)")
+    parser.add_argument("--iteration", type=int, default=-1)
+    parser.add_argument("--output_dir", default="anchor_output")
+    parser.add_argument("--quality_threshold", type=float, default=0.2)
+    parser.add_argument("--render_size", type=int, default=512)
+    parser.add_argument("--object_ids", type=int, nargs='+', default=None, help="Specific object IDs to process (default: all)")
+    parser.add_argument("--scoring_views", type=int, default=4, help="Number of training views for multi-view scoring")
     args = parser.parse_args()
 
     results = run_anchor_detection(
@@ -701,18 +734,17 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         iteration=args.iteration,
         quality_threshold=args.quality_threshold,
-        fov_deg=args.fov,
         render_size=args.render_size,
+        target_object_ids=args.object_ids,
+        scoring_views=args.scoring_views,
     )
 
     for obj_id, result in results.items():
         if result['defect_regions']:
             print(f"\n--- Object {obj_id} ---")
             print(f"Detected {len(result['defect_regions'])} defect region(s).")
-            print(f"Primary defect center: {result['defect_regions'][0]['center']}")
-            print(f"Anchor camera position: {result['camera_params']['position']}")
-            print(f"Repair mask coverage: {result['renders']['repair_mask'].sum()} px")
+            print(f"Primary defect: {result['defect_regions'][0]['center']}")
+            print(f"Global defect anchors: {len(result['defect_regions'][0]['defect_indices'])}")
+            print(f"Repair mask: {result['renders']['repair_mask'].sum()} px")
         else:
-            print(f"\n--- Object {obj_id} ---")
-            print("No defects detected. Model appears healthy.")
-
+            print(f"\n--- Object {obj_id} --- Healthy")
