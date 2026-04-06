@@ -1,0 +1,731 @@
+import torch
+import numpy as np
+# Sphere example
+# Create a 3D voxel grid using PyTorch
+
+N = 64
+voxel_grid_torch = torch.zeros((N, N, N))
+
+# Or using NumPy
+voxel_grid_numpy = np.zeros((N, N, N))
+
+# Example: populate with some data (e.g., implicit function values)
+# For a sphere centered at the middle
+center = N / 2
+radius = 20
+
+for i in range(N):
+    for j in range(N):
+        for k in range(N):
+            distance = np.sqrt((i - center)**2 + (j - center)**2 + (k - center)**2)
+            voxel_grid_numpy[i, j, k] = radius - distance
+
+############################################
+
+# Torus example
+# N = 64
+# # Create coordinates going from -1.0 to 1.0
+# coords = np.linspace(-1, 1, N)
+# x, y, z = np.meshgrid(coords, coords, coords, indexing='ij')
+
+# # Torus parameters
+# R_major = 0.5  # Distance from center of hole to center of tube
+# r_minor = 0.2  # Radius of the tube itself
+
+# # The exact mathematical SDF formula for a Torus
+# distance = np.sqrt((np.sqrt(x**2 + y**2) - R_major)**2 + z**2)
+
+# # Invert it so the inside of the donut is positive
+# voxel_grid_numpy = r_minor - distance
+
+############################################
+
+# Box example
+
+# N = 64
+# coords = np.linspace(-1, 1, N)
+# x, y, z = np.meshgrid(coords, coords, coords, indexing='ij')
+
+# box_size = 0.5
+
+# # The SDF formula for a Box (maximum distance along any axis)
+# distance = np.maximum(np.maximum(np.abs(x), np.abs(y)), np.abs(z))
+
+# # Invert it
+# voxel_grid_numpy = box_size - distance
+
+############################################
+
+# Merging objects
+
+# N = 64
+# coords = np.linspace(-1, 1, N)
+# x, y, z = np.meshgrid(coords, coords, coords, indexing='ij')
+
+# # Sphere 1 (shifted left)
+# dist1 = np.sqrt((x + 0.3)**2 + y**2 + z**2)
+# # Sphere 2 (shifted right)
+# dist2 = np.sqrt((x - 0.3)**2 + y**2 + z**2)
+
+# # Use np.minimum to combine the SDFs (this is a mathematical "Union")
+# combined_distance = np.minimum(dist1, dist2)
+
+# # Invert and give them a radius of 0.35 so they overlap and melt together
+# voxel_grid_numpy = 0.35 - combined_distance
+
+############################################
+
+
+# Convert NumPy to PyTorch if needed
+voxel_grid_torch = torch.from_numpy(voxel_grid_numpy).float()
+
+print(f"Voxel grid shape: {voxel_grid_torch.shape}")
+
+import matplotlib.pyplot as plt
+
+# Grab the slice exactly halfway through the Z-axis (index 32)
+middle_slice = voxel_grid_numpy[:, :, int(N/2)]
+
+# Plot it using a color map where 0 is white, positive is red, negative is blue
+plt.figure(figsize=(6, 6))
+plt.title("2D Slice of the 3D Voxel Grid")
+plt.imshow(middle_slice, cmap='RdBu', origin='lower')
+plt.colorbar(label="SDF Value (Distance to surface)")
+
+# Draw a contour line exactly where the value is 0 (the surface)
+plt.contour(middle_slice, levels=[0], colors='black', linewidths=2)
+
+plt.show()
+
+# ============================================================================
+# Marching Cubes Lookup Tables
+# ============================================================================
+#
+# Corner ordering follows:
+#     i = cube index [0, 7]
+#     x = (i & 1) >> 0
+#     y = (i & 2) >> 1
+#     z = (i & 4) >> 2
+#
+# Vertex layout:
+#
+#            6             7
+#            +-------------+
+#          / |           / |
+#        /   |         /   |
+#    2 +-----+-------+  3  |
+#      |   4 +-------+-----+ 5
+#      |   /         |   /
+#      | /           | /
+#    0 +-------------+ 1
+
+# 3D offsets for each corner relative to voxel origin (x, y, z)
+# Corner i is at ( i&1, (i&2)>>1, (i&4)>>2 )
+CORNER_OFFSETS = [
+    (0, 0, 0),  # corner 0
+    (1, 0, 0),  # corner 1
+    (0, 1, 0),  # corner 2
+    (1, 1, 0),  # corner 3
+    (0, 0, 1),  # corner 4
+    (1, 0, 1),  # corner 5
+    (0, 1, 1),  # corner 6
+    (1, 1, 1),  # corner 7
+]
+
+# Pair of vertex indices for each edge on the cube
+EDGE_CORNERS = [
+    (0, 1),   # edge 0
+    (1, 3),   # edge 1
+    (3, 2),   # edge 2
+    (2, 0),   # edge 3
+    (4, 5),   # edge 4
+    (5, 7),   # edge 5
+    (7, 6),   # edge 6
+    (6, 4),   # edge 7
+    (0, 4),   # edge 8
+    (1, 5),   # edge 9
+    (3, 7),   # edge 10
+    (2, 6),   # edge 11
+]
+
+# For each MC case, a mask of edge indices that need to be split
+EdgeMasks = [
+    0x0, 0x109, 0x203, 0x30a, 0x80c, 0x905, 0xa0f, 0xb06,
+    0x406, 0x50f, 0x605, 0x70c, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x99, 0x393, 0x29a, 0x99c, 0x895, 0xb9f, 0xa96,
+    0x596, 0x49f, 0x795, 0x69c, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x33, 0x13a, 0xa3c, 0xb35, 0x83f, 0x936,
+    0x636, 0x73f, 0x435, 0x53c, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0xaa, 0xbac, 0xaa5, 0x9af, 0x8a6,
+    0x7a6, 0x6af, 0x5a5, 0x4ac, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc, 0x1c5, 0x2cf, 0x3c6,
+    0xcc6, 0xdcf, 0xec5, 0xfcc, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0x15c, 0x55, 0x35f, 0x256,
+    0xd56, 0xc5f, 0xf55, 0xe5c, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0x2fc, 0x3f5, 0xff, 0x1f6,
+    0xef6, 0xfff, 0xcf5, 0xdfc, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0x36c, 0x265, 0x16f, 0x66,
+    0xf66, 0xe6f, 0xd65, 0xc6c, 0x76a, 0x663, 0x569, 0x460,
+    0x460, 0x569, 0x663, 0x76a, 0xc6c, 0xd65, 0xe6f, 0xf66,
+    0x66, 0x16f, 0x265, 0x36c, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0xdfc, 0xcf5, 0xfff, 0xef6,
+    0x1f6, 0xff, 0x3f5, 0x2fc, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0xe5c, 0xf55, 0xc5f, 0xd56,
+    0x256, 0x35f, 0x55, 0x15c, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0xfcc, 0xec5, 0xdcf, 0xcc6,
+    0x3c6, 0x2cf, 0x1c5, 0xcc, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x4ac, 0x5a5, 0x6af, 0x7a6,
+    0x8a6, 0x9af, 0xaa5, 0xbac, 0xaa, 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x53c, 0x435, 0x73f, 0x636,
+    0x936, 0x83f, 0xb35, 0xa3c, 0x13a, 0x33, 0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0x69c, 0x795, 0x49f, 0x596,
+    0xa96, 0xb9f, 0x895, 0x99c, 0x29a, 0x393, 0x99, 0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0x70c, 0x605, 0x50f, 0x406,
+    0xb06, 0xa0f, 0x905, 0x80c, 0x30a, 0x203, 0x109, 0x0,
+]
+
+# When TriangleTable gives you [0, 3, 8, -1], it is giving you a set of instructions:
+# "Draw a single triangle. Put the first corner of the triangle on Edge 0, the second corner
+#  on Edge 3, and the third corner on Edge 8."
+
+# Step A: The Discovery (EdgeMasks)
+# The code looks at EdgeMasks[1] and sees 0x109.
+# The binary math tells code: "the surface slices through Edge 0, Edge 3, and Edge 8."
+
+# Step B: The Interpolation (Finding the Coordinates)
+# Because the code knows Edge 0 is sliced, it triggers interpolate_vertex function.
+
+# It looks at the actual SDF numbers on the two ends of Edge 0.
+
+# It calculates the exact continuous coordinate, for example (10.5, 12.0, 15.0).
+
+# It repeats this for Edge 3 and gets (10.0, 12.2, 15.0).
+
+# It repeats this for Edge 8 and gets (10.0, 12.0, 15.8).
+
+# Step C: The Temporary Storage
+# The code needs a place to hold these coordinates while it finishes looking at the cube.
+# It puts them in a temporary mini-list called edge_vertices that has 12 empty slots
+# (one for each edge).
+
+# edge_vertices[0] = (10.5, 12.0, 15.0)
+
+# edge_vertices[3] = (10.0, 12.2, 15.0)
+
+# edge_vertices[8] = (10.0, 12.0, 15.8)
+
+# Step D: Drawing the Triangle (TriangleTable)
+# Now, the code looks at TriangleTable[1] and reads the instruction: [0, 3, 8, -1].
+# It translates that instruction by looking inside its temporary storage:
+
+# Get the coordinate saved in slot 0 -> (10.5, 12.0, 15.0)
+
+# Get the coordinate saved in slot 3 -> (10.0, 12.2, 15.0)
+
+# Get the coordinate saved in slot 8 -> (10.0, 12.0, 15.8)
+
+# For each MC case, a list of triangles specified as triples of edge indices, terminated by -1
+TriangleTable = [
+    [-1],
+    [0, 3, 8, -1],
+    [0, 9, 1, -1],
+    [3, 8, 1, 1, 8, 9, -1],
+    [2, 11, 3, -1],
+    [8, 0, 11, 11, 0, 2, -1],
+    [3, 2, 11, 1, 0, 9, -1],
+    [11, 1, 2, 11, 9, 1, 11, 8, 9, -1],
+    [1, 10, 2, -1],
+    [0, 3, 8, 2, 1, 10, -1],
+    [10, 2, 9, 9, 2, 0, -1],
+    [8, 2, 3, 8, 10, 2, 8, 9, 10, -1],
+    [11, 3, 10, 10, 3, 1, -1],
+    [10, 0, 1, 10, 8, 0, 10, 11, 8, -1],
+    [9, 3, 0, 9, 11, 3, 9, 10, 11, -1],
+    [8, 9, 11, 11, 9, 10, -1],
+    [4, 8, 7, -1],
+    [7, 4, 3, 3, 4, 0, -1],
+    [4, 8, 7, 0, 9, 1, -1],
+    [1, 4, 9, 1, 7, 4, 1, 3, 7, -1],
+    [8, 7, 4, 11, 3, 2, -1],
+    [4, 11, 7, 4, 2, 11, 4, 0, 2, -1],
+    [0, 9, 1, 8, 7, 4, 11, 3, 2, -1],
+    [7, 4, 11, 11, 4, 2, 2, 4, 9, 2, 9, 1, -1],
+    [4, 8, 7, 2, 1, 10, -1],
+    [7, 4, 3, 3, 4, 0, 10, 2, 1, -1],
+    [10, 2, 9, 9, 2, 0, 7, 4, 8, -1],
+    [10, 2, 3, 10, 3, 4, 3, 7, 4, 9, 10, 4, -1],
+    [1, 10, 3, 3, 10, 11, 4, 8, 7, -1],
+    [10, 11, 1, 11, 7, 4, 1, 11, 4, 1, 4, 0, -1],
+    [7, 4, 8, 9, 3, 0, 9, 11, 3, 9, 10, 11, -1],
+    [7, 4, 11, 4, 9, 11, 9, 10, 11, -1],
+    [9, 4, 5, -1],
+    [9, 4, 5, 8, 0, 3, -1],
+    [4, 5, 0, 0, 5, 1, -1],
+    [5, 8, 4, 5, 3, 8, 5, 1, 3, -1],
+    [9, 4, 5, 11, 3, 2, -1],
+    [2, 11, 0, 0, 11, 8, 5, 9, 4, -1],
+    [4, 5, 0, 0, 5, 1, 11, 3, 2, -1],
+    [5, 1, 4, 1, 2, 11, 4, 1, 11, 4, 11, 8, -1],
+    [1, 10, 2, 5, 9, 4, -1],
+    [9, 4, 5, 0, 3, 8, 2, 1, 10, -1],
+    [2, 5, 10, 2, 4, 5, 2, 0, 4, -1],
+    [10, 2, 5, 5, 2, 4, 4, 2, 3, 4, 3, 8, -1],
+    [11, 3, 10, 10, 3, 1, 4, 5, 9, -1],
+    [4, 5, 9, 10, 0, 1, 10, 8, 0, 10, 11, 8, -1],
+    [11, 3, 0, 11, 0, 5, 0, 4, 5, 10, 11, 5, -1],
+    [4, 5, 8, 5, 10, 8, 10, 11, 8, -1],
+    [8, 7, 9, 9, 7, 5, -1],
+    [3, 9, 0, 3, 5, 9, 3, 7, 5, -1],
+    [7, 0, 8, 7, 1, 0, 7, 5, 1, -1],
+    [7, 5, 3, 3, 5, 1, -1],
+    [5, 9, 7, 7, 9, 8, 2, 11, 3, -1],
+    [2, 11, 7, 2, 7, 9, 7, 5, 9, 0, 2, 9, -1],
+    [2, 11, 3, 7, 0, 8, 7, 1, 0, 7, 5, 1, -1],
+    [2, 11, 1, 11, 7, 1, 7, 5, 1, -1],
+    [8, 7, 9, 9, 7, 5, 2, 1, 10, -1],
+    [10, 2, 1, 3, 9, 0, 3, 5, 9, 3, 7, 5, -1],
+    [7, 5, 8, 5, 10, 2, 8, 5, 2, 8, 2, 0, -1],
+    [10, 2, 5, 2, 3, 5, 3, 7, 5, -1],
+    [8, 7, 5, 8, 5, 9, 11, 3, 10, 3, 1, 10, -1],
+    [5, 11, 7, 10, 11, 5, 1, 9, 0, -1],
+    [11, 5, 10, 7, 5, 11, 8, 3, 0, -1],
+    [5, 11, 7, 10, 11, 5, -1],
+    [6, 7, 11, -1],
+    [7, 11, 6, 3, 8, 0, -1],
+    [6, 7, 11, 0, 9, 1, -1],
+    [9, 1, 8, 8, 1, 3, 6, 7, 11, -1],
+    [3, 2, 7, 7, 2, 6, -1],
+    [0, 7, 8, 0, 6, 7, 0, 2, 6, -1],
+    [6, 7, 2, 2, 7, 3, 9, 1, 0, -1],
+    [6, 7, 8, 6, 8, 1, 8, 9, 1, 2, 6, 1, -1],
+    [11, 6, 7, 10, 2, 1, -1],
+    [3, 8, 0, 11, 6, 7, 10, 2, 1, -1],
+    [0, 9, 2, 2, 9, 10, 7, 11, 6, -1],
+    [6, 7, 11, 8, 2, 3, 8, 10, 2, 8, 9, 10, -1],
+    [7, 10, 6, 7, 1, 10, 7, 3, 1, -1],
+    [8, 0, 7, 7, 0, 6, 6, 0, 1, 6, 1, 10, -1],
+    [7, 3, 6, 3, 0, 9, 6, 3, 9, 6, 9, 10, -1],
+    [6, 7, 10, 7, 8, 10, 8, 9, 10, -1],
+    [11, 6, 8, 8, 6, 4, -1],
+    [6, 3, 11, 6, 0, 3, 6, 4, 0, -1],
+    [11, 6, 8, 8, 6, 4, 1, 0, 9, -1],
+    [1, 3, 9, 3, 11, 6, 9, 3, 6, 9, 6, 4, -1],
+    [2, 8, 3, 2, 4, 8, 2, 6, 4, -1],
+    [4, 0, 6, 6, 0, 2, -1],
+    [9, 1, 0, 2, 8, 3, 2, 4, 8, 2, 6, 4, -1],
+    [9, 1, 4, 1, 2, 4, 2, 6, 4, -1],
+    [4, 8, 6, 6, 8, 11, 1, 10, 2, -1],
+    [1, 10, 2, 6, 3, 11, 6, 0, 3, 6, 4, 0, -1],
+    [11, 6, 4, 11, 4, 8, 10, 2, 9, 2, 0, 9, -1],
+    [10, 4, 9, 6, 4, 10, 11, 2, 3, -1],
+    [4, 8, 3, 4, 3, 10, 3, 1, 10, 6, 4, 10, -1],
+    [1, 10, 0, 10, 6, 0, 6, 4, 0, -1],
+    [4, 10, 6, 9, 10, 4, 0, 8, 3, -1],
+    [4, 10, 6, 9, 10, 4, -1],
+    [6, 7, 11, 4, 5, 9, -1],
+    [4, 5, 9, 7, 11, 6, 3, 8, 0, -1],
+    [1, 0, 5, 5, 0, 4, 11, 6, 7, -1],
+    [11, 6, 7, 5, 8, 4, 5, 3, 8, 5, 1, 3, -1],
+    [3, 2, 7, 7, 2, 6, 9, 4, 5, -1],
+    [5, 9, 4, 0, 7, 8, 0, 6, 7, 0, 2, 6, -1],
+    [3, 2, 6, 3, 6, 7, 1, 0, 5, 0, 4, 5, -1],
+    [6, 1, 2, 5, 1, 6, 4, 7, 8, -1],
+    [10, 2, 1, 6, 7, 11, 4, 5, 9, -1],
+    [0, 3, 8, 4, 5, 9, 11, 6, 7, 10, 2, 1, -1],
+    [7, 11, 6, 2, 5, 10, 2, 4, 5, 2, 0, 4, -1],
+    [8, 4, 7, 5, 10, 6, 3, 11, 2, -1],
+    [9, 4, 5, 7, 10, 6, 7, 1, 10, 7, 3, 1, -1],
+    [10, 6, 5, 7, 8, 4, 1, 9, 0, -1],
+    [4, 3, 0, 7, 3, 4, 6, 5, 10, -1],
+    [10, 6, 5, 8, 4, 7, -1],
+    [9, 6, 5, 9, 11, 6, 9, 8, 11, -1],
+    [11, 6, 3, 3, 6, 0, 0, 6, 5, 0, 5, 9, -1],
+    [11, 6, 5, 11, 5, 0, 5, 1, 0, 8, 11, 0, -1],
+    [11, 6, 3, 6, 5, 3, 5, 1, 3, -1],
+    [9, 8, 5, 8, 3, 2, 5, 8, 2, 5, 2, 6, -1],
+    [5, 9, 6, 9, 0, 6, 0, 2, 6, -1],
+    [1, 6, 5, 2, 6, 1, 3, 0, 8, -1],
+    [1, 6, 5, 2, 6, 1, -1],
+    [2, 1, 10, 9, 6, 5, 9, 11, 6, 9, 8, 11, -1],
+    [9, 0, 1, 3, 11, 2, 5, 10, 6, -1],
+    [11, 0, 8, 2, 0, 11, 10, 6, 5, -1],
+    [3, 11, 2, 5, 10, 6, -1],
+    [1, 8, 3, 9, 8, 1, 5, 10, 6, -1],
+    [6, 5, 10, 0, 1, 9, -1],
+    [8, 3, 0, 5, 10, 6, -1],
+    [6, 5, 10, -1],
+    [10, 5, 6, -1],
+    [0, 3, 8, 6, 10, 5, -1],
+    [10, 5, 6, 9, 1, 0, -1],
+    [3, 8, 1, 1, 8, 9, 6, 10, 5, -1],
+    [2, 11, 3, 6, 10, 5, -1],
+    [8, 0, 11, 11, 0, 2, 5, 6, 10, -1],
+    [1, 0, 9, 2, 11, 3, 6, 10, 5, -1],
+    [5, 6, 10, 11, 1, 2, 11, 9, 1, 11, 8, 9, -1],
+    [5, 6, 1, 1, 6, 2, -1],
+    [5, 6, 1, 1, 6, 2, 8, 0, 3, -1],
+    [6, 9, 5, 6, 0, 9, 6, 2, 0, -1],
+    [6, 2, 5, 2, 3, 8, 5, 2, 8, 5, 8, 9, -1],
+    [3, 6, 11, 3, 5, 6, 3, 1, 5, -1],
+    [8, 0, 1, 8, 1, 6, 1, 5, 6, 11, 8, 6, -1],
+    [11, 3, 6, 6, 3, 5, 5, 3, 0, 5, 0, 9, -1],
+    [5, 6, 9, 6, 11, 9, 11, 8, 9, -1],
+    [5, 6, 10, 7, 4, 8, -1],
+    [0, 3, 4, 4, 3, 7, 10, 5, 6, -1],
+    [5, 6, 10, 4, 8, 7, 0, 9, 1, -1],
+    [6, 10, 5, 1, 4, 9, 1, 7, 4, 1, 3, 7, -1],
+    [7, 4, 8, 6, 10, 5, 2, 11, 3, -1],
+    [10, 5, 6, 4, 11, 7, 4, 2, 11, 4, 0, 2, -1],
+    [4, 8, 7, 6, 10, 5, 3, 2, 11, 1, 0, 9, -1],
+    [1, 2, 10, 11, 7, 6, 9, 5, 4, -1],
+    [2, 1, 6, 6, 1, 5, 8, 7, 4, -1],
+    [0, 3, 7, 0, 7, 4, 2, 1, 6, 1, 5, 6, -1],
+    [8, 7, 4, 6, 9, 5, 6, 0, 9, 6, 2, 0, -1],
+    [7, 2, 3, 6, 2, 7, 5, 4, 9, -1],
+    [4, 8, 7, 3, 6, 11, 3, 5, 6, 3, 1, 5, -1],
+    [5, 0, 1, 4, 0, 5, 7, 6, 11, -1],
+    [9, 5, 4, 6, 11, 7, 0, 8, 3, -1],
+    [11, 7, 6, 9, 5, 4, -1],
+    [6, 10, 4, 4, 10, 9, -1],
+    [6, 10, 4, 4, 10, 9, 3, 8, 0, -1],
+    [0, 10, 1, 0, 6, 10, 0, 4, 6, -1],
+    [6, 10, 1, 6, 1, 8, 1, 3, 8, 4, 6, 8, -1],
+    [9, 4, 10, 10, 4, 6, 3, 2, 11, -1],
+    [2, 11, 8, 2, 8, 0, 6, 10, 4, 10, 9, 4, -1],
+    [11, 3, 2, 0, 10, 1, 0, 6, 10, 0, 4, 6, -1],
+    [6, 8, 4, 11, 8, 6, 2, 10, 1, -1],
+    [4, 1, 9, 4, 2, 1, 4, 6, 2, -1],
+    [3, 8, 0, 4, 1, 9, 4, 2, 1, 4, 6, 2, -1],
+    [6, 2, 4, 4, 2, 0, -1],
+    [3, 8, 2, 8, 4, 2, 4, 6, 2, -1],
+    [4, 6, 9, 6, 11, 3, 9, 6, 3, 9, 3, 1, -1],
+    [8, 6, 11, 4, 6, 8, 9, 0, 1, -1],
+    [11, 3, 6, 3, 0, 6, 0, 4, 6, -1],
+    [8, 6, 11, 4, 6, 8, -1],
+    [10, 7, 6, 10, 8, 7, 10, 9, 8, -1],
+    [3, 7, 0, 7, 6, 10, 0, 7, 10, 0, 10, 9, -1],
+    [6, 10, 7, 7, 10, 8, 8, 10, 1, 8, 1, 0, -1],
+    [6, 10, 7, 10, 1, 7, 1, 3, 7, -1],
+    [3, 2, 11, 10, 7, 6, 10, 8, 7, 10, 9, 8, -1],
+    [2, 9, 0, 10, 9, 2, 6, 11, 7, -1],
+    [0, 8, 3, 7, 6, 11, 1, 2, 10, -1],
+    [7, 6, 11, 1, 2, 10, -1],
+    [2, 1, 9, 2, 9, 7, 9, 8, 7, 6, 2, 7, -1],
+    [2, 7, 6, 3, 7, 2, 0, 1, 9, -1],
+    [8, 7, 0, 7, 6, 0, 6, 2, 0, -1],
+    [7, 2, 3, 6, 2, 7, -1],
+    [8, 1, 9, 3, 1, 8, 11, 7, 6, -1],
+    [11, 7, 6, 1, 9, 0, -1],
+    [6, 11, 7, 0, 8, 3, -1],
+    [11, 7, 6, -1],
+    [7, 11, 5, 5, 11, 10, -1],
+    [10, 5, 11, 11, 5, 7, 0, 3, 8, -1],
+    [7, 11, 5, 5, 11, 10, 0, 9, 1, -1],
+    [7, 11, 10, 7, 10, 5, 3, 8, 1, 8, 9, 1, -1],
+    [5, 2, 10, 5, 3, 2, 5, 7, 3, -1],
+    [5, 7, 10, 7, 8, 0, 10, 7, 0, 10, 0, 2, -1],
+    [0, 9, 1, 5, 2, 10, 5, 3, 2, 5, 7, 3, -1],
+    [9, 7, 8, 5, 7, 9, 10, 1, 2, -1],
+    [1, 11, 2, 1, 7, 11, 1, 5, 7, -1],
+    [8, 0, 3, 1, 11, 2, 1, 7, 11, 1, 5, 7, -1],
+    [7, 11, 2, 7, 2, 9, 2, 0, 9, 5, 7, 9, -1],
+    [7, 9, 5, 8, 9, 7, 3, 11, 2, -1],
+    [3, 1, 7, 7, 1, 5, -1],
+    [8, 0, 7, 0, 1, 7, 1, 5, 7, -1],
+    [0, 9, 3, 9, 5, 3, 5, 7, 3, -1],
+    [9, 7, 8, 5, 7, 9, -1],
+    [8, 5, 4, 8, 10, 5, 8, 11, 10, -1],
+    [0, 3, 11, 0, 11, 5, 11, 10, 5, 4, 0, 5, -1],
+    [1, 0, 9, 8, 5, 4, 8, 10, 5, 8, 11, 10, -1],
+    [10, 3, 11, 1, 3, 10, 9, 5, 4, -1],
+    [3, 2, 8, 8, 2, 4, 4, 2, 10, 4, 10, 5, -1],
+    [10, 5, 2, 5, 4, 2, 4, 0, 2, -1],
+    [5, 4, 9, 8, 3, 0, 10, 1, 2, -1],
+    [2, 10, 1, 4, 9, 5, -1],
+    [8, 11, 4, 11, 2, 1, 4, 11, 1, 4, 1, 5, -1],
+    [0, 5, 4, 1, 5, 0, 2, 3, 11, -1],
+    [0, 11, 2, 8, 11, 0, 4, 9, 5, -1],
+    [5, 4, 9, 2, 3, 11, -1],
+    [4, 8, 5, 8, 3, 5, 3, 1, 5, -1],
+    [0, 5, 4, 1, 5, 0, -1],
+    [5, 4, 9, 3, 0, 8, -1],
+    [5, 4, 9, -1],
+    [11, 4, 7, 11, 9, 4, 11, 10, 9, -1],
+    [0, 3, 8, 11, 4, 7, 11, 9, 4, 11, 10, 9, -1],
+    [11, 10, 7, 10, 1, 0, 7, 10, 0, 7, 0, 4, -1],
+    [3, 10, 1, 11, 10, 3, 7, 8, 4, -1],
+    [3, 2, 10, 3, 10, 4, 10, 9, 4, 7, 3, 4, -1],
+    [9, 2, 10, 0, 2, 9, 8, 4, 7, -1],
+    [3, 4, 7, 0, 4, 3, 1, 2, 10, -1],
+    [7, 8, 4, 10, 1, 2, -1],
+    [7, 11, 4, 4, 11, 9, 9, 11, 2, 9, 2, 1, -1],
+    [1, 9, 0, 4, 7, 8, 2, 3, 11, -1],
+    [7, 11, 4, 11, 2, 4, 2, 0, 4, -1],
+    [4, 7, 8, 2, 3, 11, -1],
+    [9, 4, 1, 4, 7, 1, 7, 3, 1, -1],
+    [7, 8, 4, 1, 9, 0, -1],
+    [3, 4, 7, 0, 4, 3, -1],
+    [7, 8, 4, -1],
+    [11, 10, 8, 8, 10, 9, -1],
+    [0, 3, 9, 3, 11, 9, 11, 10, 9, -1],
+    [1, 0, 10, 0, 8, 10, 8, 11, 10, -1],
+    [10, 3, 11, 1, 3, 10, -1],
+    [3, 2, 8, 2, 10, 8, 10, 9, 8, -1],
+    [9, 2, 10, 0, 2, 9, -1],
+    [8, 3, 0, 10, 1, 2, -1],
+    [2, 10, 1, -1],
+    [2, 1, 11, 1, 9, 11, 9, 8, 11, -1],
+    [11, 2, 3, 9, 0, 1, -1],
+    [11, 0, 8, 2, 0, 11, -1],
+    [3, 11, 2, -1],
+    [1, 8, 3, 9, 8, 1, -1],
+    [1, 9, 0, -1],
+    [8, 3, 0, -1],
+    [-1],
+]
+
+
+# ============================================================================
+# Marching Cubes Algorithm
+# ============================================================================
+
+def run_marching_cubes(voxel_grid, N, color_grid=None):
+    """
+    Run the Marching Cubes algorithm on a voxel grid.
+    
+    Inputs:
+    - voxel_grid: (N, N, N) numpy array of SDF values.
+    - N: grid resolution (number of corners along each axis).
+    - color_grid: (optional) (N, N, N, 3) numpy array of RGB colors per corner.
+    
+    Returns:
+    - vertices: list of (x, y, z) tuples.
+    - triangles: list of (v0, v1, v2) index tuples.
+    - vertex_colors: list of (r, g, b) tuples, or None if color_grid not provided.
+    """
+
+    def calculate_cube_index(x, y, z):
+        """
+        Grab the SDF values of the 8 corners for voxel (x, y, z),
+        check which are inside the surface (< 0), and build
+        the 8-bit cube index used for Marching Cubes table lookups.
+
+        Corner i is at offset: ( i&1, (i>>1)&1, (i>>2)&1 )
+        """
+        # 1. Grab the SDF values of the 8 corners for this voxel
+        corner_sdf = []
+        for i in range(8):
+            dx = i & 1
+            dy = (i >> 1) & 1
+            dz = (i >> 2) & 1
+            corner_sdf.append(voxel_grid[x + dx, y + dy, z + dz])
+
+        # 2. Check which ones are < 0  →  inside the surface
+        # 3. Build the 8-bit binary integer to get the cube_index
+        # cube index is a number from 0 to 255 that represents the configuration of the cube
+        # if the corner is inside the surface, the bit is set to 1
+        # if the corner is outside the surface, the bit is set to 0
+        cube_index = 0
+        for i in range(8):
+            if corner_sdf[i] < 0:
+                cube_index |= (1 << i)
+        # example: if corner 0 and 3 only are inside the object
+        # corner 0: if statement is true, 0 | 00000001 = 00000001
+        # corner 3: if statement is true, 00000001 | 00001000 = 00001001
+        # result is 00001001 (decimal 9)
+
+        # cube_index shows which corners are inside and outside, (8-bit master key)
+        # and is used to look up the triangle table 
+        # # To find which edges are intersected, we look up EdgeMasks[cube_index].
+        # EdgeMasks returns a 12-bit number where each bit corresponds to one of the 12 edges.
+        # In that 12-bit mask:
+        # if the bit is 1, the edge is intersected.
+        # if the bit is 0, the edge is not intersected.
+        return cube_index, corner_sdf
+
+    def interpolate_vertex(x, y, z, corner_a, corner_b, val_a, val_b):
+        """
+        Find the exact point on the edge between corner_a and corner_b
+        where the SDF crosses zero, using linear interpolation.
+        Returns an (x, y, z) coordinate.
+        """
+        # Avoid division by zero — if both values are the same, place at midpoint
+        if abs(val_a - val_b) < 1e-10:
+            t = 0.5
+        else:
+            t = val_a / (val_a - val_b)
+
+        ax, ay, az = CORNER_OFFSETS[corner_a]
+        bx, by, bz = CORNER_OFFSETS[corner_b]
+
+        return (
+            x + ax + t * (bx - ax),
+            y + ay + t * (by - ay),
+            z + az + t * (bz - az),
+        )
+
+    vertices = []
+    triangles = []
+    vertex_colors = [] if color_grid is not None else None
+
+    # Loop through every voxel in the grid
+    for z in range(N - 1):
+        for y in range(N - 1):
+            for x in range(N - 1):
+
+                # 5. Calculate the Case Index (0-255)
+                cube_index, corner_sdf = calculate_cube_index(x, y, z)
+                # cube_index indicates which corners are inside and outside
+                # corner_sdf contains the SDF values of the 8 corners to be used later in 
+                # interpolation
+
+                # EdgeMasks returns a 12-bit number where each bit corresponds to one of the
+                # 12 edges. If the bit is 1, the edge is intersected. If 0, the edge is not.
+                # Check the mask. If it's 0, the cube is empty, skip to the next loop
+                if EdgeMasks[cube_index] == 0:
+                    continue
+
+                # 6. Find the Edge Intersections
+                # For each of the 12 edges, check if it is intersected (bit is set)
+                # and interpolate the exact vertex position on that edge.
+                edge_vertices = [None] * 12  # one slot per edge
+                edge_mask = EdgeMasks[cube_index]
+
+                for edge_i in range(12):
+                    if edge_mask & (1 << edge_i): # if the edge is intersected
+                        c_a, c_b = EDGE_CORNERS[edge_i] # get the two corners of the edge
+                        val_a = corner_sdf[c_a]
+                        val_b = corner_sdf[c_b]
+                        vertex = interpolate_vertex(x, y, z, c_a, c_b, val_a, val_b) #apply linear interpolation
+                        edge_vertices[edge_i] = len(vertices) #edge_vertices shows the ID of the vertex
+                        vertices.append(vertex) # the actual vertex is stored in vertices
+
+                        # Interpolate color with the same t-factor as position
+                        if color_grid is not None:
+                            if abs(val_a - val_b) < 1e-10:
+                                t = 0.5
+                            else:
+                                t = val_a / (val_a - val_b)
+                            da = CORNER_OFFSETS[c_a]
+                            db = CORNER_OFFSETS[c_b]
+                            col_a = color_grid[x + da[0], y + da[1], z + da[2]]
+                            col_b = color_grid[x + db[0], y + db[1], z + db[2]]
+                            color = tuple(col_a[ch] + t * (col_b[ch] - col_a[ch]) for ch in range(3))
+                            vertex_colors.append(color)
+
+                # 7. Draw the Triangles
+                # Read edge indices from TriangleTable in groups of 3
+                tri_list = TriangleTable[cube_index]
+                i = 0
+                while i < len(tri_list) and tri_list[i] != -1:
+                    e0 = tri_list[i] # get the first edge index
+                    e1 = tri_list[i + 1] # get the second edge index
+                    e2 = tri_list[i + 2] # get the third edge index
+                    triangles.append((edge_vertices[e0], edge_vertices[e1], edge_vertices[e2])) #append the triangle
+                    i += 3 # move to the next triangle
+
+    # ============================================================================
+    # EXAMPLE: The relationship between `vertices` and `edge_vertices`
+    # ============================================================================
+    #
+    # 1. The warehouse (vertices):
+    # This is the global list of actual 3D coordinates for the whole model.
+    # Let's say it already has 50 points stored from previous cubes.
+    # vertices = [ (0.1, 0.5, 0.2), ... 49 more points ... ]
+    # Currently, len(vertices) == 50.
+    #
+    # 2. The sticky notes (edge_vertices):
+    # This is a temporary list of 12 slots, wiped clean for every new cube.
+    # It links the 12 edges of THIS cube to the global warehouse IDs.
+    # edge_vertices = [None, None, None, None, None, None, ... ]
+    #
+    # 3. The intersection (Interpolation):
+    # Our bitwise math finds the surface slices exactly through Edge 3.
+    # We calculate the exact physical 3D coordinate: new_point = (1.5, 2.0, 3.0)
+    #
+    # 4. The handoff:
+    # We write the next available ID (50) on the sticky note for Edge 3:
+    # edge_vertices[3] = 50  
+    # Then, we permanently store the coordinate in the warehouse:
+    # vertices.append((1.5, 2.0, 3.0))
+    #
+    # 5. Drawing the Triangle:
+    # The TriangleTable blueprint says: "Connect Edge 3, Edge 8, and Edge 1."
+    # We check our sticky notes to find the actual warehouse IDs:
+    # ID_A = edge_vertices[3]  ---> 50
+    # ID_B = edge_vertices[8]  ---> 51 (calculated on a previous loop step)
+    # ID_C = edge_vertices[1]  ---> 52 (calculated on a previous loop step)
+    #
+    # We save the triangle using the global IDs:
+    # triangles.append((50, 51, 52))
+    # later, the OBJ file will read these IDs, get the vertices themselves from "vertices" and draw the triangle
+    # ============================================================================
+
+    return vertices, triangles, vertex_colors
+
+
+def export_obj(vertices, triangles, output_path, vertex_colors=None):
+    """Export mesh to OBJ file. Optionally includes vertex colors (v x y z r g b)."""
+    with open(output_path, "w") as f:
+        f.write("# Marching Cubes output\n")
+        f.write(f"# {len(vertices)} vertices, {len(triangles)} triangles\n\n")
+
+        # Write vertices (with optional RGB color appended)
+        if vertex_colors is not None:
+            for (vx, vy, vz), (r, g, b) in zip(vertices, vertex_colors):
+                f.write(f"v {vx} {vy} {vz} {r:.4f} {g:.4f} {b:.4f}\n")
+        else:
+            for vx, vy, vz in vertices:
+                f.write(f"v {vx} {vy} {vz}\n")
+
+        f.write("\n")
+
+        # Write faces (OBJ uses 1-based indices)
+        for v0, v1, v2 in triangles:
+            f.write(f"f {v0 + 1} {v1 + 1} {v2 + 1}\n")
+
+    print(f"Mesh exported to: {output_path}")
+
+
+# ============================================================================
+# Run the sphere example when this file is executed directly
+# ============================================================================
+if __name__ == "__main__":
+    import os
+
+    # Sphere example
+    N = 64
+    voxel_grid_numpy = np.zeros((N, N, N))
+
+    center = N / 2
+    radius = 20
+
+    for i in range(N):
+        for j in range(N):
+            for k in range(N):
+                distance = np.sqrt((i - center)**2 + (j - center)**2 + (k - center)**2)
+                voxel_grid_numpy[i, j, k] = radius - distance
+
+    import matplotlib.pyplot as plt
+
+    # Grab the slice exactly halfway through the Z-axis (index 32)
+    middle_slice = voxel_grid_numpy[:, :, int(N/2)]
+
+    # Plot it using a color map where 0 is white, positive is red, negative is blue
+    plt.figure(figsize=(6, 6))
+    plt.title("2D Slice of the 3D Voxel Grid")
+    plt.imshow(middle_slice, cmap='RdBu', origin='lower')
+    plt.colorbar(label="SDF Value (Distance to surface)")
+
+    # Draw a contour line exactly where the value is 0 (the surface)
+    plt.contour(middle_slice, levels=[0], colors='black', linewidths=2)
+
+    plt.show()
+
+    # Run Marching Cubes
+    vertices, triangles, _ = run_marching_cubes(voxel_grid_numpy, N)
+    print(f"Marching Cubes complete: {len(vertices)} vertices, {len(triangles)} triangles")
+
+    # Export
+    output_path = os.path.join(os.path.dirname(__file__), "output_mesh.obj")
+    export_obj(vertices, triangles, output_path)
