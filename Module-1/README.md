@@ -49,6 +49,27 @@ VRoom/
 
 Assuming your raw images are in `data/room_scene/images`, run the following steps in order from the `VRoom` system root or `Module-1` directory (paths in examples assume running from the root containing `Module-1`).
 
+### One-Command Runner (Recommended)
+
+Run the full Module-1 pipeline end-to-end:
+
+```bash
+python Module-1/module1_runner.py --data_path data/room_scene
+```
+
+Useful options:
+
+```bash
+# Rebuild COLMAP output
+python Module-1/module1_runner.py --data_path data/room_scene --force_colmap
+
+# Skip expensive earlier stages and only run voting
+python Module-1/module1_runner.py --data_path data/room_scene --skip_colmap --skip_masks --skip_tracking
+
+# Use CPU for SAM (slower, but works without CUDA)
+python Module-1/module1_runner.py --data_path data/room_scene --device cpu
+```
+
 ### Step 1: 3D Reconstruction (COLMAP)
 Extract camera poses and build a sparse point cloud.
 
