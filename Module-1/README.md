@@ -60,6 +60,15 @@ python Module-1/module1_runner.py --data_path data/room_scene
 Useful options:
 
 ```bash
+# Balanced robust defaults (recommended)
+python Module-1/module1_runner.py --data_path data/room_scene --profile balanced
+
+# Conservative profile: avoid accidental object merges
+python Module-1/module1_runner.py --data_path data/room_scene --profile conservative
+
+# Recall profile: keep more candidate masks (for missing objects)
+python Module-1/module1_runner.py --data_path data/room_scene --profile recall
+
 # Rebuild COLMAP output
 python Module-1/module1_runner.py --data_path data/room_scene --force_colmap
 
@@ -68,6 +77,9 @@ python Module-1/module1_runner.py --data_path data/room_scene --skip_colmap --sk
 
 # Use CPU for SAM (slower, but works without CUDA)
 python Module-1/module1_runner.py --data_path data/room_scene --device cpu
+
+# Tighten voting confidence
+python Module-1/module1_runner.py --data_path data/room_scene --min_confidence 0.45 --min_support 4
 ```
 
 ### Step 1: 3D Reconstruction (COLMAP)
@@ -97,8 +109,8 @@ python Module-1/object_tracker.py \
     --mask_dir data/room_scene/sam_output/masks \
     --output_dir data/room_scene/tracked
 ```
-*Note: This generates 8-bit PNG ID maps, where pixel values correspond to object IDs. A value of 0 is background.*
-**Output**: Creates `id_maps/` (8-bit PNGs) and `tracked_vis/` (debug tracking overlays).
+*Note: This generates 16-bit PNG ID maps, where pixel values correspond to object IDs. A value of 0 is background.*
+**Output**: Creates `id_maps/` (16-bit PNGs) and `tracked_vis/` (debug tracking overlays).
 
 ### Step 4: 3D Point Cloud Voting
 Project the 3D points onto the tracked 2D ID maps to label the scene in 3D space.

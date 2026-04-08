@@ -100,6 +100,49 @@ def merge_overlapping_masks(masks, containment_thresh=0.7):
     return [m for m, alive in zip(masks, merged) if alive]
 
 
+def merge_by_proximity(masks, frame_hsv, max_gap_px=15, color_thresh=0.4):
+    """Merge masks that are spatially close AND visually similar.
+
+    Catches adjacent-but-non-overlapping parts of the same object that
+    containment merge misses (e.g. left/right halves of a shoe).
+    """
+    if len(masks) <= 1:
+        return masks
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_gap_px, max_gap_px))
+    alive = [True] * len(masks)
+
+    # Pre-compute dilated masks and histograms
+    dilated = [cv2.dilate(m.astype(np.uint8), kernel) > 0 for m in masks]
+    hists = []
+    for m in masks:
+        h = cv2.calcHist([frame_hsv], [0, 1], m.astype(np.uint8), [32, 32], [0, 180, 0, 256])
+        cv2.normalize(h, h, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+        hists.append(h)
+
+    for i in range(len(masks)):
+        if not alive[i]:
+            continue
+        for j in range(i + 1, len(masks)):
+            if not alive[j]:
+                continue
+            # Check if dilated versions overlap (masks are nearby)
+            if not np.logical_and(dilated[i], dilated[j]).any():
+                continue
+            # Check color similarity
+            dist = cv2.compareHist(hists[i], hists[j], cv2.HISTCMP_BHATTACHARYYA)
+            if dist < color_thresh:
+                masks[i] = np.logical_or(masks[i], masks[j])
+                dilated[i] = cv2.dilate(masks[i].astype(np.uint8), kernel) > 0
+                # Recompute histogram for merged mask
+                h = cv2.calcHist([frame_hsv], [0, 1], masks[i].astype(np.uint8), [32, 32], [0, 180, 0, 256])
+                cv2.normalize(h, h, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+                hists[i] = h
+                alive[j] = False
+
+    return [m for m, a in zip(masks, alive) if a]
+
+
 # ── Disconnected Island Splitting ─────────────────────────────────────────────
 
 def split_disconnected_masks(masks, min_area=100):
@@ -183,18 +226,23 @@ def run_pipeline(args):
             continue
 
         frame_h, frame_w = frame.shape[:2]
+        frame_hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        min_area = max(80, int(args.min_area_ratio * frame_h * frame_w))
 
         # SAM inference
         raw_masks = generate_masks(mask_generator, frame)
 
-        # Post-processing chain: filter → merge → split
+        # Post-processing chain: filter → containment merge → proximity merge → split
         fg_masks = filter_background_masks(
             raw_masks, frame_h, frame_w, 
             max_area_ratio=args.max_area, 
             border_touch_threshold=args.border_touch
         )
         merged_masks = merge_overlapping_masks(fg_masks, containment_thresh=args.merge_thresh)
-        final_masks = split_disconnected_masks(merged_masks, min_area=100)
+        merged_masks = merge_by_proximity(merged_masks, frame_hsv,
+                                          max_gap_px=args.proximity_gap,
+                                          color_thresh=args.proximity_color_thresh)
+        final_masks = split_disconnected_masks(merged_masks, min_area=min_area)
 
         logger.info(
             f"Frame {frame_idx:05d} ({img_path.name}) | "
@@ -227,8 +275,8 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", required=True, help="Path to save masks and visualizations")
 
     # Background filter
-    parser.add_argument("--max_area", type=float, default=0.40, help="Max image area %% for foreground")
-    parser.add_argument("--border_touch", type=float, default=0.25, help="Max perimeter %% touching edges")
+    parser.add_argument("--max_area", type=float, default=0.50, help="Max image area %% for foreground")
+    parser.add_argument("--border_touch", type=float, default=0.35, help="Max perimeter %% touching edges")
 
     # SAM 2 model
     parser.add_argument("--model_cfg", default="sam2.1_hiera_l", help="SAM 2 config key or YAML path (sam2.1_hiera_t/s/b+/l)")
@@ -236,12 +284,15 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda", help="Device ('cuda' or 'cpu')")
 
     # SAM tuning
-    parser.add_argument("--points_per_side", type=int, default=16, help="Grid points per side (default SAM: 32)")
-    parser.add_argument("--pred_iou_thresh", type=float, default=0.90, help="Min predicted IoU (default SAM: 0.88)")
-    parser.add_argument("--stability_score_thresh", type=float, default=0.96, help="Min stability score (default SAM: 0.95)")
-    parser.add_argument("--min_mask_area", type=int, default=500, help="Min mask area in pixels (default SAM: 0)")
+    parser.add_argument("--points_per_side", type=int, default=32, help="Grid points per side (default SAM: 32)")
+    parser.add_argument("--pred_iou_thresh", type=float, default=0.88, help="Min predicted IoU (default SAM: 0.88)")
+    parser.add_argument("--stability_score_thresh", type=float, default=0.95, help="Min stability score (default SAM: 0.95)")
+    parser.add_argument("--min_mask_area", type=int, default=300, help="Min mask area in pixels (default SAM: 0)")
 
     # Merge
-    parser.add_argument("--merge_thresh", type=float, default=0.6, help="Containment ratio to merge masks (0-1)")
+    parser.add_argument("--merge_thresh", type=float, default=0.78, help="Containment ratio to merge masks (0-1)")
+    parser.add_argument("--proximity_gap", type=int, default=20, help="Max pixel gap for proximity merge")
+    parser.add_argument("--proximity_color_thresh", type=float, default=0.32, help="Max color distance for proximity merge (0-1)")
+    parser.add_argument("--min_area_ratio", type=float, default=0.0035, help="Min mask area as fraction of image (replaces absolute min_area)")
 
     run_pipeline(parser.parse_args())
