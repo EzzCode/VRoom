@@ -9,7 +9,7 @@ Usage:
     python mask_processor.py --input_dir data/images --output_dir data/sam_output
 
 Outputs:
-    <output_dir>/masks/        — .npy files (list of bool arrays per frame)
+    <output_dir>/masks/        — compressed .npz files (stacked bool masks per frame)
     <output_dir>/debug_vis/    — overlay PNGs showing each mask in a unique color
 """
 
@@ -185,6 +185,18 @@ def draw_mask_overlay(image, masks, alpha=0.5):
     return cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
 
 
+def save_frame_masks(path, masks):
+    """Save masks in a compressed dense format to avoid object-array bloat."""
+    if masks:
+        stacked = np.stack([m.astype(np.bool_) for m in masks], axis=0)
+    else:
+        stacked = np.zeros((0, 0, 0), dtype=np.bool_)
+    np.savez_compressed(
+        str(path),
+        masks=stacked,
+    )
+
+
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 def run_pipeline(args):
@@ -250,11 +262,8 @@ def run_pipeline(args):
             f"Merged: {len(merged_masks)}, Final: {len(final_masks)}"
         )
 
-        # Save masks
-        np.save(
-            str(mask_dir / f"masks_{frame_idx:05d}.npy"),
-            np.array(final_masks, dtype=object), allow_pickle=True
-        )
+        # Save masks using compressed dense storage to avoid multi-GB pickle payloads.
+        save_frame_masks(mask_dir / f"masks_{frame_idx:05d}.npz", final_masks)
 
         # Save debug overlay
         vis = draw_mask_overlay(frame, final_masks)

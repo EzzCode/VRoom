@@ -98,7 +98,7 @@ python Module-1/mask_processor.py \
     --input_dir data/room_scene/images \
     --output_dir data/room_scene/sam_output
 ```
-**Output**: Creates `masks/` (.npy files) and `visible_masks/` (debug PNG overlays).
+**Output**: Creates `masks/` (`.npz` archives keyed by the image stem) and `visible_masks/` (debug PNG overlays).
 
 ### Step 3: Object Tracking
 Link the SAM masks across frames to assign consistent IDs.
@@ -110,7 +110,7 @@ python Module-1/object_tracker.py \
     --output_dir data/room_scene/tracked
 ```
 *Note: This generates 16-bit PNG ID maps, where pixel values correspond to object IDs. A value of 0 is background.*
-**Output**: Creates `id_maps/` (16-bit PNGs) and `tracked_vis/` (debug tracking overlays).
+**Output**: Creates `id_maps/` (16-bit PNGs whose filenames exactly match the source image stem) and `tracked_vis/` (debug tracking overlays).
 
 ### Step 4: 3D Point Cloud Voting
 Project the 3D points onto the tracked 2D ID maps to label the scene in 3D space.
@@ -124,3 +124,11 @@ python Module-1/vote.py \
     --algorithm majority
 ```
 **Output**: Creates labeled PLY point clouds in `data/room_scene/labeled_output/`, including separate clouds per tracked object.
+
+### Naming Contract
+
+Module-1 now expects a strict one-to-one filename contract:
+- image `train_rgb_0000.png` -> tracker ID map `train_rgb_0000.png`
+- COLMAP image stem -> voter mask filename with the same stem plus `.png`
+
+The pipeline fails fast if a mask is missing instead of guessing an alternate frame name.

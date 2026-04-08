@@ -113,23 +113,31 @@ def project_all(pts_xyz, R, t, fx, fy, cx, cy, w, h):
 ##### Mask I/O ###########################################################
 
 def _mask_path(mask_dir, image_name):
-    """Derive mask .png path from a COLMAP image name (.jpg/.JPG)."""
-    name = os.path.splitext(image_name)[0] + ".png"
-    return os.path.join(mask_dir, name)
+    """Derive the exact mask .png path from the COLMAP image stem.
+
+    This pipeline now requires a strict one-to-one name contract:
+    `image_name` -> `<stem>.png` in `mask_dir`.
+    """
+    stem = os.path.splitext(image_name)[0]
+    return os.path.join(mask_dir, stem + ".png")
 
 
 def load_mask(mask_dir, image_name):
-    """Load a single-channel label mask, or None if missing."""
+    """Load a single-channel label mask, failing fast if the exact file is missing."""
     path = _mask_path(mask_dir, image_name)
     mask = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if mask is None:
-        return None
+        raise FileNotFoundError(
+            f"Missing mask for {image_name}: {path}. "
+            "The mask filename must match the image stem exactly."
+        )
     if mask.ndim == 3:
         mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    if mask.dtype == np.uint8:
-        print(f"  WARN: legacy 8-bit mask detected: {path}")
-    if mask.dtype not in (np.uint8, np.uint16, np.int16, np.int32):
-        mask = mask.astype(np.uint16)
+    if mask.dtype != np.uint16:
+        raise ValueError(
+            f"Unsupported id_map dtype at {path}: {mask.dtype}. "
+            "Expected uint16 from object_tracker.py"
+        )
     return mask
 
 
@@ -150,9 +158,6 @@ def collect_projection_votes(images, cameras, points, mask_dir, temporal_decay=0
 
     for frame_idx, img in enumerate(ordered_images):
         mask = load_mask(mask_dir, img.name)
-        if mask is None:
-            print(f"  WARN: mask missing for {img.name}, skipping")
-            continue
 
         R = quat_to_R(img.qvec)
         t = img.tvec.reshape(3, 1)
@@ -198,8 +203,6 @@ def collect_correspondence_votes(images, points, mask_dir, temporal_decay=0.02):
             if img_id not in mask_cache:
                 mask_cache[img_id] = load_mask(mask_dir, img.name)
             mask = mask_cache[img_id]
-            if mask is None:
-                continue
 
             if pt2d_idx >= len(img.xys):
                 continue
@@ -238,7 +241,7 @@ def collect_correspondence_label_evidence(images, points, mask_dir, temporal_dec
             if img_id not in mask_cache:
                 mask_cache[img_id] = load_mask(mask_dir, img.name)
             mask = mask_cache[img_id]
-            if mask is None or pt2d_idx >= len(img.xys):
+            if pt2d_idx >= len(img.xys):
                 continue
 
             u = int(round(img.xys[pt2d_idx][0]))
@@ -298,6 +301,9 @@ def build_correspondence_alias_map(
     min_point_support=12,
     min_shared_views=6,
     min_weight_support=0.0,
+    min_support_ratio=0.08,
+    min_point_balance=0.20,
+    min_obs_per_label_per_point=2,
 ):
     """Build alias map from correspondence co-support, then close transitively."""
     pair_stats = defaultdict(lambda: {
@@ -305,36 +311,64 @@ def build_correspondence_alias_map(
         "shared_views": set(),
         "weight_support": 0.0,
     })
+    label_point_presence = defaultdict(int)
 
     labels_seen = set()
     for _, per_label in evidence.items():
-        labels = sorted(int(lbl) for lbl in per_label.keys() if int(lbl) != 0)
+        strong_labels = []
+        for lbl, stats in per_label.items():
+            li = int(lbl)
+            if li == 0:
+                continue
+            if int(stats["obs"]) < min_obs_per_label_per_point:
+                continue
+            if len(stats["views"]) < 2:
+                continue
+            strong_labels.append(li)
+            label_point_presence[li] += 1
+
+        labels = sorted(strong_labels)
         labels_seen.update(labels)
         if len(labels) < 2:
             continue
         for a, b in combinations(labels, 2):
             la = per_label[a]
             lb = per_label[b]
+            wa = float(la["weight"])
+            wb = float(lb["weight"])
+            weight_sum = wa + wb
+            if weight_sum <= 0:
+                continue
+            # Reject pair evidence when one label is only a tiny noise tail on this point.
+            balance = min(wa, wb) / weight_sum
+            if balance < min_point_balance:
+                continue
+
             pair = (a, b)
             pair_stats[pair]["point_support"] += 1
             pair_stats[pair]["shared_views"].update(la["views"] | lb["views"])
-            pair_stats[pair]["weight_support"] += min(la["weight"], lb["weight"])
+            pair_stats[pair]["weight_support"] += min(wa, wb)
 
     accepted_edges = []
     rejected_edges = []
     for (a, b), s in pair_stats.items():
         views = len(s["shared_views"])
+        min_presence = max(1, min(label_point_presence.get(a, 0), label_point_presence.get(b, 0)))
+        support_ratio = float(s["point_support"]) / float(min_presence)
         edge = {
             "a": int(a),
             "b": int(b),
             "point_support": int(s["point_support"]),
             "shared_view_count": int(views),
             "weight_support": float(s["weight_support"]),
+            "support_ratio": float(support_ratio),
+            "min_presence": int(min_presence),
         }
         if (
             s["point_support"] >= min_point_support
             and views >= min_shared_views
             and s["weight_support"] >= min_weight_support
+            and support_ratio >= min_support_ratio
         ):
             accepted_edges.append(edge)
         else:
@@ -345,6 +379,8 @@ def build_correspondence_alias_map(
                 reason.append("insufficient_shared_views")
             if s["weight_support"] < min_weight_support:
                 reason.append("insufficient_weight_support")
+            if support_ratio < min_support_ratio:
+                reason.append("insufficient_support_ratio")
             edge["reason"] = "+".join(reason)
             rejected_edges.append(edge)
 
@@ -381,7 +417,11 @@ def build_correspondence_alias_map(
             "min_point_support": int(min_point_support),
             "min_shared_views": int(min_shared_views),
             "min_weight_support": float(min_weight_support),
+            "min_support_ratio": float(min_support_ratio),
+            "min_point_balance": float(min_point_balance),
+            "min_obs_per_label_per_point": int(min_obs_per_label_per_point),
         },
+        "label_point_presence": {str(int(k)): int(v) for k, v in sorted(label_point_presence.items())},
     }
     return alias_map, report
 
@@ -608,6 +648,9 @@ def run_voting(args):
             min_point_support=args.alias_min_point_support,
             min_shared_views=args.alias_min_shared_views,
             min_weight_support=args.alias_min_weight_support,
+            min_support_ratio=args.alias_min_support_ratio,
+            min_point_balance=args.alias_min_point_balance,
+            min_obs_per_label_per_point=args.alias_min_obs_per_label_per_point,
         )
         labels = apply_alias_map(labels, alias_map)
         print(
@@ -700,7 +743,10 @@ if __name__ == "__main__":
     p.add_argument("--min_support", type=int, default=3, help="Minimum number of per-point view votes before assigning a label")
     p.add_argument("--temporal_decay", type=float, default=0.02, help="Exponential decay for older frame votes")
     p.add_argument("--disable_alias_merge", action="store_true", help="Disable correspondence-based alias merging")
-    p.add_argument("--alias_min_point_support", type=int, default=12, help="Minimum shared COLMAP points to accept alias edge")
+    p.add_argument("--alias_min_point_support", type=int, default=20, help="Minimum shared COLMAP points to accept alias edge")
     p.add_argument("--alias_min_shared_views", type=int, default=6, help="Minimum distinct views to accept alias edge")
     p.add_argument("--alias_min_weight_support", type=float, default=0.0, help="Minimum accumulated weighted co-support for alias edge")
+    p.add_argument("--alias_min_support_ratio", type=float, default=0.12, help="Minimum pair support ratio over weaker-label point presence")
+    p.add_argument("--alias_min_point_balance", type=float, default=0.25, help="Minimum per-point weight balance between paired labels")
+    p.add_argument("--alias_min_obs_per_label_per_point", type=int, default=2, help="Minimum observations per label on a point for alias evidence")
     run_voting(p.parse_args())

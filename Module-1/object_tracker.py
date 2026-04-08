@@ -260,15 +260,6 @@ def prune_lost_tracks(tracks, graveyard, patience):
             dead[tid] = data  # keep the appearance model
     graveyard.update(dead)
     return alive
-
-def adaptive_weights(flow, masks, base_alpha=0.5, base_beta=0.3, base_gamma=0.2):
-    flow_mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2).mean()
-    # Normalize to [0, 1] — tune 20.0 to your camera's typical motion scale
-    motion_confidence = max(0.0, 1.0 - flow_mag / 20.0)
-    alpha = base_alpha * (1 - motion_confidence) + 0.2 * motion_confidence
-    beta  = base_beta  * motion_confidence        + 0.5 * (1 - motion_confidence)
-    gamma = 1.0 - alpha - beta
-    return alpha, beta, gamma
     
 def track_frame(
     state,
@@ -452,12 +443,12 @@ def run_pipeline(args):
         p for p in input_dir.iterdir()
         if p.suffix.lower() in ['.png', '.jpg', '.jpeg']
     ])
-    mask_paths = sorted(mask_dir.glob("masks_*.npy"))
+    mask_paths = sorted(mask_dir.glob("masks_*.npz"))
 
     if not image_paths:
         sys.exit(logger.error(f"No images found in {input_dir}"))
     if not mask_paths:
-        sys.exit(logger.error(f"No .npy masks found in {mask_dir}. Run mask_processor.py first."))
+        sys.exit(logger.error(f"No .npz masks found in {mask_dir}. Run mask_processor.py first."))
     if len(image_paths) != len(mask_paths):
         logger.warning(
             f"Image count ({len(image_paths)}) != mask count ({len(mask_paths)}). "
@@ -472,8 +463,10 @@ def run_pipeline(args):
             logger.warning(f"Could not read image: {img_path}")
             continue
 
-        # Load pre-computed masks (cast back to bool — pickle loses dtype)
-        fg_masks = [m.astype(bool) for m in np.load(str(msk_path), allow_pickle=True)]
+        # Load pre-computed masks from compressed .npz archives.
+        with np.load(str(msk_path), allow_pickle=False) as loaded:
+            fg_stack = loaded["masks"].astype(bool)
+        fg_masks = [fg_stack[i] for i in range(fg_stack.shape[0])]
 
         frame_h, frame_w = frame.shape[:2]
         tracked = track_frame(
@@ -513,7 +506,7 @@ def run_pipeline(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VRoom Multi-Modal Tracking Pipeline")
     parser.add_argument("--input_dir", required=True, help="Path to input images directory")
-    parser.add_argument("--mask_dir", required=True, help="Path to pre-computed masks (.npy from mask_processor.py)")
+    parser.add_argument("--mask_dir", required=True, help="Path to pre-computed masks (.npz from mask_processor.py)")
     parser.add_argument("--output_dir", required=True, help="Path to save tracking output")
 
     # Tracker weights (should sum to 1.0)
@@ -526,9 +519,7 @@ if __name__ == "__main__":
     parser.add_argument("--match_threshold", type=float, default=0.7, help="Cost cutoff for Hungarian Match")
     parser.add_argument("--patience", type=int, default=28, help="Frames to remember occluded IDs")
     parser.add_argument("--ema", type=float, default=0.7, help="EMA weight for feature smoothing (0-1, higher=trust new frame more)")
-    parser.add_argument("--flow_reliability_threshold", type=float, default=0.25,
-                        help="Minimum mean flow magnitude inside a mask to trust motion cost")
-    parser.add_argument("--reid_threshold", type=float, default=0.5,
-                        help="Maximum appearance distance to re-use a graveyard ID")
+    parser.add_argument("--flow_reliability_threshold", type=float, default=0.25, help="Minimum mean flow magnitude inside a mask to trust motion cost")
+    parser.add_argument("--reid_threshold", type=float, default=0.5, help="Maximum appearance distance to re-use a graveyard ID")
 
     run_pipeline(parser.parse_args())

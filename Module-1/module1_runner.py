@@ -65,6 +65,12 @@ def get_profile_overrides(profile):
             "min_confidence": 0.35,
             "min_support": 3,
             "temporal_decay": 0.02,
+            "alias_min_point_support": 20,
+            "alias_min_shared_views": 6,
+            "alias_min_weight_support": 0.0,
+            "alias_min_support_ratio": 0.12,
+            "alias_min_point_balance": 0.25,
+            "alias_min_obs_per_label_per_point": 2,
         },
         "conservative": {
             "max_area": 0.45,
@@ -85,6 +91,12 @@ def get_profile_overrides(profile):
             "min_confidence": 0.45,
             "min_support": 4,
             "temporal_decay": 0.03,
+            "alias_min_point_support": 28,
+            "alias_min_shared_views": 8,
+            "alias_min_weight_support": 0.0,
+            "alias_min_support_ratio": 0.18,
+            "alias_min_point_balance": 0.30,
+            "alias_min_obs_per_label_per_point": 3,
         },
         "recall": {
             "max_area": 0.55,
@@ -105,6 +117,12 @@ def get_profile_overrides(profile):
             "min_confidence": 0.3,
             "min_support": 2,
             "temporal_decay": 0.015,
+            "alias_min_point_support": 14,
+            "alias_min_shared_views": 5,
+            "alias_min_weight_support": 0.0,
+            "alias_min_support_ratio": 0.08,
+            "alias_min_point_balance": 0.20,
+            "alias_min_obs_per_label_per_point": 2,
         },
     }
     return presets[profile]
@@ -167,9 +185,6 @@ def main():
     parser.add_argument("--min_support", type=int, default=None)
     parser.add_argument("--temporal_decay", type=float, default=None)
     parser.add_argument("--disable_alias_merge", action="store_true", help="Disable correspondence-based alias merging in vote.py")
-    parser.add_argument("--alias_min_point_support", type=int, default=12, help="Minimum shared COLMAP points to accept an alias edge")
-    parser.add_argument("--alias_min_shared_views", type=int, default=6, help="Minimum distinct views to accept an alias edge")
-    parser.add_argument("--alias_min_weight_support", type=float, default=0.0, help="Minimum weighted co-support to accept an alias edge")
 
     args = parser.parse_args()
     profile_values = get_profile_overrides(args.profile)
@@ -273,9 +288,12 @@ def main():
             "--min_confidence", str(min_confidence),
             "--min_support", str(min_support),
             "--temporal_decay", str(temporal_decay),
-            "--alias_min_point_support", str(args.alias_min_point_support),
-            "--alias_min_shared_views", str(args.alias_min_shared_views),
-            "--alias_min_weight_support", str(args.alias_min_weight_support),
+            "--alias_min_point_support", str(profile_values["alias_min_point_support"]),
+            "--alias_min_shared_views", str(profile_values["alias_min_shared_views"]),
+            "--alias_min_weight_support", str(profile_values["alias_min_weight_support"]),
+            "--alias_min_support_ratio", str(profile_values["alias_min_support_ratio"]),
+            "--alias_min_point_balance", str(profile_values["alias_min_point_balance"]),
+            "--alias_min_obs_per_label_per_point", str(profile_values["alias_min_obs_per_label_per_point"]),
         ]
         if args.disable_alias_merge:
             voting_cmd.append("--disable_alias_merge")
