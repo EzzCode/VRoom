@@ -4,3 +4,17 @@
 *.ptx
 *.cubin
 *.fatbin
+
+# Clang files
+.clang-format
+compile_flags.txt
+
+# Other repos
+diff-gaussian-rasterization/*
+
+# vscode
+.vscode/
+
+# Reading repos
+diff-gaussian-rasterization/
+gsplat-object/
