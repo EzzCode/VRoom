@@ -5,6 +5,7 @@
 *.ptx
 *.cubin
 *.fatbin
+<<<<<<< HEAD
 
 # ─── Images & Media ───────────────────────────────────────────────────────────
 *.png
@@ -60,10 +61,17 @@ wandb/
 events.out.tfevents.*
 
 # ─── Python ───────────────────────────────────────────────────────────────────
+=======
+\data
+\models
+
+# Python
+>>>>>>> Module1-Ezz
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+<<<<<<< HEAD
 *.egg
 *.egg-info/
 dist/
@@ -101,3 +109,69 @@ desktop.ini
 *.7z
 tmp/
 temp/
+
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.env
+.venv
+venv/
+temp_deps/
+
+.vscode/
+Scaffold-GS-Viewer/
+*output*
+# React Native / Expo
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+ios/
+android/
+
