@@ -151,7 +151,8 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
         if not image_path.exists():
             return None
         image_name = image_path.stem
-        alpha_mask = Image.open(layout.mask_dir / extrinsic.name) if layout.mask_dir is not None and (layout.mask_dir / extrinsic.name).exists() else None
+        mask_path = layout.mask_dir / f"{image_name}.png"
+        alpha_mask = Image.open(mask_path) if layout.mask_dir is not None and mask_path.exists() else None
         depth = None
         if layout.depth_dir is not None:
             depth_path = layout.depth_dir / extrinsic.name.replace(".JPG", ".png").replace(".jpg", ".png")
