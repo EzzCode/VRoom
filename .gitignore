@@ -31,20 +31,35 @@ wheels/
 .env
 .venv
 venv/
-temp_deps/
+env/
+ENV/
+.env
 
-Scaffold-GS-Viewer/
-*output*
-# React Native / Expo
+# ─── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─── IDEs & Editors ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Archives & Temp ──────────────────────────────────────────────────────────
+*.zip
+*.tar.gz
+*.tar
+*.rar
+*.7z
+tmp/
+temp/
+
+
+android/
 node_modules/
-npm-debug.*
-*.jks
-*.p8
-*.p12
-*.key
-*.mobileprovision
-*.orig.*
-web-build/
-.expo/
-.expo-shared/
-dist/

@@ -52,6 +52,17 @@ export interface VoxelData {
   angularDiversity: number;
 }
 
+/** Info about a 3D mesh file available for AR projection */
+export interface MeshInfo {
+  id: string;
+  name: string;
+  format: 'GLB' | 'OBJ';
+  size: number;
+  uri: string;
+  thumbnailUri?: string;
+  isBundled: boolean;
+}
+
 /** Capture session metadata exported alongside images */
 export interface SessionMetadata {
   /** Session start time (ISO 8601) */

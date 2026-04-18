@@ -11,9 +11,14 @@ import { useResizePlugin } from 'vision-camera-resize-plugin';
 import { processBlur } from './gates/BlurGate';
 import { CAPTURE_CONFIG } from './config/captureConfig';
 import { saveCapturedPhoto } from './services/captureStorage';
-import { useSession } from '../../providers/SessionProvider';
+import { useSession, SessionProvider } from '../../providers/SessionProvider';
+import { useTheme } from '../../shared/theme';
+import { Header, Button, ProgressBar } from '../../shared/components';
+import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { RootStackParamList } from '../../navigation/types';
 
-// ── Helpers ─────────────────────────────────────────────────
+type Props = NativeStackScreenProps<RootStackParamList, 'Capture'>;
+
 function shouldProcessFrame(interval: number): boolean {
   'worklet';
 
@@ -27,8 +32,8 @@ function shouldProcessFrame(interval: number): boolean {
   return currentCount % Math.max(1, interval) === 0;
 }
 
-// ── Capture Screen ──────────────────────────────────────────
-export default function CaptureScreen() {
+function CaptureScreenInner({ navigation }: Props) {
+  const { theme } = useTheme();
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
   const { resize } = useResizePlugin();
@@ -40,17 +45,9 @@ export default function CaptureScreen() {
 
   const captureIntervalMs = 1200;
 
-  const {
-    isRecording,
-    startSession,
-    stopSession,
-    keyframes,
-    addKeyframe,
-    extractor,
-    currentPose,
-  } = useSession();
+  const { isRecording, startSession, stopSession, keyframes, addKeyframe, extractor, currentPose } =
+    useSession();
 
-  // Ref mirrors isRecording for worklet access
   const isRecordingRef = useRef(false);
   const isBlurryRef = useRef(false);
   const blurScoreRef = useRef(0);
@@ -58,11 +55,9 @@ export default function CaptureScreen() {
   const handleCapture = useCallback(async () => {
     if (!camera.current || !isRecordingRef.current) return;
 
-    // ── Run JS-side gates (angle diversity, etc.) ──
     const { shouldCapture, results } = extractor.evaluate(currentPose);
 
     if (!shouldCapture) {
-      // Find the first failed gate's reason for the HUD
       const failed = results.find((r) => !r.result.passed);
       setGuidance(failed?.result.reason ?? 'Adjust your position.');
       return;
@@ -107,17 +102,13 @@ export default function CaptureScreen() {
     };
   }, [isRecording, handleCapture]);
 
-  const updateBlurOnJS = useRunOnJS(
-    (blurry: boolean, score: number) => {
-      isBlurryRef.current = blurry;
-      blurScoreRef.current = score;
-      setIsBlurry(blurry);
-      setBlurScore(score);
-    },
-    [],
-  );
+  const updateBlurOnJS = useRunOnJS((blurry: boolean, score: number) => {
+    isBlurryRef.current = blurry;
+    blurScoreRef.current = score;
+    setIsBlurry(blurry);
+    setBlurScore(score);
+  }, []);
 
-  // ── Frame processor (runs on worklet thread) ──────────────
   const frameProcessor = useFrameProcessor(
     (frame) => {
       'worklet';
@@ -126,7 +117,6 @@ export default function CaptureScreen() {
         return;
       }
 
-      // 1. Use the VisionCamera resize plugin to obtain a packed RGB buffer.
       let resizedBuffer: Uint8Array;
       try {
         resizedBuffer = resize(frame, {
@@ -138,11 +128,9 @@ export default function CaptureScreen() {
           dataType: 'uint8',
         });
       } catch {
-        // Resize plugin unavailable or frame conversion failed; skip this frame.
         return;
       }
 
-      // 2. Run blur detection on the resized RGB frame.
       const blurResult = processBlur(
         resizedBuffer,
         CAPTURE_CONFIG.resize.width,
@@ -150,32 +138,36 @@ export default function CaptureScreen() {
         3,
       );
 
-      // 3. Bridge results back to JS only on sampled frames.
       void updateBlurOnJS(blurResult.isBlurry, blurResult.variance);
     },
     [updateBlurOnJS, resize],
   );
 
-  // ── Permission guard ──────────────────────────────────────
   if (!hasPermission) {
     return (
-      <View style={styles.center}>
-        <Text style={styles.text}>VRoom needs camera access to scan.</Text>
-        <TouchableOpacity style={styles.button} onPress={requestPermission}>
-          <Text style={styles.buttonText}>Grant Permission</Text>
-        </TouchableOpacity>
+      <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
+        <Text
+          style={{
+            color: theme.colors.textSecondary,
+            fontSize: theme.typography.body.fontSize,
+            textAlign: 'center',
+            marginBottom: 20,
+          }}
+        >
+          VRoom needs camera access to scan.
+        </Text>
+        <Button title="Grant Permission" onPress={requestPermission} variant="primary" />
       </View>
     );
   }
 
   if (device == null)
     return (
-      <View style={styles.center}>
-        <Text style={styles.text}>Loading camera…</Text>
+      <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
+        <Text style={{ color: theme.colors.textSecondary }}>Loading camera…</Text>
       </View>
     );
 
-  // ── Handlers ──────────────────────────────────────────────
   const toggleRecording = () => {
     if (isRecording) {
       stopSession();
@@ -186,7 +178,8 @@ export default function CaptureScreen() {
     }
   };
 
-  // ── Render ────────────────────────────────────────────────
+  const blurProgress = Math.min(blurScore / 500, 1);
+
   return (
     <View style={styles.container}>
       <Camera
@@ -199,106 +192,166 @@ export default function CaptureScreen() {
         frameProcessor={frameProcessor}
       />
 
-      {/* ── HUD Overlay ── */}
-      <View style={styles.hud}>
-        <View style={styles.statsBar}>
-          <Text style={styles.statText}>
+      <View style={[styles.topBar, { paddingTop: CAPTURE_CONFIG.hudTopOffset }]}>
+        <Header
+          onBack={() => navigation.goBack()}
+          transparent
+          rightAction={
+            keyframes.length > 0 ? (
+              <TouchableOpacity onPress={() => navigation.navigate('Export')}>
+                <Text
+                  style={{
+                    color: theme.colors.primary,
+                    fontSize: theme.typography.body.fontSize,
+                    fontWeight: '600',
+                  }}
+                >
+                  Export
+                </Text>
+              </TouchableOpacity>
+            ) : undefined
+          }
+        />
+      </View>
+
+      <View style={[styles.hud, { top: CAPTURE_CONFIG.hudTopOffset + 56 }]}>
+        <View
+          style={[
+            styles.statsBar,
+            {
+              backgroundColor: theme.colors.overlay,
+              borderRadius: theme.radii.md,
+              padding: theme.spacing.md,
+            },
+          ]}
+        >
+          <Text
+            style={{
+              color: theme.colors.textPrimary,
+              fontSize: theme.typography.body.fontSize,
+              fontWeight: '700',
+            }}
+          >
             Keyframes: {keyframes.length}
           </Text>
-          <Text style={styles.statText}>
-            Blur: {blurScore.toFixed(1)}
+          <View style={{ flex: 1, marginHorizontal: 12 }}>
+            <ProgressBar
+              progress={blurProgress}
+              color={isBlurry ? theme.colors.error : theme.colors.success}
+            />
+          </View>
+          <Text
+            style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
+          >
+            {blurScore.toFixed(0)}
           </Text>
         </View>
 
-        {/* Blur warning */}
         {isBlurry && isRecording && (
-          <View style={styles.warningBanner}>
-            <Text style={styles.warningText}>
+          <View
+            style={[
+              styles.banner,
+              {
+                backgroundColor: theme.colors.errorBackground,
+                borderRadius: theme.radii.md,
+                paddingVertical: theme.spacing.md,
+                paddingHorizontal: theme.spacing.xl,
+                marginTop: theme.spacing.md,
+                borderLeftWidth: 3,
+                borderLeftColor: theme.colors.error,
+              },
+            ]}
+          >
+            <Text
+              style={{
+                color: theme.colors.error,
+                fontSize: theme.typography.body.fontSize,
+                fontWeight: '600',
+              }}
+            >
               Hold Steady! Image too blurry.
             </Text>
           </View>
         )}
 
-        {/* Gate guidance (angle diversity, coverage, etc.) */}
         {guidance && isRecording && !isBlurry && (
-          <View style={styles.guidanceBanner}>
-            <Text style={styles.guidanceText}>{guidance}</Text>
+          <View
+            style={[
+              styles.banner,
+              {
+                backgroundColor: theme.colors.warningBackground,
+                borderRadius: theme.radii.md,
+                paddingVertical: theme.spacing.md,
+                paddingHorizontal: theme.spacing.xl,
+                marginTop: theme.spacing.md,
+                borderLeftWidth: 3,
+                borderLeftColor: theme.colors.warning,
+              },
+            ]}
+          >
+            <Text
+              style={{
+                color: theme.colors.warning,
+                fontSize: theme.typography.body.fontSize,
+                fontWeight: '600',
+              }}
+            >
+              {guidance}
+            </Text>
           </View>
         )}
       </View>
 
-      {/* ── Record Controls ── */}
       <View style={styles.controls}>
-        <TouchableOpacity
-          style={[
-            styles.recordButton,
-            isRecording && styles.recordingActive,
-          ]}
+        <Button
+          title={isRecording ? 'Stop Capture' : 'Start Capture'}
           onPress={toggleRecording}
-        >
-          <Text style={styles.buttonText}>
-            {isRecording ? 'Stop' : 'Start Capture'}
-          </Text>
-        </TouchableOpacity>
+          variant={isRecording ? 'danger' : 'primary'}
+          size="lg"
+        />
       </View>
     </View>
   );
 }
 
-// ── Styles ──────────────────────────────────────────────────
+export default function CaptureScreen(props: Props) {
+  return (
+    <SessionProvider>
+      <CaptureScreenInner {...props} />
+    </SessionProvider>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'black' },
   center: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#111',
+    paddingHorizontal: 40,
+  },
+  topBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
   },
   hud: {
     position: 'absolute',
-    top: CAPTURE_CONFIG.hudTopOffset,
     left: 20,
     right: 20,
     alignItems: 'center',
   },
   statsBar: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    alignItems: 'center',
     width: '100%',
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    padding: 10,
-    borderRadius: 10,
   },
-  statText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
-  warningBanner: {
-    marginTop: 16,
-    backgroundColor: 'rgba(255,50,50,0.9)',
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 10,
+  banner: {
+    width: '100%',
   },
-  warningText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  guidanceBanner: {
-    marginTop: 16,
-    backgroundColor: 'rgba(255,180,0,0.9)',
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 10,
-  },
-  guidanceText: { color: '#000', fontSize: 16, fontWeight: '600' },
   controls: {
     position: 'absolute',
     bottom: 50,
     alignSelf: 'center',
   },
-  recordButton: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 15,
-    paddingHorizontal: 30,
-    borderRadius: 30,
-  },
-  recordingActive: { backgroundColor: '#FF3B30' },
-  buttonText: { color: '#fff', fontSize: 18, fontWeight: '600' },
-  text: { fontSize: 18, marginBottom: 20, textAlign: 'center', color: '#ccc' },
-  button: { backgroundColor: '#007AFF', padding: 15, borderRadius: 8 },
 });
