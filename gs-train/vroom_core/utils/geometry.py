@@ -66,3 +66,8 @@ def projection_matrix(znear: float, zfar: float, fov_x: float, fov_y: float) -> 
     matrix[3, 2] = 1.0
     return matrix
 
+
+def apply_scene_transform(points: np.ndarray, offset: np.ndarray | None = None, scale: float = 1.0) -> np.ndarray:
+    offset = np.zeros(3, dtype=np.float32) if offset is None else np.asarray(offset, dtype=np.float32)
+    return (points + offset) * float(scale)
+

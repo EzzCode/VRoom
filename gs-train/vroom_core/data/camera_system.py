@@ -103,15 +103,30 @@ class RenderCamera(nn.Module):
 
     def _load_object_mask(self, resolution):
         source = Path(self.image_path)
-        candidates = [
-            Path(str(source).replace("images", "object_mask_deva")).with_suffix(".png"),
-            Path(str(source).replace("images_all", "object_mask")).with_suffix(".png"),
-            Path(str(source).replace("images", "object_mask")).with_suffix(".png"),
-        ]
+        candidates = []
+        for repl in [("images", "object_mask_deva"), ("images_all", "object_mask"), ("images", "object_mask")]:
+            base_path = Path(str(source).replace(repl[0], repl[1]))
+            candidates.append(base_path.with_suffix(".npz"))
+            candidates.append(base_path.with_suffix(".png"))
         for candidate in candidates:
             if candidate == source or not candidate.exists():
                 continue
-            image = Image.open(candidate).convert("L")
+            if candidate.suffix == ".npz":
+                try:
+                    data = np.load(str(candidate))
+                    mask_array = data[data.files[0]]
+                    if mask_array.ndim >= 3:
+                        H, W = mask_array.shape[1], mask_array.shape[2]
+                        categorical = np.zeros((H, W), dtype=np.uint8)
+                        for i in range(mask_array.shape[0]):
+                            categorical[mask_array[i]] = i + 1
+                        image = Image.fromarray(categorical, mode='L')
+                    else:
+                        continue
+                except Exception:
+                    continue
+            else:
+                image = Image.open(candidate).convert("L")
             array = np.array(image.resize(resolution), dtype=np.uint8, copy=True)
             return torch.from_numpy(array)
         return torch.zeros((resolution[1], resolution[0]), dtype=torch.uint8)

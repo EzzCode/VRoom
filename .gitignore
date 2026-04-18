@@ -5,7 +5,6 @@
 *.ptx
 *.cubin
 *.fatbin
-<<<<<<< HEAD
 
 # ─── Images & Media ───────────────────────────────────────────────────────────
 *.png
@@ -61,12 +60,10 @@ wandb/
 events.out.tfevents.*
 
 # ─── Python ───────────────────────────────────────────────────────────────────
-=======
 \data
 \models
 
 # Python
->>>>>>> Module1-Ezz
 __pycache__/
 *.py[cod]
 *$py.class
@@ -175,3 +172,4 @@ yarn-error.*
 ios/
 android/
 
+*.Identifier

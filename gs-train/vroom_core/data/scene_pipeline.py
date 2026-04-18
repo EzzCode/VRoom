@@ -16,7 +16,7 @@ from plyfile import PlyData, PlyElement
 
 from vroom_core.data.camera_system import FrameRecord, RenderCamera
 from vroom_core.data.colmap_io import read_extrinsics_binary, read_extrinsics_text, read_intrinsics_binary, read_intrinsics_text, quaternion_to_rotation
-from vroom_core.utils.geometry import PointCloudSample, focal_to_fov, fov_to_focal, world_to_view_matrix
+from vroom_core.utils.geometry import PointCloudSample, apply_scene_transform, focal_to_fov, fov_to_focal, world_to_view_matrix
 
 
 @dataclass(frozen=True)
@@ -151,8 +151,24 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
         if not image_path.exists():
             return None
         image_name = image_path.stem
-        mask_path = layout.mask_dir / f"{image_name}.png"
-        alpha_mask = Image.open(mask_path) if layout.mask_dir is not None and mask_path.exists() else None
+        alpha_mask = None
+        if layout.mask_dir is not None:
+            mask_png_path = layout.mask_dir / f"{image_name}.png"
+            mask_npz_path = layout.mask_dir / f"{image_name}.npz"
+            if mask_npz_path.exists():
+                try:
+                    data = np.load(str(mask_npz_path))
+                    mask_array = data[data.files[0]]
+                    if mask_array.ndim >= 3:
+                        H, W = mask_array.shape[1], mask_array.shape[2]
+                        categorical = np.zeros((H, W), dtype=np.uint8)
+                        for i in range(mask_array.shape[0]):
+                            categorical[mask_array[i]] = i + 1
+                        alpha_mask = Image.fromarray(categorical, mode='L')
+                except Exception:
+                    pass
+            elif mask_png_path.exists():
+                alpha_mask = Image.open(mask_png_path)
         depth = None
         if layout.depth_dir is not None:
             depth_path = layout.depth_dir / extrinsic.name.replace(".JPG", ".png").replace(".jpg", ".png")
@@ -272,6 +288,8 @@ class TrainingScene:
         self.gaussians = gaussians
         self.gaussians.weed_ratio = weed_ratio
         self.background = self._background_from_args(args)
+        self.scene_translation = np.asarray(args.center, dtype=np.float32)
+        self.scene_scale = float(args.scale)
 
         if args.data_format != "colmap":
             raise NotImplementedError("VRoom core currently supports COLMAP datasets only.")
@@ -310,8 +328,13 @@ class TrainingScene:
 
     def save_input_point_cloud(self, point_cloud: PointCloudSample, ratio: int, path: str) -> PointCloudSample:
         stride = max(int(ratio), 1)
+        transformed_points = apply_scene_transform(
+            point_cloud.points,
+            getattr(self, "scene_translation", None),
+            getattr(self, "scene_scale", 1.0),
+        )
         sampled = PointCloudSample(
-            points=point_cloud.points[::stride],
+            points=transformed_points[::stride],
             colors=point_cloud.colors[::stride],
             normals=point_cloud.normals[::stride],
             label_ids=point_cloud.label_ids[::stride],
@@ -330,4 +353,3 @@ class TrainingScene:
         for scale in self.resolution_scales:
             cameras.extend(self.test_cameras[scale])
         return cameras
-
