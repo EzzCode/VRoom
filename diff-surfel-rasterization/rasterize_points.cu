@@ -12,16 +12,11 @@
 #include <math.h>
 #include <torch/extension.h>
 #include <cstdio>
-#include <sstream>
-#include <iostream>
 #include <tuple>
 #include <stdio.h>
 #include <cuda_runtime_api.h>
-#include <memory>
 #include "cuda_rasterizer/config.h"
 #include "cuda_rasterizer/rasterizer.h"
-#include <fstream>
-#include <string>
 #include <functional>
 
 #define CHECK_INPUT(x)											\
