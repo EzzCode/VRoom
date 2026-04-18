@@ -86,7 +86,7 @@ class PipelineConfig:
     weed_ratio: float = 0.0
     save_explicit: bool = False
     save_vis: bool = True
-    save_iterations: List[int] = dc_field(default_factory=lambda: [7000, 30000])
+    save_iterations: List[int] = dc_field(default_factory=lambda: [7000, 20000, 25000, 30000])
 
 
 PipeConfig = PipelineConfig
