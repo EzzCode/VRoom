@@ -4,13 +4,25 @@ import sys
 import yaml
 import re
 import os
+from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 
-def stream_command(cmd, desc, total=None, pattern=None):
+def stream_command(cmd, desc, total=None, pattern=None, log_file=None):
     """Run a command and update a progress bar based on output parsing."""
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+
+    log_handle = None
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = open(log_path, "a", encoding="utf-8")
+        log_handle.write("\n" + "=" * 80 + "\n")
+        log_handle.write(f"[{datetime.now().isoformat(timespec='seconds')}] {desc}\n")
+        log_handle.write(f"CMD: {' '.join(cmd)}\n")
+        log_handle.write("=" * 80 + "\n")
+        log_handle.flush()
     
     process = subprocess.Popen(
         cmd,
@@ -26,6 +38,10 @@ def stream_command(cmd, desc, total=None, pattern=None):
     
     try:
         for line in process.stdout:
+            if log_handle:
+                log_handle.write(line)
+                log_handle.flush()
+
             # Check for generic "Frame XXXX" or "Frame [XXXX/YYYY]" patterns
             if pattern:
                 match = re.search(pattern, line)
@@ -65,6 +81,8 @@ def stream_command(cmd, desc, total=None, pattern=None):
         process.wait()
     finally:
         pbar.close()
+        if log_handle:
+            log_handle.close()
     
     if process.returncode != 0:
         print(f"\nError: {desc} failed with exit code {process.returncode}")
@@ -103,36 +121,44 @@ def main():
     py_u = [py, "-u"]
 
     # STEP 1: COLMAP
-    print(f"\n[1/3] STAGE: Structure-from-Motion (COLMAP)")
+    print("\n[1/3] STAGE: Structure-from-Motion (COLMAP)")
     colmap_runner = workspace_root / "Module-1" / "colmap_runner.py"
     stream_command(py_u + [str(colmap_runner), "--data_path", str(data_path)], "SfM Matching", total=total_images)
 
     # STEP 2: SAM3 & Tracking
-    print(f"\n[2/3] STAGE: Semantic Tracking (SAM3 + Tracker)")
+    print("\n[2/3] STAGE: Semantic Tracking (SAM3 + Tracker)")
     module1_runner = workspace_root / "Module-1" / "module1_runner.py"
+    module1_log_path = data_path / "module1_runner.log"
+    with open(module1_log_path, "w", encoding="utf-8") as f:
+        f.write(f"Module 1 runner logs for dataset: {data_path}\n")
+        f.write(f"Run started at: {datetime.now().isoformat(timespec='seconds')}\n")
+    print(f" Module 1 logs: {module1_log_path}")
     
     stream_command(
         py_u + [str(module1_runner), "--data_path", str(data_path), "--skip_colmap", "--skip_tracking", "--skip_voting"],
         "SAM3 Masking",
         total=total_images,
-        pattern=r"Frame (\d+)"
+        pattern=r"Frame (\d+)",
+        log_file=module1_log_path
     )
     
     stream_command(
         py_u + [str(module1_runner), "--data_path", str(data_path), "--skip_colmap", "--skip_masks", "--skip_voting"],
         "Object Tracking",
         total=total_images,
-        pattern=r"Frame (\d+)"
+        pattern=r"Frame (\d+)",
+        log_file=module1_log_path
     )
 
     stream_command(
         py_u + [str(module1_runner), "--data_path", str(data_path), "--skip_colmap", "--skip_masks", "--skip_tracking"],
         "3D Voting",
-        total=None
+        total=None,
+        log_file=module1_log_path
     )
 
     # DYNAMIC CONFIG GENERATION
-    print(f"\n[3/3] STAGE: VRoom Neural Training")
+    print("\n[3/3] STAGE: VRoom Neural Training")
     with open(base_config, "r", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
     
