@@ -86,18 +86,6 @@ def main():
         model_params["exp_name"] = os.path.join(model_params.get("exp_name", "run"), args.scene_name)
         model_params["source_path"] = os.path.join(model_params["source_path"], args.scene_name)
 
-    # --- Resume from checkpoint ---
-    start_iter = 0
-    if args.start_checkpoint:
-        if not os.path.isdir(args.start_checkpoint):
-            parser.error(f"--start_checkpoint path does not exist: {args.start_checkpoint}")
-        dir_name = os.path.basename(args.start_checkpoint.rstrip("/"))
-        if dir_name.startswith("iteration_"):
-            start_iter = int(dir_name.replace("iteration_", ""))
-        else:
-            parser.error("--start_checkpoint must point to a directory named 'iteration_NNNN'")
-        model_params["pretrained_checkpoint"] = args.start_checkpoint
-
     source_path = model_params.get("source_path")
     if source_path is None:
         parser.error("source_path is missing from model_params")
@@ -143,7 +131,7 @@ def main():
     logger.info("Optimizing " + model_path)
     scene = TrainingScene(dataset_args, gaussians, shuffle=pipeline_config.shuffle, logger=logger, weed_ratio=pipeline_config.weed_ratio)
     trainer = Trainer(train_config, pipeline_config, gaussians, scene, output_dir=model_path, logger=logger)
-    trainer.run(first_iter=start_iter, resume_checkpoint_path=args.start_checkpoint)
+    trainer.run()
     logger.info("\nTraining complete.")
 
 

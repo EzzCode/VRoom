@@ -44,8 +44,7 @@ pipeline_params: {
     add_prefilter: True,
     vis_step: 1000,
     no_prefilter_step: 0,
-    shuffle: True,
-    save_iterations: [7000, 14000, 21000, 28000, 30000]
+    shuffle: True
 }
 
 # Optimization Parameters

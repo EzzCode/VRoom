@@ -286,12 +286,7 @@ class TrainingScene:
         self.train_cameras = {}
         self.test_cameras = {}
 
-        pretrained_ckpt = getattr(args, "pretrained_checkpoint", "")
-        if pretrained_ckpt and os.path.isdir(pretrained_ckpt):
-            # Resume from an explicit checkpoint directory (e.g. output/.../point_cloud/iteration_7000)
-            self.gaussians.load_ply(os.path.join(pretrained_ckpt, "point_cloud.ply"))
-            self.gaussians.load_mlp_checkpoints(pretrained_ckpt)
-        elif load_iteration:
+        if load_iteration:
             iteration_dir = os.path.join(self.model_path, "point_cloud", f"iteration_{load_iteration}")
             self.gaussians.load_ply(os.path.join(iteration_dir, "point_cloud.ply"))
             self.gaussians.load_mlp_checkpoints(iteration_dir)
