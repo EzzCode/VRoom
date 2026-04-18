@@ -9,13 +9,9 @@
  * For inquiries contact  george.drettakis@inria.fr
  */
 
+#include "rasterizer.h"
 #include "rasterizer_impl.h"
-#include <iostream>
-#include <fstream>
-#include <algorithm>
-#include <numeric>
 #include <cuda.h>
-#include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>

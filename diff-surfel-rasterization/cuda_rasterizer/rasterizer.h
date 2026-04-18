@@ -12,7 +12,6 @@
 #ifndef CUDA_RASTERIZER_H_INCLUDED
 #define CUDA_RASTERIZER_H_INCLUDED
 
-#include <vector>
 #include <functional>
 
 namespace CudaRasterizer
