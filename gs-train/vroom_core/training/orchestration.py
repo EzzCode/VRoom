@@ -106,9 +106,30 @@ class TrainingOrchestrator:
             max_steps=opt.iterations,
         )
 
-    def run(self, first_iter: int = 0):
+    def run(self, first_iter: int = 0, resume_checkpoint_path: str = None):
         from gaussian_renderer.render import prefilter_voxel, render
         self.gaussians.setup_training(self.opt, grad_clip_norm=self.opt.grad_clip_norm)
+
+        # --- Restore optimizer state from checkpoint (field/MLP already loaded) ---
+        if resume_checkpoint_path:
+            state_path = os.path.join(resume_checkpoint_path, "training_state.pth")
+            if os.path.exists(state_path):
+                try:
+                    state = torch.load(state_path, map_location="cuda")
+                    if "optimizer" in state and self.gaussians.optimizer is not None:
+                        self.gaussians.optimizer.load_state_dict(state["optimizer"])
+                    msg = f"Resumed optimizer state from {state_path}"
+                    if self.logger:
+                        self.logger.info(msg)
+                    else:
+                        print(msg)
+                except Exception as e:
+                    msg = f"Could not restore optimizer state ({e}) — starting optimizer fresh."
+                    if self.logger:
+                        self.logger.warning(msg)
+                    else:
+                        print(msg)
+
         camera_stack = None
         smoothed_loss = 0.0
         smoothed_depth = 0.0

@@ -370,6 +370,7 @@ def rasterization_2dgs(
         
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
         means2D = torch.zeros_like(means, requires_grad=True, device=device)
+        means2D.retain_grad()
         
         # Determine colors
         if sh_degree is not None and colors.dim() == 3:
@@ -392,6 +393,7 @@ def rasterization_2dgs(
         # color: [3, H, W], allmap: [7, H, W]
         
         # --- Rasterize features in chunks ---
+        torch.cuda.empty_cache() # reduce fragmentation before large feature 
         render_feat = None
         if features is not None:
             F_dim = features.shape[-1]
@@ -488,7 +490,7 @@ def rasterization_2dgs(
     
     info = {
         'radii': all_infos[0]['radii'].unsqueeze(0),
-        'means2d': all_infos[0]['means2d'].unsqueeze(0),
+        'means2d': all_infos[0]['means2d'],   # leaf tensor — .grad populated during backward
     }
     
     return (
