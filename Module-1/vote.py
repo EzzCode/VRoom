@@ -3,6 +3,8 @@ Point Cloud Voting for Object Labeling
 
 Projects 3D points onto 2D mask images and assigns per-point object labels
 through multi-view voting (majority, probability, or correspondence-based).
+After voting, performs 3D alias merging to consolidate tracker IDs that
+refer to the same physical object.
 
 Usage:
     python voter/vote.py --data_path data --algorithm majority
@@ -14,9 +16,9 @@ import cv2
 import argparse
 import os
 import sys
+import colorsys
 from collections import Counter, defaultdict
 from plyfile import PlyData, PlyElement
-from sklearn.cluster import DBSCAN
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from colmap_loader import (
@@ -25,7 +27,7 @@ from colmap_loader import (
 )
 
 
-##### COLMAP points3D reader (preserves track data for corr voting) ###########################################################
+##### COLMAP points3D reader (preserves track data for corr voting) ###########
 
 def load_points3D_bin(path):
     """Load COLMAP points3D.bin -> dict[id -> (xyz, rgb, error, tracks)]."""
@@ -63,7 +65,7 @@ def load_points3D_txt(path):
     return points
 
 
-##### Camera intrinsics handling ###########################################################
+##### Camera intrinsics handling ###############################################
 
 # COLMAP models where params[0] is a shared focal length f, then cx, cy
 _SHARED_FOCAL_MODELS = {
@@ -79,7 +81,7 @@ def intrinsics_from_camera(cam):
     return p[0], p[1], p[2], p[3]      # PINHOLE / OPENCV / etc.
 
 
-##### Batch projection ###########################################################
+##### Batch projection #########################################################
 
 def quat_to_R(q):
     """Quaternion [w,x,y,z] -> 3x3 rotation matrix."""
@@ -108,7 +110,7 @@ def project_all(pts_xyz, R, t, fx, fy, cx, cy, w, h):
     return ui, vi, in_bounds
 
 
-##### Mask I/O ###########################################################
+##### Mask I/O #################################################################
 
 def _mask_path(mask_dir, image_name):
     """Derive mask .png path from a COLMAP image name (.jpg/.JPG)."""
@@ -122,7 +124,7 @@ def load_mask(mask_dir, image_name):
     return cv2.imread(path, cv2.IMREAD_UNCHANGED)
 
 
-##### Vote collection ###########################################################
+##### Vote collection ##########################################################
 
 def collect_projection_votes(images, cameras, points, mask_dir):
     """
@@ -186,7 +188,7 @@ def collect_correspondence_votes(images, points, mask_dir):
     return votes
 
 
-##### Label resolution strategies ###########################################################
+##### Label resolution strategies ##############################################
 
 def resolve_majority(label_list):
     """Pick the most frequent label."""
@@ -217,7 +219,115 @@ _RESOLVERS = {
 }
 
 
-##### PLY output ###########################################################
+##### 3D Alias Merging #########################################################
+
+def build_vote_point_sets(votes, pid_order):
+    """
+    Build a dict mapping each non-background label to the set of point indices
+    that received ANY vote for that label across all views.
+    
+    Unlike resolved labels (where each point has 1 label), a single point can
+    appear in multiple label sets here — that overlap is the alias signal.
+    """
+    label_sets = defaultdict(set)
+    for i, pid in enumerate(pid_order):
+        if pid in votes:
+            for lbl in votes[pid]:
+                if lbl != 0:
+                    label_sets[int(lbl)].add(i)
+    return label_sets
+
+
+def compute_3d_label_iou(set_a, set_b):
+    """Compute point-level IoU between two sets of point indices."""
+    inter = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return inter / union if union > 0 else 0.0
+
+
+def merge_aliases(labels, votes, pid_order, iou_thresh=0.20, min_covisibility=5):
+    """
+    Detect and merge tracker IDs that refer to the same physical object.
+    
+    Computes point membership from RAW VOTES (not resolved labels), so a 3D
+    point that was labeled as ID 12 in frames 0-25 and ID 20 in frames 36-60
+    appears in both sets, producing a nonzero IoU.
+    
+    Two tracker IDs are merged when:
+    1. Their raw-vote point sets have IoU >= iou_thresh (same physical space)
+    2. They share at least min_covisibility points (seen on same 3D points)
+    
+    Uses Union-Find for transitive merging (if A=B and B=C, then A=B=C).
+    Returns remapped labels array and the merge map.
+    """
+    # Build point sets from RAW votes — this is the critical difference
+    label_sets = build_vote_point_sets(votes, pid_order)
+    if len(label_sets) < 2:
+        return labels, {}
+    
+    sorted_labels = sorted(label_sets.keys())
+    
+    # Log raw vote stats
+    print(f"  Labels in raw votes: {sorted_labels}")
+    for lbl in sorted_labels:
+        print(f"    ID {lbl:3d}: {len(label_sets[lbl]):5d} points (raw vote membership)")
+    
+    # Union-Find
+    parent = {lbl: lbl for lbl in label_sets}
+    
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            if ra > rb:
+                ra, rb = rb, ra
+            parent[rb] = ra
+    
+    merge_count = 0
+    
+    for i, la in enumerate(sorted_labels):
+        for lb in sorted_labels[i + 1:]:
+            if find(la) == find(lb):
+                continue
+            
+            # Covisibility = shared points that got votes for both labels
+            shared = len(label_sets[la] & label_sets[lb])
+            if shared < min_covisibility:
+                continue
+            
+            # 3D point IoU from raw votes
+            iou = compute_3d_label_iou(label_sets[la], label_sets[lb])
+            if iou >= iou_thresh:
+                union(la, lb)
+                merge_count += 1
+                print(f"  Alias merge: ID {lb} -> ID {la}  (3D IoU={iou:.3f}, shared_pts={shared})")
+
+    
+    if merge_count == 0:
+        print("  No aliases detected.")
+        return labels, {}
+    
+    # Build final merge map and remap
+    merge_map = {}
+    for lbl in sorted_labels:
+        root = find(lbl)
+        if root != lbl:
+            merge_map[lbl] = root
+    
+    remapped = labels.copy()
+    for old_id, new_id in merge_map.items():
+        remapped[labels == old_id] = new_id
+    
+    print(f"  Merged {merge_count} alias pairs into {len(set(find(l) for l in sorted_labels))} unique objects.")
+    return remapped, merge_map
+
+
+##### PLY output ###############################################################
 
 def save_labeled_ply(path, xyz, rgb, labels):
     """Write a PLY with (x,y,z, nx,ny,nz, r,g,b, label)."""
@@ -257,7 +367,22 @@ def prune_3d_outliers(xyz, labels, min_points=10):
             cleaned_labels[mask] = 0
             
     return cleaned_labels
-##### Pipeline ###########################################################
+
+
+##### Visualization ############################################################
+
+def label_to_color(lbl):
+    """Map label to a distinct RGB color using golden-angle HSV spacing."""
+    if lbl == 0:
+        return (150, 150, 150)  # gray for background
+    # Golden angle (~137.5 deg) gives maximally spaced hues
+    hue = ((lbl * 137.508) % 360) / 360.0
+    sat, val = 0.75, 0.9
+    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+##### Pipeline #################################################################
 
 def run_voting(args):
     data = args.data_path
@@ -266,7 +391,7 @@ def run_voting(args):
     if not os.path.isdir(mask_dir):
         sys.exit(f"ERROR: mask dir not found: {mask_dir}")
 
-    # Load COLMAP data ###########################################################
+    # ── Load COLMAP data ──
     sp = os.path.join(data, args.sparse_dir)
     if not os.path.isdir(sp):
         sys.exit(f"ERROR: sparse dir not found: {sp}")
@@ -276,7 +401,7 @@ def run_voting(args):
         images  = read_extrinsics_binary(os.path.join(sp, "images.bin"))
         points  = load_points3D_bin(os.path.join(sp, "points3D.bin"))
         print(f"Loaded binary COLMAP from {sp}")
-    except Exception as e:
+    except Exception:
         cameras = read_intrinsics_text(os.path.join(sp, "cameras.txt"))
         images  = read_extrinsics_text(os.path.join(sp, "images.txt"))
         points  = load_points3D_txt(os.path.join(sp, "points3D.txt"))
@@ -288,7 +413,7 @@ def run_voting(args):
         print(f"  cam {cid}: {cam.model}  {cam.width}x{cam.height}  "
               f"f=({fx:.1f},{fy:.1f})  c=({cx:.1f},{cy:.1f})")
 
-    # Collect votes ###########################################################
+    # ── Collect votes ──
     algo = args.algorithm
     print(f"\nVoting strategy: {algo}")
 
@@ -299,7 +424,7 @@ def run_voting(args):
 
     resolver = _RESOLVERS[algo]
 
-    # Resolve labels ###########################################################
+    # ── Resolve labels ──
     pid_order = list(points.keys())
     xyz_arr = np.array([points[p][0] for p in pid_order], dtype=np.float32)
     rgb_arr = np.array([points[p][1] for p in pid_order], dtype=np.uint8)
@@ -310,48 +435,49 @@ def run_voting(args):
             labels[i] = resolver(votes[pid])
 
     unique, counts = np.unique(labels, return_counts=True)
-    print(f"\nLabel distribution ({len(unique)} labels):")
+    print(f"\nRaw label distribution ({len(unique)} labels):")
     for lbl, cnt in zip(unique, counts):
         print(f"  label {lbl:3d}: {cnt:6d} pts ({100*cnt/len(labels):.1f}%)")
 
-    # Create output folder ###########################################################
+    # ── 3D Alias Merging ──
+    if not args.disable_alias_merge:
+        print("\n--- 3D Alias Merging ---")
+        labels, merge_map = merge_aliases(
+            labels, votes, pid_order,
+            iou_thresh=args.alias_iou_thresh,
+            min_covisibility=args.alias_min_covisibility,
+        )
+        if merge_map:
+            unique, counts = np.unique(labels, return_counts=True)
+            print(f"\nPost-merge label distribution ({len(unique)} labels):")
+            for lbl, cnt in zip(unique, counts):
+                print(f"  label {lbl:3d}: {cnt:6d} pts ({100*cnt/len(labels):.1f}%)")
+
+    # ── Prune outliers ──
+    labels = prune_3d_outliers(xyz_arr, labels, min_points=args.min_points)
+
+    unique, counts = np.unique(labels, return_counts=True)
+    print(f"\nFinal label distribution ({len(unique)} labels):")
+    for lbl, cnt in zip(unique, counts):
+        print(f"  label {lbl:3d}: {cnt:6d} pts ({100*cnt/len(labels):.1f}%)")
+
+    # ── Create output folder ──
     out_dir = os.path.join(data, args.output_dir)
     obj_dir = os.path.join(out_dir, "object_clouds")
     os.makedirs(obj_dir, exist_ok=True)
 
-    # Prune outliers ###########################################################
-    labels = prune_3d_outliers(xyz_arr, labels, min_points=args.min_points)
-
-    unique, counts = np.unique(labels, return_counts=True)
-    print(f"\nPruned {len(xyz_arr) - len(unique)} outliers")
-    print(f"\nLabel distribution ({len(unique)} labels):")
-    for lbl, cnt in zip(unique, counts):
-        print(f"  label {lbl:3d}: {cnt:6d} pts ({100*cnt/len(labels):.1f}%)") 
-
-    # Labeled PLY original RGB + label property
+    # ── Labeled PLY: original RGB + label property ──
     labeled_path = os.path.join(out_dir, "points3D_labeled.ply")
     save_labeled_ply(labeled_path, xyz_arr, rgb_arr, labels)
     print(f"\nSaved -> {labeled_path}")
 
-    # Visualization PLY auto-generate distinct colors per label
-    def label_to_color(lbl):
-        """Map label to a distinct RGB color using golden-angle HSV spacing."""
-        if lbl == 0:
-            return (150, 150, 150)  # gray for background
-        # Golden angle (~137.5 deg) gives maximally spaced hues
-        hue = ((lbl * 137.508) % 360) / 360.0
-        sat, val = 0.75, 0.9
-        # HSV -> RGB
-        import colorsys
-        r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
-        return (int(r * 255), int(g * 255), int(b * 255))
-
+    # ── Visualization PLY: auto-generate distinct colors per label ──
     vis_rgb = np.array([label_to_color(l) for l in labels], dtype=np.uint8)
     vis_path = os.path.join(out_dir, "points3D_vis.ply")
     save_labeled_ply(vis_path, xyz_arr, vis_rgb, labels)
     print(f"Saved -> {vis_path}")
 
-    # Per-object clouds one PLY per label (skip background 0)
+    # ── Per-object clouds: one PLY per label (skip background 0) ──
     for lbl in sorted(set(labels)):
         if lbl == 0:
             continue
@@ -363,9 +489,7 @@ def run_voting(args):
     print(f"\nAll outputs in: {out_dir}")
 
 
-
-
-##### CLI ###########################################################
+##### CLI ######################################################################
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Point cloud object labeling via multi-view voting.")
@@ -375,4 +499,8 @@ if __name__ == "__main__":
     p.add_argument("--algorithm",  default="majority", choices=["majority", "prob", "corr"])
     p.add_argument("--output_dir", default="output", help="Output folder name inside data_path")
     p.add_argument("--min_points", type=int, default=10, help="Minimum number of points to be considered an object")
+    # Alias merging
+    p.add_argument("--disable_alias_merge", action="store_true", help="Disable 3D alias merging")
+    p.add_argument("--alias_iou_thresh", type=float, default=0.40, help="Min 3D point IoU to merge two tracker IDs")
+    p.add_argument("--alias_min_covisibility", type=int, default=15, help="Min shared points for alias merge candidates")
     run_voting(p.parse_args())
