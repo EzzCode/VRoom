@@ -20,12 +20,7 @@ const HIT_PRIORITY: Record<string, number> = {
   DepthPoint: 0,
 };
 
-ViroMaterials.createMaterials({
-  reticleMaterial: {
-    diffuseColor: '#ffffff',
-    diffuseIntensity: 0.8,
-  },
-});
+
 
 export default function ARMeshScene(arSceneProps: any) {
   const props = arSceneProps.sceneNavigator?.viroAppProps ?? arSceneProps;
@@ -164,11 +159,6 @@ export default function ARMeshScene(arSceneProps: any) {
       onCameraARHitTest={handleCameraARHitTest}
       onClick={handleClick}
       anchorDetectionTypes={['PlanesHorizontal', 'PlanesVertical']}
-      displayPointCloud={{
-        imageSource: require('../../../assets/meshes/point_cloud_point.png'),
-        imageScale: [0.02, 0.02, 0.02],
-        maxPoints: 200,
-      }}
     >
       <ViroAmbientLight color="#FFFFFF" intensity={500} />
       <ViroDirectionalLight

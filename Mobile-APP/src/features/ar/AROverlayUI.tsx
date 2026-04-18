@@ -97,7 +97,7 @@ export default function AROverlayUI({
               textAlign: 'center',
             }}
           >
-            Move your phone around to start AR tracking
+            Please move your phone to initialize AR
           </Text>
         </View>
       )}
@@ -126,7 +126,7 @@ export default function AROverlayUI({
               textAlign: 'center',
             }}
           >
-            Point your camera at a textured flat surface (floor, table, desk)
+            Looking for a flat surface to place your object...
           </Text>
         </View>
       )}
@@ -180,8 +180,8 @@ export default function AROverlayUI({
               }}
             >
               {reticleVisible
-                ? 'Tap to place your mesh here'
-                : 'Point your camera at a flat surface'}
+                ? 'Tap the target to place your object'
+                : 'Move closer to a flat surface'}
             </Text>
           </View>
         </View>

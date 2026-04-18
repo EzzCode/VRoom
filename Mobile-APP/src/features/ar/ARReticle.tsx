@@ -1,5 +1,28 @@
-import React from 'react';
-import { ViroNode, ViroQuad } from '@reactvision/react-viro';
+import { ViroNode, ViroImage, ViroAnimations } from '@reactvision/react-viro';
+
+ViroAnimations.registerAnimations({
+  pulse: {
+    properties: {
+      scaleX: 1.1,
+      scaleY: 1.1,
+      scaleZ: 1.1,
+      opacity: 0.8,
+    },
+    easing: 'EaseInEaseOut',
+    duration: 1000,
+  },
+  reset: {
+    properties: {
+      scaleX: 1.0,
+      scaleY: 1.0,
+      scaleZ: 1.0,
+      opacity: 1.0,
+    },
+    easing: 'EaseInEaseOut',
+    duration: 1000,
+  },
+  pulseLoop: ['pulse', 'reset'] as any,
+});
 
 interface ARReticleProps {
   position: [number, number, number];
@@ -11,12 +34,15 @@ export default function ARReticle({ position, visible }: ARReticleProps) {
 
   return (
     <ViroNode position={position} rotation={[-90, 0, 0]}>
-      <ViroQuad
-        position={[0, 0, 0.001]}
-        width={0.05}
-        height={0.05}
-        materials={['reticleMaterial']}
-        arShadowReceiver={false}
+      <ViroImage
+        source={require('../../../assets/meshes/ar_reticle.png')}
+        width={0.15}
+        height={0.15}
+        animation={{
+          name: 'pulseLoop',
+          run: true,
+          loop: true,
+        }}
       />
     </ViroNode>
   );
