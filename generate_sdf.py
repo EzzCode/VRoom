@@ -1,8 +1,12 @@
-import torch
 import numpy as np
 
 def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, voxel_size, trunc_margin, color_image=None, grid_origin=None, depth_trunc=None):
     """
+    Improved TSDF generation with:
+    1. Bilinear Interpolation for smoother surfaces
+    2. Euclidean Ray Distance instead of Z-depth difference
+    3. Depth-dependent weight calculation
+    
     Project a 3D voxel grid onto a 2D depth map to calculate TSDF.
     
     Inputs:
@@ -99,7 +103,6 @@ def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, v
 
     # The Z-coordinate in camera space = how far each point is along the camera's viewing direction.
     corner_depths = cam_points[:, 2]                        # shape: (N³,) 
-    # corner_depths is a 1D array of length N³.
 
     # =====================================================================
     # Step 3: Camera Space to Image Space (Intrinsics)
@@ -110,10 +113,11 @@ def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, v
     # intrinsics is (3, 3), cam_points.T is (3, N³) -> result is (3, N³) -> transpose to (N³, 3)
     image_points = (intrinsics @ cam_points.T).T  # shape: (N³, 3)
 
+    # Keep as floats for bilinear interpolation
     # Perspective Divide: divide X and Y by Z to project onto the 2D image plane.
     # This is what makes faraway things look smaller, just like a real camera.
-    pixel_u = (image_points[:, 0] / image_points[:, 2]).astype(int)  # horizontal pixel column
-    pixel_v = (image_points[:, 1] / image_points[:, 2]).astype(int)  # vertical pixel row
+    pixel_u = image_points[:, 0] / image_points[:, 2]
+    pixel_v = image_points[:, 1] / image_points[:, 2]
 
     # =====================================================================
     # Step 4: Filter out the blind spots
@@ -123,24 +127,43 @@ def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, v
     # =====================================================================
     H, W = depth_map.shape  # height & width of the depth image (in pixels)
 
+    # Strict bounds for bilinear interpolation (need to access u+1, v+1 safely)
     bounds_mask = (
-        (pixel_u >= 0) & (pixel_u < W) &   # inside left/right bounds
-        (pixel_v >= 0) & (pixel_v < H) &   # inside top/bottom bounds
-        (corner_depths > 0)                  # in front of the camera, not behind it
+        (pixel_u >= 0) & (pixel_u < W - 1) &
+        (pixel_v >= 0) & (pixel_v < H - 1) &
+        (corner_depths > 0)
     )
 
-    # Fix: also reject pixels where depth_map = 0 (camera saw nothing there).
-    # Without this, SDF = 0 - voxel_depth = large negative, which Marching Cubes
-    # incorrectly interprets as "inside an object", producing false frustum-shaped walls.
-    # We check depth > 0 only on the subset that passed bounds_mask, then expand back.
-    # 0 depth means the camera ray at that pixel didn't hit any surface (e.g. empty background)
-    valid_mask = np.zeros(world_points.shape[0], dtype=bool)
-    sampled_depths = depth_map[pixel_v[bounds_mask], pixel_u[bounds_mask]]
-    depth_check = sampled_depths > 0
-    # If depth_trunc is set, also reject pixels where depth exceeds the max range.
-    # This prevents far-away noisy surfaces from corrupting the TSDF.
+    # --- IMPROVEMENT 3: Bilinear Interpolation ---
+    u_valid = pixel_u[bounds_mask]
+    v_valid = pixel_v[bounds_mask]
+
+    u0 = np.floor(u_valid).astype(int)
+    v0 = np.floor(v_valid).astype(int)
+    u1 = u0 + 1
+    v1 = v0 + 1
+
+    # Interp weights
+    wa = (u1 - u_valid) * (v1 - v_valid)
+    wb = (u_valid - u0) * (v1 - v_valid)
+    wc = (u1 - u_valid) * (v_valid - v0)
+    wd = (u_valid - u0) * (v_valid - v0)
+
+    # Gather 4 corners
+    d00 = depth_map[v0, u0]
+    d01 = depth_map[v0, u1]
+    d10 = depth_map[v1, u0]
+    d11 = depth_map[v1, u1]
+
+    # Only keep points where ALL 4 neighbors have valid depth
+    depth_check = (d00 > 0) & (d01 > 0) & (d10 > 0) & (d11 > 0)
     if depth_trunc is not None:
-        depth_check = depth_check & (sampled_depths < depth_trunc)
+        depth_check &= (d00 < depth_trunc) & (d01 < depth_trunc) & (d10 < depth_trunc) & (d11 < depth_trunc)
+
+    # Interpolate depth
+    sampled_depths = wa * d00 + wb * d01 + wc * d10 + wd * d11
+
+    valid_mask = np.zeros(world_points.shape[0], dtype=bool)
     valid_mask[bounds_mask] = depth_check
 
     # =====================================================================
@@ -148,27 +171,39 @@ def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, v
     # For the valid pixels, look up their depth in the actual depth_map.
     # Calculate: SDF = (Surface Depth from Image) - (Voxel Depth)
     # =====================================================================
-    # Start with a default value of 1.0 (meaning "far from surface, in free space")
-    # any positive value means the voxel is in front of the surface (free space)
-    # any negative value means the voxel is behind the surface (inside the object)
-    # we picked 1 because it's the maximum possible value for the truncated SDF
-    sdf_values = np.ones(world_points.shape[0])  # shape: (N³,) 
+    # --- IMPROVEMENT 2: Euclidean Ray Distance ---
+    # Find directional cosine of the camera ray for each valid voxel
+    valid_cam_points = cam_points[valid_mask]
+    ray_lengths = np.linalg.norm(valid_cam_points, axis=1)
+    directional_cosine = corner_depths[valid_mask] / ray_lengths
 
-    # For the valid points only, look up the actual surface depth from the depth image
-    # at the pixel (v, u) each point projects to, then subtract the voxel's depth.
-    # Positive = voxel is in front of the surface (free space)
-    # Negative = voxel is behind the surface (inside the object)
-    surface_depths = depth_map[pixel_v[valid_mask], pixel_u[valid_mask]]
-    sdf_values[valid_mask] = surface_depths - corner_depths[valid_mask]
+    # Initialize with large positive values to mark as "unseen / uninitialized"
+    sdf_values = np.ones(world_points.shape[0]) * 999.0
+
+    # Calculate precise Euclidean TSDF
+    final_sampled_depths = sampled_depths[depth_check]
+    sdf_values[valid_mask] = (final_sampled_depths - corner_depths[valid_mask]) * directional_cosine
 
     # =====================================================================
     # Step 6: Truncation
     # Cap the sdf_values between +trunc_margin and -trunc_margin.
     # Then, divide by trunc_margin so the final values sit neatly between -1.0 and 1.0.
     # =====================================================================
-    # np.clip chops off any value beyond the margin (e.g. sdf=5.0 with margin=0.1 becomes 0.1)
-    # Dividing by trunc_margin normalizes to [-1.0, +1.0]
-    tsdf_values = np.clip(sdf_values, -trunc_margin, trunc_margin) / trunc_margin
+    # Truncate to [-1, 1]
+    # We clip the computed values, but keep the "999" (unseen) values intact temporarily
+    valid_sdf = sdf_values[valid_mask]
+    tsdf_valid = np.clip(valid_sdf, -trunc_margin, trunc_margin) / trunc_margin
+    
+    tsdf_values = np.ones(world_points.shape[0]) # Default to +1.0
+    tsdf_values[valid_mask] = tsdf_valid
+
+    # --- IMPROVEMENT 4: Dynamic Weighting (Depth-Dependent) ---
+    weights = np.zeros(world_points.shape[0])
+    
+    # Weight is > 0 ONLY for valid mask points that are NOT truncated behind the surface (-1)
+    # This enables IMPROVEMENT 1: Free space carving (points with tsdf == +1.0 in front of surface get weight)
+    carving_mask = valid_mask & (tsdf_values > -0.99)
+    weights[carving_mask] = 1.0 / (corner_depths[carving_mask] ** 2 + 1e-5)
 
     # =====================================================================
     # Step 7: Reshape and Return
@@ -176,6 +211,7 @@ def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, v
     # original 3D grid shape (N, N, N).
     # =====================================================================
     final_grid = tsdf_values.reshape(grid_shape)  # (N³,) -> (N, N, N)
+    final_weights = weights.reshape(grid_shape)
 
     # =====================================================================
     # Step 8: Sample Colors (optional)
@@ -183,18 +219,32 @@ def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, v
     # at the same pixel (v, u) used for depth. Unseen corners get black (0, 0, 0).
     # black shouldn't cause problem because weighting is used
     # =====================================================================
+    # Bilinear Interpolate Colors (Optional)
     color_grid = None
     if color_image is not None:
-        color_values = np.zeros((world_points.shape[0], 3))  # shape: (N³, 3)
-        color_values[valid_mask] = color_image[pixel_v[valid_mask], pixel_u[valid_mask]]
-        color_grid = color_values.reshape(*grid_shape, 3)    # (N³, 3) -> (N, N, N, 3)
+        color_values = np.zeros((world_points.shape[0], 3))
+        
+        c00 = color_image[v0, u0]
+        c01 = color_image[v0, u1]
+        c10 = color_image[v1, u0]
+        c11 = color_image[v1, u1]
+        
+        sampled_colors = (
+            c00 * wa[:, np.newaxis] + 
+            c01 * wb[:, np.newaxis] + 
+            c10 * wc[:, np.newaxis] + 
+            c11 * wd[:, np.newaxis]
+        )
+        
+        color_values[valid_mask] = sampled_colors[depth_check]
+        color_grid = color_values.reshape(*grid_shape, 3)
 
-    return final_grid, color_grid
+    return final_grid, color_grid, final_weights
 
 
 def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_size, trunc_margin, color_images=None, grid_origin=None, depth_trunc=None):
     """
-    Fuse multiple single-camera TSDFs into one grid using weighted averaging.
+    Improved multi-camera fusion using the generated grids and dynamic weights.
     
     Each camera only sees part of the scene. Fusion combines all views so that
     voxels seen by multiple cameras get averaged, producing a more complete and
@@ -219,52 +269,41 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
     tsdf_sum = np.zeros(grid_shape)
     weight_sum = np.zeros(grid_shape)
     if color_images is not None:
-        color_sum = np.zeros((*grid_shape, 3))  # (N, N, N, 3)
+        color_sum = np.zeros((*grid_shape, 3))
 
     num_cameras = len(depth_maps)
 
     for i in range(num_cameras):
-        print(f"  Processing camera {i + 1}/{num_cameras}...")
+        print(f"  Processing camera {i + 1}/{num_cameras} (Improved)...")
 
-        # Get the TSDF (and optionally color) from this single camera
         color_img_i = color_images[i] if color_images is not None else None
-        tsdf_i, color_i = generate_tsdf_single_camera(
+        tsdf_i, color_i, weight_i = generate_tsdf_single_camera(
             depth_maps[i], intrinsics_list[i], extrinsics_list[i],
             grid_shape, voxel_size, trunc_margin, color_image=color_img_i,
             grid_origin=grid_origin, depth_trunc=depth_trunc
         )
 
-        # Weight = 1 only for corners that are within the truncation band (|TSDF| < 1.0).
-        # This excludes two types of useless corners:
-        #   - TSDF = +1.0: unseen corners (default) or observed but far in free space (clamped)
-        #   - TSDF = -1.0: observed but far behind the surface (clamped)
-        # Without the abs check, -1.0 values from one camera would corrupt near-surface
-        # values from another camera (e.g. averaging 0.0 and -1.0 = -0.5, creating holes).
-        # TLDR: Average only TSDF values of corners that were seen by the camera and are inside
-        # the truncation band.
-        weight_i = (np.abs(tsdf_i) < 1.0).astype(float)
-
+        # Uses the improved weights returned by the single camera generator
+        # Automatically handles Free Space Carving & Depth drop-off
         tsdf_sum += tsdf_i * weight_i
         weight_sum += weight_i
+        
         if color_images is not None and color_i is not None:
-            # Accumulate colors with the same weights as TSDF
-            # Because weight_i is (N,N,N) and color_i is (N,N,N,3), meaning its a 3D grid
-            # of size N, where every point holds an RGB color
-            # we need to broadcast weight_i to (N,N,N,1) to multiply with color_i
-            color_sum += color_i * weight_i[..., np.newaxis]  # broadcast (N,N,N) -> (N,N,N,1)
+            color_sum += color_i * weight_i[..., np.newaxis]
 
-    # Average: for each corner, divide the accumulated TSDF by the number of cameras that saw it.
+    # Average: for each corner, divide the accumulated TSDF by the sum of weights.
     # Corners seen by no camera stay at 1.0 (free space / no data).
-    fused_tsdf = np.where(weight_sum > 0, tsdf_sum / weight_sum, 1.0)
+    mask = weight_sum > 0
+    fused_tsdf = np.ones_like(tsdf_sum)
+    fused_tsdf[mask] = tsdf_sum[mask] / weight_sum[mask]
 
     # Average colors the same way
     fused_colors = None
     if color_images is not None:
-        # Broadcast weight_sum (N,N,N) to match color_sum (N,N,N,3)
-        fused_colors = np.where(weight_sum[..., np.newaxis] > 0,
-                                color_sum / weight_sum[..., np.newaxis], 0.0)
+        fused_colors = np.zeros_like(color_sum)
+        fused_colors[mask] = color_sum[mask] / weight_sum[mask, np.newaxis]
 
     print(f"  Fusion complete. Corners observed by at least 1 camera: "
-          f"{np.sum(weight_sum > 0)} / {np.prod(grid_shape)}")
+          f"{np.sum(mask)} / {np.prod(grid_shape)}")
 
     return fused_tsdf, fused_colors

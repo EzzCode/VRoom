@@ -86,16 +86,16 @@ import matplotlib.pyplot as plt
 # Grab the slice exactly halfway through the Z-axis (index 32)
 middle_slice = voxel_grid_numpy[:, :, int(N/2)]
 
-# Plot it using a color map where 0 is white, positive is red, negative is blue
-plt.figure(figsize=(6, 6))
-plt.title("2D Slice of the 3D Voxel Grid")
-plt.imshow(middle_slice, cmap='RdBu', origin='lower')
-plt.colorbar(label="SDF Value (Distance to surface)")
+# # Plot it using a color map where 0 is white, positive is red, negative is blue
+# plt.figure(figsize=(6, 6))
+# plt.title("2D Slice of the 3D Voxel Grid")
+# plt.imshow(middle_slice, cmap='RdBu', origin='lower')
+# plt.colorbar(label="SDF Value (Distance to surface)")
 
 # Draw a contour line exactly where the value is 0 (the surface)
-plt.contour(middle_slice, levels=[0], colors='black', linewidths=2)
+# plt.contour(middle_slice, levels=[0], colors='black', linewidths=2)
 
-plt.show()
+# plt.show()
 
 # ============================================================================
 # Marching Cubes Lookup Tables
@@ -628,28 +628,28 @@ def run_marching_cubes(voxel_grid, N, color_grid=None):
     # EXAMPLE: The relationship between `vertices` and `edge_vertices`
     # ============================================================================
     #
-    # 1. The warehouse (vertices):
+    # 1. THE WAREHOUSE (vertices):
     # This is the global list of actual 3D coordinates for the whole model.
     # Let's say it already has 50 points stored from previous cubes.
     # vertices = [ (0.1, 0.5, 0.2), ... 49 more points ... ]
     # Currently, len(vertices) == 50.
     #
-    # 2. The sticky notes (edge_vertices):
+    # 2. THE STICKY NOTES (edge_vertices):
     # This is a temporary list of 12 slots, wiped clean for every new cube.
     # It links the 12 edges of THIS cube to the global warehouse IDs.
     # edge_vertices = [None, None, None, None, None, None, ... ]
     #
-    # 3. The intersection (Interpolation):
+    # 3. THE INTERSECTION (Interpolation):
     # Our bitwise math finds the surface slices exactly through Edge 3.
     # We calculate the exact physical 3D coordinate: new_point = (1.5, 2.0, 3.0)
     #
-    # 4. The handoff:
+    # 4. THE HANDOFF:
     # We write the next available ID (50) on the sticky note for Edge 3:
     # edge_vertices[3] = 50  
     # Then, we permanently store the coordinate in the warehouse:
     # vertices.append((1.5, 2.0, 3.0))
     #
-    # 5. Drawing the Triangle:
+    # 5. DRAWING THE TRIANGLE:
     # The TriangleTable blueprint says: "Connect Edge 3, Edge 8, and Edge 1."
     # We check our sticky notes to find the actual warehouse IDs:
     # ID_A = edge_vertices[3]  ---> 50
@@ -672,6 +672,10 @@ def export_obj(vertices, triangles, output_path, vertex_colors=None):
 
         # Write vertices (with optional RGB color appended)
         if vertex_colors is not None:
+            # Safety: pad colors if shorter than vertices (prevents zip truncation)
+            if len(vertex_colors) < len(vertices):
+                print(f"  WARNING: {len(vertices)} vertices but {len(vertex_colors)} colors, padding with gray")
+                vertex_colors = list(vertex_colors) + [(0.5, 0.5, 0.5)] * (len(vertices) - len(vertex_colors))
             for (vx, vy, vz), (r, g, b) in zip(vertices, vertex_colors):
                 f.write(f"v {vx} {vy} {vz} {r:.4f} {g:.4f} {b:.4f}\n")
         else:
@@ -680,9 +684,16 @@ def export_obj(vertices, triangles, output_path, vertex_colors=None):
 
         f.write("\n")
 
-        # Write faces (OBJ uses 1-based indices)
+        # Write faces (OBJ uses 1-based indices), skip invalid ones
+        n_verts = len(vertices)
+        skipped = 0
         for v0, v1, v2 in triangles:
+            if v0 >= n_verts or v1 >= n_verts or v2 >= n_verts:
+                skipped += 1
+                continue
             f.write(f"f {v0 + 1} {v1 + 1} {v2 + 1}\n")
+        if skipped > 0:
+            print(f"  WARNING: Skipped {skipped} faces with invalid vertex indices")
 
     print(f"Mesh exported to: {output_path}")
 
@@ -712,15 +723,15 @@ if __name__ == "__main__":
     middle_slice = voxel_grid_numpy[:, :, int(N/2)]
 
     # Plot it using a color map where 0 is white, positive is red, negative is blue
-    plt.figure(figsize=(6, 6))
-    plt.title("2D Slice of the 3D Voxel Grid")
-    plt.imshow(middle_slice, cmap='RdBu', origin='lower')
-    plt.colorbar(label="SDF Value (Distance to surface)")
+    # plt.figure(figsize=(6, 6))
+    # plt.title("2D Slice of the 3D Voxel Grid")
+    # plt.imshow(middle_slice, cmap='RdBu', origin='lower')
+    # plt.colorbar(label="SDF Value (Distance to surface)")
 
-    # Draw a contour line exactly where the value is 0 (the surface)
-    plt.contour(middle_slice, levels=[0], colors='black', linewidths=2)
+    # # Draw a contour line exactly where the value is 0 (the surface)
+    # plt.contour(middle_slice, levels=[0], colors='black', linewidths=2)
 
-    plt.show()
+    # plt.show()
 
     # Run Marching Cubes
     vertices, triangles, _ = run_marching_cubes(voxel_grid_numpy, N)
