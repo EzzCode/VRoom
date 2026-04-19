@@ -70,7 +70,7 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
             packed=False,
             tile_size=pc.tile_size_2dgs,
             render_mode=pc.render_mode,
-            features=semantics.detach(),
+            features=semantics,
         )
     else:
         raise ValueError(f"Unknown gs_attr: {pc.gs_attr}")

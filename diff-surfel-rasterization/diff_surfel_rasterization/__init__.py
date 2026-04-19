@@ -398,8 +398,8 @@ def rasterization_2dgs(
             actual_c = 3 + F_dim
             padded_c = _next_supported(actual_c)
             
-            # Combine RGB and detached features (prevent gradients back to semantic decoder)
-            combined_chunk = torch.cat([colors_precomp, features.detach()], dim=-1)
+            # Combine RGB and features
+            combined_chunk = torch.cat([colors_precomp, features], dim=-1)
             if padded_c > actual_c:
                 combined_chunk = torch.cat([
                     combined_chunk,
@@ -439,6 +439,11 @@ def rasterization_2dgs(
                 scales=scales_2d,
                 rotations=quats,
             )
+            
+            # C++ backend bug payload: When P=0, the kernel strictly defaults the return tensor to 3 channels.
+            if color_feat.shape[0] < 3 + F_dim:
+                padding = torch.zeros((3 + F_dim) - color_feat.shape[0], height, width, device=device)
+                color_feat = torch.cat([color_feat, padding], dim=0)
             
             # 5. Split output
             color = color_feat[:3]
