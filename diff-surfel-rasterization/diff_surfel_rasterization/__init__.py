@@ -141,6 +141,14 @@ class _RasterizeGaussians(torch.autograd.Function):
         else:
              grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = _C.rasterize_gaussians_backward(*args)
 
+        # C++ Backend P=0 Gradient Bug: If P=0, dL_dout_color has 3 channels because forward outputted 3 channels.
+        # This causes grad_colors_precomp to be born as [0, 3] inside C++. But PyTorch autograd demands [0, 16].
+        # We must manually pacify autograd by cleanly buffering the missing channels.
+        if num_rendered == 0 and grad_colors_precomp is not None and colors_precomp is not None:
+            if grad_colors_precomp.shape[1] < colors_precomp.shape[1]:
+                padding = torch.zeros(grad_colors_precomp.shape[0], colors_precomp.shape[1] - grad_colors_precomp.shape[1], device=grad_colors_precomp.device)
+                grad_colors_precomp = torch.cat([grad_colors_precomp, padding], dim=1)
+
         grads = (
             grad_means3D,
             grad_means2D,
