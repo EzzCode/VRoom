@@ -455,7 +455,7 @@ def rasterization_2dgs(
             
             # 5. Split output
             color = color_feat[:3]
-            render_feat = color_feat[3:3+F_dim]
+            render_feat = color_feat[3:3+F_dim].detach()
             
         else:
             # --- Rasterize RGB (Fallback / Standard path) ---
