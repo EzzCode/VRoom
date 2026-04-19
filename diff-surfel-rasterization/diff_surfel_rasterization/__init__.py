@@ -320,8 +320,12 @@ def rasterization_2dgs(
     C = viewmats.shape[0]  # number of cameras (usually 1)
     
     # Normalize quats (diff-surfel doesn't do this internally)
-    quats = F.normalize(quats, dim=-1)
-    scales_2d = scales[:, :2]  # only first 2 scales for 2DGS
+    quats = F.normalize(quats, dim=-1).contiguous()
+    # diff-surfel CUDA kernel reads scales as glm::vec2 (stride-2).
+    # Must pass exactly (N, 2) contiguous.
+    scales_2d = scales[:, :2].contiguous()
+    means = means.contiguous()
+    colors = colors.contiguous()
     
     all_render_colors = []
     all_render_features = []
@@ -386,7 +390,7 @@ def rasterization_2dgs(
             means2D=means2D,
             shs=shs,
             colors_precomp=colors_precomp,
-            opacities=opacities[:, None] if opacities.dim() == 1 else opacities,
+            opacities=(opacities[:, None] if opacities.dim() == 1 else opacities).contiguous(),
             scales=scales_2d,
             rotations=quats,
         )
@@ -434,7 +438,7 @@ def rasterization_2dgs(
                     means2D=torch.zeros_like(means, device=device),
                     shs=None,
                     colors_precomp=chunk,
-                    opacities=opacities[:, None] if opacities.dim() == 1 else opacities,
+                    opacities=(opacities[:, None] if opacities.dim() == 1 else opacities).contiguous(),
                     scales=scales_2d,
                     rotations=quats,
                 )
