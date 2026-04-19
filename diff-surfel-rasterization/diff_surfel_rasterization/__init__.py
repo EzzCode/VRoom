@@ -455,7 +455,12 @@ def rasterization_2dgs(
             
             # 5. Split output
             color = color_feat[:3]
-            render_feat = color_feat[3:3+F_dim].detach()
+            render_feat = color_feat[3:3+F_dim]
+            
+            # Feature channels natively produce uncalibrated gradients that explode the delicate 2DGS geometry matrices.
+            # Using a backward hook, we dampen their force before they hit the C++ kernel, ensuring smooth geometry alignment.
+            if render_feat.requires_grad:
+                render_feat.register_hook(lambda grad: grad * 0.05)
             
         else:
             # --- Rasterize RGB (Fallback / Standard path) ---
