@@ -398,8 +398,8 @@ def rasterization_2dgs(
             actual_c = 3 + F_dim
             padded_c = _next_supported(actual_c)
             
-            # Combine RGB and features
-            combined_chunk = torch.cat([colors_precomp, features], dim=-1)
+            # Combine RGB and detached features
+            combined_chunk = torch.cat([colors_precomp, features.detach()], dim=-1)
             if padded_c > actual_c:
                 combined_chunk = torch.cat([
                     combined_chunk,
