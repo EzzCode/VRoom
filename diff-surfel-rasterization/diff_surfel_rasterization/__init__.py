@@ -400,33 +400,42 @@ def rasterization_2dgs(
             and (3 + features.shape[-1] <= _SUPPORTED_CHANNELS[-1])
         )
         
-        if use_single_pass:
-            # 1. Pad colors_precomp + features to a supported channel count 
+        # force standard fallback dual-pass. diff-surfel 2DGS kernel math fundamentally destructs normal/distort geometry matrices for C > 3.
+        # --- 1. Rasterize RGB Natively (C=3) ---
+        color, radii, allmap = rasterizer(
+            means3D=means,
+            means2D=means2D,
+            shs=shs,
+            colors_precomp=colors_precomp,
+            opacities=(opacities[:, None] if opacities.dim() == 1 else opacities).contiguous(),
+            scales=scales_2d,
+            rotations=quats,
+        )
+        
+        # --- 2. Rasterize Features ---
+        render_feat = None
+        if features is not None:
+            # Drop fragmentations
+            torch.cuda.empty_cache() 
+            
             F_dim = features.shape[-1]
-            actual_c = 3 + F_dim
-            padded_c = _next_supported(actual_c)
+            padded_c = _next_supported(F_dim)
             
-            # Combine RGB and detached features
-            combined_chunk = torch.cat([colors_precomp, features.detach()], dim=-1)
-            if padded_c > actual_c:
-                combined_chunk = torch.cat([
-                    combined_chunk,
-                    torch.zeros(combined_chunk.shape[0], padded_c - actual_c, device=device)
-                ], dim=-1)
+            chunk = features
+            if padded_c > F_dim:
+                chunk = torch.cat([chunk, torch.zeros(chunk.shape[0], padded_c - F_dim, device=device)], dim=-1)
                 
-            # 2. Pad background 
-            bg_combined = torch.cat([
-                background, 
-                torch.zeros(padded_c - 3, device=device)
-            ])
-            
-            # 3. Update settings and reconstruct rasterizer
-            raster_settings = GaussianRasterizationSettings(
+            # Apply geometric safeguard scaling to prevent semantic forces from violently nuking opacities
+            if chunk.requires_grad:
+                chunk.register_hook(lambda grad: grad * 0.05)
+                
+            bg_feat = torch.zeros(padded_c, device=device)
+            feat_settings = GaussianRasterizationSettings(
                 image_height=height,
                 image_width=width,
                 tanfovx=tanfovx,
                 tanfovy=tanfovy,
-                bg=bg_combined,
+                bg=bg_feat,
                 scale_modifier=1.0,
                 viewmatrix=world_view_transform,
                 projmatrix=full_proj_transform,
@@ -435,96 +444,25 @@ def rasterization_2dgs(
                 prefiltered=False,
                 debug=False,
             )
-            rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+            feat_rasterizer = GaussianRasterizer(raster_settings=feat_settings)
             
-            # 4. Rasterize everything in one unified pass
-            color_feat, radii, allmap = rasterizer(
+            # Evaluate geometry gradients cleanly isolated from allmap regularizers
+            feat_color, _, _ = feat_rasterizer(
                 means3D=means,
                 means2D=means2D,
                 shs=None,
-                colors_precomp=combined_chunk,
+                colors_precomp=chunk,
                 opacities=(opacities[:, None] if opacities.dim() == 1 else opacities).contiguous(),
                 scales=scales_2d,
                 rotations=quats,
             )
             
-            # C++ backend bug payload: When P=0, the kernel strictly defaults the return tensor to 3 channels.
-            if color_feat.shape[0] < 3 + F_dim:
-                padding = torch.zeros((3 + F_dim) - color_feat.shape[0], height, width, device=device)
-                color_feat = torch.cat([color_feat, padding], dim=0)
-            
-            # 5. Split output
-            color = color_feat[:3]
-            render_feat = color_feat[3:3+F_dim]
-            
-            # Feature channels natively produce uncalibrated gradients that explode the delicate 2DGS geometry matrices.
-            # Using a backward hook, we dampen their force before they hit the C++ kernel, ensuring smooth geometry alignment.
-            if render_feat.requires_grad:
-                render_feat.register_hook(lambda grad: grad * 0.05)
-            
-        else:
-            # --- Rasterize RGB (Fallback / Standard path) ---
-            color, radii, allmap = rasterizer(
-                means3D=means,
-                means2D=means2D,
-                shs=shs,
-                colors_precomp=colors_precomp,
-                opacities=(opacities[:, None] if opacities.dim() == 1 else opacities).contiguous(),
-                scales=scales_2d,
-                rotations=quats,
-            )
-            # color: [3, H, W], allmap: [7, H, W]
-            
-            # --- Rasterize features in chunks ---
-            torch.cuda.empty_cache() # reduce fragmentation before large feature 
-            if features is not None:
-                F_dim = features.shape[-1]
-                chunk_size = _SUPPORTED_CHANNELS[-1]  # 32
-                feat_chunks = []
+            # P=0 Pad fix natively for the feature return
+            if feat_color.shape[0] < padded_c:
+                padding = torch.zeros(padded_c - feat_color.shape[0], height, width, device=device)
+                feat_color = torch.cat([feat_color, padding], dim=0)
                 
-                for i in range(0, F_dim, chunk_size):
-                    chunk = features[:, i:i+chunk_size].detach()
-                    actual_c = chunk.shape[-1]
-                    padded_c = _next_supported(actual_c)
-                    
-                    if padded_c > actual_c:
-                        chunk = torch.cat([
-                            chunk,
-                            torch.zeros(chunk.shape[0], padded_c - actual_c, device=device)
-                        ], dim=-1)
-                    
-                    # Need matching background
-                    bg_feat = torch.zeros(padded_c, device=device)
-                    feat_settings = GaussianRasterizationSettings(
-                        image_height=height,
-                        image_width=width,
-                        tanfovx=tanfovx,
-                        tanfovy=tanfovy,
-                        bg=bg_feat,
-                        scale_modifier=1.0,
-                        viewmatrix=world_view_transform,
-                        projmatrix=full_proj_transform,
-                        sh_degree=0,
-                        campos=camera_center,
-                        prefiltered=False,
-                        debug=False,
-                    )
-                    feat_rasterizer = GaussianRasterizer(feat_settings)
-                    
-                    # Detach geometry parameters here to prevent double gradients!
-                    feat_color, _, _ = feat_rasterizer(
-                        means3D=means.detach(),
-                        means2D=torch.zeros_like(means, device=device),
-                        shs=None,
-                        colors_precomp=chunk,
-                        opacities=(opacities[:, None] if opacities.dim() == 1 else opacities).contiguous().detach(),
-                        scales=scales_2d.detach(),
-                        rotations=quats.detach(),
-                    )
-                    # feat_color: [padded_c, H, W] — trim padding
-                    feat_chunks.append(feat_color[:actual_c])
-                
-                render_feat = torch.cat(feat_chunks, dim=0)  # [F_dim, H, W]
+            render_feat = feat_color[:F_dim]
                 
         all_render_colors.append(color)
         all_render_features.append(render_feat)
