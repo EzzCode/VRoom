@@ -115,18 +115,26 @@ def _project_to_neighbor(
     z_valid = z_n[valid][in_bounds]
     c_valid = colors[valid][in_bounds]
 
-    # Z-buffer splatting: closest point wins
+    # Vectorized Z-buffer splatting: closest point wins
     rgb_warped = np.zeros((H_n, W_n, 3), dtype=np.uint8)
     mask_warped = np.zeros((H_n, W_n), dtype=np.uint8)
-    zbuf = np.full((H_n, W_n), np.inf, dtype=np.float64)
 
-    for i in range(len(u_valid)):
-        if z_valid[i] < zbuf[v_valid[i], u_valid[i]]:
-            zbuf[v_valid[i], u_valid[i]] = z_valid[i]
-            rgb_warped[v_valid[i], u_valid[i]] = c_valid[i]
-            mask_warped[v_valid[i], u_valid[i]] = 1
+    if len(z_valid) > 0:
+        # Sort by depth descending so closest (lowest Z) overwrites previous writes
+        order = np.argsort(z_valid)[::-1]
+        v_ord = v_valid[order]
+        u_ord = u_valid[order]
+        c_ord = c_valid[order]
 
-    # Small dilation to fill single-pixel gaps from forward warping
+        # Splat 2x2 footprint for each pixel to prevent sub-pixel forward-warping gaps
+        for dy in [0, 1]:
+            for dx in [0, 1]:
+                v_splat = np.clip(v_ord + dy, 0, H_n - 1)
+                u_splat = np.clip(u_ord + dx, 0, W_n - 1)
+                rgb_warped[v_splat, u_splat] = c_ord
+                mask_warped[v_splat, u_splat] = 1
+
+    # Small dilation to fill any remaining single-pixel gaps
     if mask_warped.sum() > 0:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         mask_dilated = cv2.dilate(mask_warped, kernel, iterations=1)

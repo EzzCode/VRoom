@@ -86,6 +86,13 @@ def run_replenishment(
     logger.info(f"Loading model from {model_path} (iteration {iteration})")
     gaussians, pipe_config = load_gaussians(model_path, iteration)
 
+    import json
+    cameras_json = Path(model_path) / "cameras.json"
+    training_cameras = []
+    if cameras_json.exists():
+        with open(cameras_json, 'r') as f:
+            training_cameras = json.load(f)
+
     logger.info("Loading inpainting model...")
     inpaint_pipeline = load_inpainter(device="cuda", model_id=sd_model_id)
 
@@ -134,6 +141,7 @@ def run_replenishment(
                 inpaint_pipeline,
                 renders['rgb'],
                 renders['repair_mask'],
+                depth=renders['depth'],
                 prompt=prompt,
                 seed=seed + outer_iter,
                 strength=strength,
@@ -171,6 +179,8 @@ def run_replenishment(
                 nr = render_view(gaussians, cam, pipe_config, bg)
                 nr_rgb = (nr['rgb'].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
 
+                nr_depth = nr.get('depth').squeeze(0).cpu().numpy() if 'depth' in nr else None
+
                 # Build neighbor mask from warped mask
                 n_mask = prop['mask_warped']
 
@@ -181,6 +191,7 @@ def run_replenishment(
                         nr_rgb,
                         n_mask,
                         propagated_prior=prop['rgb_warped'],
+                        depth=nr_depth,
                         prompt=prompt,
                         seed=seed + outer_iter * 100 + ni * 10 + m_idx,
                         strength=strength,
@@ -224,6 +235,7 @@ def run_replenishment(
                     n_iterations=finetune_iterations,
                     lr_scale=finetune_lr_scale,
                     save_path=str(iter_dir / f"obj_{obj_id}_model"),
+                    training_cameras=training_cameras,
                 )
                 round_results[obj_id] = {
                     'defect_regions': len(result['defect_regions']),

@@ -93,20 +93,17 @@ def compute_quality_scores(
     import torch
     from target_replenishment.core.objectgs_bridge import (
         get_anchor_positions, create_virtual_camera, render_view,
-        detect_spatial_holes, build_anchor_id_map,
+        build_anchor_id_map,
     )
 
-    VALID_KEYS = {'scale', 'density', 'spatial_holes', 'alpha_deficit', 'normal_wrinkling'}
+    VALID_KEYS = {'scale', 'density', 'alpha_deficit', 'normal_wrinkling'}
     if weights:
         if not set(weights).issubset(VALID_KEYS):
             raise ValueError(f"Unknown weight keys: {set(weights) - VALID_KEYS}")
     else:
-        # NOTE: alpha_deficit removed from defaults — it was self-fulfilling:
-        # anchors not visible from this camera get alpha=0 → score=1.0 → masked.
-        # Holes are already caught by _detect_object_holes separately.
         weights = {
-            'scale': 0.15, 'density': 0.20, 'spatial_holes': 0.30,
-            'normal_wrinkling': 0.35,
+            'scale': 0.25, 'density': 0.25, 'alpha_deficit': 0.30,
+            'normal_wrinkling': 0.20,
         }
 
     sum_w = sum(weights.values())
@@ -137,18 +134,13 @@ def compute_quality_scores(
         signals['scale'] = _normalize_signal(scale_raw)
         signals['density'] = _normalize_signal(density_raw)
 
-    # ── Spatial holes (absolute coverage) ──
+    # ── Rendered view properties ──
     R, T, K = camera_params['R'], camera_params['T'], camera_params['K']
     W, H = camera_params['width'], camera_params['height']
     cam = create_virtual_camera(R, T, K, W, H)
 
-    coverage = detect_spatial_holes(gaussians, cam, coverage_threshold=0.1, object_label_id=object_id)
     ui, vi, visible = _project_points(xyz, R, T, K, W, H)
-    anchor_coverage = np.zeros(n, dtype=np.float32)
     in_idx = np.where(visible)[0]
-    if len(in_idx) > 0:
-        anchor_coverage[in_idx] = coverage[vi[in_idx], ui[in_idx]]
-    signals['spatial_holes'] = np.clip(1.0 - anchor_coverage, 0, 1)
 
     # ── Render-based signals (single render) ──
     result = render_view(gaussians, cam, pipe_config, bg_color, object_label_id=object_id)

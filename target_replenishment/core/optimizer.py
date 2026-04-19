@@ -32,6 +32,7 @@ def optimize_with_inpainted_views(
     lambda_dssim: float = 0.2,
     lambda_preserve: float = 0.5,
     save_path: str = None,
+    training_cameras: list = None,
 ) -> dict:
     """Fine-tune ObjectGS model using inpainted images as supervision.
 
@@ -60,6 +61,7 @@ def optimize_with_inpainted_views(
     import torch
     import numpy as np
     from random import choice
+    import random
 
     from utils.loss_utils import l1_loss, ssim
     from gaussian_renderer.render import render as objectgs_render
@@ -69,6 +71,17 @@ def optimize_with_inpainted_views(
     if not accepted_views:
         logger.warning("No accepted views — nothing to optimize.")
         return {'loss_history': [], 'final_loss': 0.0}
+
+    bg_color = torch.zeros(3, dtype=torch.float32, device="cuda")
+    original_renders = []
+    if training_cameras:
+        logger.info("Pre-computing original renders for multi-view regularization...")
+        cams = random.sample(training_cameras, min(len(training_cameras), 8))
+        for cam_p in cams:
+            cam = create_virtual_camera(cam_p['R'], cam_p['T'], cam_p['K'], cam_p['width'], cam_p['height'])
+            with torch.no_grad():
+                render_pkg = objectgs_render(cam, gaussians, pipe_config, bg_color, training=False)
+                original_renders.append({'camera': cam, 'render': render_pkg['render'].clone().detach()})
 
     # Prepare supervision data (convert to tensors once)
     supervision = []
@@ -98,6 +111,16 @@ def optimize_with_inpainted_views(
 
     # Set up optimizer with reduced LR
     gaussians.train()
+
+    # FREEZE MLPs to prevent catastrophic forgetting. Only fine-tune anchors.
+    logger.info("Freezing MLPs to prevent multi-view degradation...")
+    if hasattr(gaussians, 'mlp_opacity'):
+        for param in gaussians.mlp_opacity.parameters(): param.requires_grad = False
+    if hasattr(gaussians, 'mlp_cov'):
+        for param in gaussians.mlp_cov.parameters(): param.requires_grad = False
+    if hasattr(gaussians, 'mlp_color'):
+        for param in gaussians.mlp_color.parameters(): param.requires_grad = False
+
     _setup_finetune_optimizer(gaussians, lr_scale)
 
     bg_color = torch.zeros(3, dtype=torch.float32, device="cuda")
@@ -136,14 +159,11 @@ def optimize_with_inpainted_views(
         else:
             Ll1_inpaint = torch.tensor(0.0, device="cuda")
             
-        # SSIM averages over entire image, so we dynamically rescale its gradient contribution
-        # by the ratio of the image that the mask actually occupies.
-        mask_ratio = mask_bool.sum().float() / (sv['mask'].shape[1] * sv['mask'].shape[2])
-        Lssim_inpaint = (1.0 - ssim(masked_render, masked_gt)) / (mask_ratio + 1e-6)
-        
+        # SSIM averages over entire image, standard isolated masked SSIM without rescaling
+        Lssim_inpaint = 1.0 - ssim(masked_render, masked_gt)
         loss_inpaint = (1.0 - lambda_dssim) * Ll1_inpaint + lambda_dssim * Lssim_inpaint
 
-        # Preservation loss: L1 in non-masked region (prevent drift)
+        # Preservation loss: L1 in non-masked region (prevent drift on target view)
         inv_mask_3ch = sv['inv_mask'].expand_as(rendered)
         if lambda_preserve > 0:
             loss_preserve = lambda_preserve * l1_loss(
@@ -152,7 +172,20 @@ def optimize_with_inpainted_views(
         else:
             loss_preserve = torch.tensor(0.0, device="cuda")
 
-        total_loss = loss_inpaint + loss_preserve
+        # Multi-view Consistency Regularization
+        loss_mv = torch.tensor(0.0, device="cuda")
+        if original_renders:
+            reg_view = choice(original_renders)
+            reg_cam = reg_view['camera']
+            gaussians.set_anchor_mask(reg_cam.camera_center, reg_cam.resolution_scale)
+            if hasattr(pipe_config, 'add_prefilter') and pipe_config.add_prefilter:
+                v_mask = prefilter_voxel(reg_cam, gaussians).squeeze()
+            else:
+                v_mask = gaussians._anchor_mask
+            reg_pkg = objectgs_render(reg_cam, gaussians, pipe_config, bg_color, visible_mask=v_mask, training=True)
+            loss_mv = l1_loss(reg_pkg['render'], reg_view['render'])
+
+        total_loss = loss_inpaint + loss_preserve + 0.5 * loss_mv
         total_loss.backward()
 
         with torch.no_grad():
