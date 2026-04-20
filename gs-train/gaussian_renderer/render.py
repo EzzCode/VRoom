@@ -1,7 +1,7 @@
 import gsplat
 import torch
 from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_2dgs
-from diff_surfel_rasterization import rasterization_2dgs
+from diff_surfel_rasterization import rasterization_2dgs, rasterization_2dgs_inria_wrapper
 
 
 def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=True, object_mask=None):
@@ -44,9 +44,7 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
             render_mode=pc.render_mode,
             features=semantics.detach(),
         )
-    elif pc.gs_attr == "2D":
-        from gsplat import rasterization_2dgs_inria_wrapper
-        
+    elif pc.gs_attr == "2D": 
         # gsplat's Inria wrapper processes N channels by looping in chunks of 3.
         # Format: [R, G, B, S1, ..., SF, D]
         combined_colors = torch.cat([color, semantics.detach()], dim=-1)
