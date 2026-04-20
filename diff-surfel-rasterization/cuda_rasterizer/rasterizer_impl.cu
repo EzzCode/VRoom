@@ -148,16 +148,16 @@ void CudaRasterizer::Rasterizer::markVisible(
 		present);
 }
 
-CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& chunk, size_t P)
+CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& chunk, size_t P, int num_color_feat_channels)
 {
 	GeometryState geom;
 	obtain(chunk, geom.depths, P, 128);
-	obtain(chunk, geom.clamped, P * 3, 128);
+	obtain(chunk, geom.clamped, P * num_color_feat_channels, 128);
 	obtain(chunk, geom.internal_radii, P, 128);
 	obtain(chunk, geom.means2D, P, 128);
 	obtain(chunk, geom.transMat, P * 9, 128);
 	obtain(chunk, geom.normal_opacity, P, 128);
-	obtain(chunk, geom.rgb, P * 3, 128);
+	obtain(chunk, geom.rgb, P * num_color_feat_channels, 128);
 	obtain(chunk, geom.tiles_touched, P, 128);
 	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
 	obtain(chunk, geom.scanning_space, geom.scan_size, 128);
@@ -220,9 +220,9 @@ int CudaRasterizer::Rasterizer::forward(
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
-	size_t chunk_size = required<GeometryState>(P);
+	size_t chunk_size = required<GeometryState>(P, num_color_feat_channels);
 	char* chunkptr = geometryBuffer(chunk_size);
-	GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
+	GeometryState geomState = GeometryState::fromChunk(chunkptr, P, num_color_feat_channels);
 
 	if (radii == nullptr)
 	{
@@ -258,6 +258,7 @@ int CudaRasterizer::Rasterizer::forward(
 		(glm::vec3*)cam_pos,
 		width, height,
 		focal_x, focal_y,
+		num_color_feat_channels,
 		tan_fovx, tan_fovy,
 		radii,
 		geomState.means2D,
@@ -374,7 +375,7 @@ void CudaRasterizer::Rasterizer::backward(
 	bool debug,
 	int num_color_feat_channels)
 {
-	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
+	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P, num_color_feat_channels);
 	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
 	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
 
@@ -435,6 +436,7 @@ void CudaRasterizer::Rasterizer::backward(
 		viewmatrix,
 		projmatrix,
 		focal_x, focal_y,
+		num_color_feat_channels,
 		tan_fovx, tan_fovy,
 		(glm::vec3*)campos,
 		(float3*)dL_dmean2D, // gradient inputs

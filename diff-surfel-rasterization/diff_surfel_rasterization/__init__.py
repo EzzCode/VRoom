@@ -239,11 +239,13 @@ import torch.nn.functional as F
 _SUPPORTED_CHANNELS = [1, 3, 4, 8, 16, 32]
 
 def _next_supported(n) -> int:
-    """Find the smallest supported channel count >= n."""
+    """Find the smallest supported channel count >= n. 
+    If n is larger than the largest supported channel count, return the largest supported channel count.
+    """
     for s in _SUPPORTED_CHANNELS:
         if s >= n:
             return s
-    raise ValueError(f"Feature chunk too large: {n}. Max supported: {_SUPPORTED_CHANNELS[-1]}")
+    return _SUPPORTED_CHANNELS[-1]
 
 def _get_projection_matrix(znear, zfar, fovX, fovY, device):
     """Build OpenGL-style projection matrix from FoV."""
@@ -664,18 +666,27 @@ def rasterization_2dgs_inria_wrapper(
         ).squeeze(0)
         camera_center = world_view_transform.inverse()[3, :3]
 
-        background = (
-            backgrounds[cid]
-            if backgrounds is not None
-            else torch.zeros(3, device=device)
-        )
+        means2D = torch.zeros_like(means, requires_grad=True, device=device)
+
+        render_colors_ = []
+        radii = None
+        allmap = None
+
+        # Create the rasterizer
+        stride = _next_supported(channels)
+        if backgrounds is not None:
+            bg = backgrounds[cid]
+            if bg.shape[0] < stride:
+                bg = torch.cat([bg, torch.zeros(stride - bg.shape[0], device=device)])
+        else:
+            bg = torch.zeros(stride, device=device)
 
         raster_settings = GaussianRasterizationSettings(
             image_height=height,
             image_width=width,
             tanfovx=tanfovx,
             tanfovy=tanfovy,
-            bg=background,
+            bg=bg,
             scale_modifier=1.0,
             viewmatrix=world_view_transform,
             projmatrix=full_proj_transform,
@@ -687,20 +698,21 @@ def rasterization_2dgs_inria_wrapper(
 
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-        means2D = torch.zeros_like(means, requires_grad=True, device=device)
-
-        render_colors_ = []
-        radii = None
-        allmap = None
-        for i in range(0, channels, 3):
-            _colors = colors[..., i : i + 3]
+        color_idx = 0
+        while color_idx < channels:
+            # stride = _next_supported(channels - color_idx)
+            _colors = colors[..., color_idx : color_idx + stride]
             shape_before = _colors.shape
-            if _colors.shape[-1] < 3:
+            if _colors.shape[-1] < stride:
                 pad = torch.zeros(
-                    _colors.shape[0], 3 - _colors.shape[-1], device=device
+                    _colors.shape[0], stride - _colors.shape[-1], device=device
                 ).detach()
                 _colors = torch.cat([_colors, pad], dim=-1)
-            if i == 0:
+
+            
+
+            # Call the rasterizer
+            if color_idx == 0:
                 # This is the first time we call the rasterizer, so we need to get the radii and allmap
                 _render_colors_, radii, allmap = rasterizer(
                     means3D=means,
@@ -714,6 +726,7 @@ def rasterization_2dgs_inria_wrapper(
                 )
             else:
                 # We don't need the radii and allmap for the subsequent calls
+                # torch.cuda.empty_cache() # Drop fragmentations
                 _render_colors_, _, _ = rasterizer(
                     means3D=means,
                     means2D=means2D,
@@ -724,11 +737,12 @@ def rasterization_2dgs_inria_wrapper(
                     rotations=quats,
                     cov3D_precomp=None,
                 )
-            if shape_before[-1] < 3:
+            if shape_before[-1] < stride:
                 _render_colors_ = _render_colors_[:shape_before[-1], :, :]
             render_colors_.append(_render_colors_)
+            color_idx += stride
 
-        # render_colors_ is [ceil(channels/3), 3 (last may be <= 3), H, W]
+        # render_colors_ is [#passes, pass's stride, H, W]
         render_colors_ = torch.cat(render_colors_, dim=0) # [channels, H, W]
         render_colors_ = render_colors_.permute(1, 2, 0)  # [H, W, channels]
         render_colors.append(render_colors_)

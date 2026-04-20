@@ -55,6 +55,7 @@ namespace BACKWARD
 		const float* view,
 		const float* proj,
 		const float focal_x, const float focal_y,
+		int num_color_feat_channels,
 		const float tan_fovx, const float tan_fovy,
 		const glm::vec3* campos,
 		float3* dL_dmean2D,

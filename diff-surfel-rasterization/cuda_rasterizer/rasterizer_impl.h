@@ -37,7 +37,7 @@ namespace CudaRasterizer
 		uint32_t* point_offsets;
 		uint32_t* tiles_touched;
 
-		static GeometryState fromChunk(char*& chunk, size_t P);
+		static GeometryState fromChunk(char*& chunk, size_t P, int num_color_feat_channels);
 	};
 
 	struct ImageState
@@ -62,10 +62,18 @@ namespace CudaRasterizer
 	};
 
 	template<typename T> 
-	size_t required(size_t P)
+	size_t required(size_t P, int num_color_feat_channels = 3)
 	{
 		char* size = nullptr;
 		T::fromChunk(size, P);
+		return ((size_t)size) + 128;
+	}
+	
+	template<> 
+	inline size_t required<GeometryState>(size_t P, int num_color_feat_channels)
+	{
+		char* size = nullptr;
+		GeometryState::fromChunk(size, P, num_color_feat_channels);
 		return ((size_t)size) + 128;
 	}
 };
