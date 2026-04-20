@@ -1,77 +1,109 @@
-"""
-SAM 2 Inference Module
-
-Handles loading the Segment Anything Model 2 (SAM 2) and generating raw masks
-from input images. This module is intentionally kept separate from any
-post-processing logic.
+"""SAM 3 Inference Module
 
 Usage (as a library):
-    from sam_inference import load_sam, generate_masks
-    
-    mask_generator = load_sam("sam2.1_hiera_l.yaml", "path/to/checkpoint.pt", "cuda")
-    raw_masks = generate_masks(mask_generator, image_bgr)
+    from sam_inference import SAM3TextSegmenter
+    segmenter = SAM3TextSegmenter(
+        checkpoint="sam3.pt",
+        device="cuda",
+        text_prompts=["furniture"],
+    )
+    masks = segmenter.predict_raw_masks(frame_bgr)
+
 """
 
+import sys
+import os
 import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import cv2
-from sam2.build_sam import build_sam2
-from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# SAM 2 model configs bundled with the package (sam2/configs/sam2.1/)
-# Checkpoint downloads: https://github.com/facebookresearch/sam2#download-checkpoints
-MODEL_CONFIGS = {
-    "sam2.1_hiera_t": "configs/sam2.1/sam2.1_hiera_t.yaml",
-    "sam2.1_hiera_s": "configs/sam2.1/sam2.1_hiera_s.yaml",
-    "sam2.1_hiera_b+": "configs/sam2.1/sam2.1_hiera_b+.yaml",
-    "sam2.1_hiera_l": "configs/sam2.1/sam2.1_hiera_l.yaml",
-}
+def _resolve_ultralytics_home(requested_home: Optional[str]) -> Path:
+    """Resolve and create the Ultralytics cache/checkpoint directory."""
+    if requested_home:
+        home = Path(requested_home).expanduser().resolve()
+    else:
+        env_root = Path(sys.executable).resolve().parent.parent
+        home = (env_root / ".ultralytics").resolve()
+    home.mkdir(parents=True, exist_ok=True)
+    os.environ["ULTRALYTICS_HOME"] = str(home)
+    return home
 
 
-def load_sam(model_cfg, checkpoint, device,
-             points_per_side=16, pred_iou_thresh=0.90,
-             stability_score_thresh=0.96, min_mask_region_area=500):
-    """Load SAM 2 and return a configured automatic mask generator.
-    
-    Args:
-        model_cfg: Config key (e.g. 'sam2.1_hiera_l') or full YAML path.
-        checkpoint: Path to the SAM 2 checkpoint (.pt) file.
-        device: Torch device string ('cuda' or 'cpu').
-        points_per_side: Grid density for auto mask generation.
-        pred_iou_thresh: Minimum predicted IoU to keep a mask.
-        stability_score_thresh: Minimum stability score to keep a mask.
-        min_mask_region_area: Minimum mask area in pixels.
-    
-    Returns:
-        SAM2AutomaticMaskGenerator instance.
-    """
-    config = MODEL_CONFIGS.get(model_cfg, model_cfg)
-    logger.info(f"Loading SAM 2 ({config}) from {checkpoint}...")
-    
-    sam2_model = build_sam2(config, checkpoint, device=device, apply_postprocessing=False)
-    
-    mask_generator = SAM2AutomaticMaskGenerator(
-        sam2_model,
-        points_per_side=points_per_side,
-        pred_iou_thresh=pred_iou_thresh,
-        stability_score_thresh=stability_score_thresh,
-        min_mask_region_area=min_mask_region_area,
-    )
-    logger.info("SAM 2 model loaded.")
-    return mask_generator
+class SAM3TextSegmenter:
+    """Thin SAM3 semantic segmenter wrapper for text-only inference."""
+    def __init__(
+        self,
+        checkpoint: str,
+        device: str,
+        text_prompts: Optional[List[str]] = None,
+        min_mask_area: int = 120,
+        ultralytics_home: Optional[str] = None,
+    ):
+        self.ultralytics_home = _resolve_ultralytics_home(ultralytics_home)
+        self.checkpoint = checkpoint
+        self.device = device
+        self.text_prompts = text_prompts or ["furniture"]
+        self.min_mask_area = int(min_mask_area)
+        self.semantic_predictor = self._load_model()
 
+    def _load_model(self):
+        """Create and configure a SAM3 semantic predictor."""
+        from ultralytics.models.sam import SAM3SemanticPredictor  # type: ignore
 
-def generate_masks(mask_generator, frame_bgr):
-    """Run SAM 2 on a single BGR frame and return the list of mask dicts.
-    
-    Args:
-        mask_generator: SAM2AutomaticMaskGenerator instance.
-        frame_bgr: Input image in BGR format (OpenCV convention).
-    
-    Returns:
-        List of mask dictionaries, each containing 'segmentation' key
-        with a boolean numpy array.
-    """
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    return mask_generator.generate(frame_rgb)
+        logger.info(f"Loading Ultralytics SAM3 model: {self.checkpoint}")
+        logger.info(f"Ultralytics home: {self.ultralytics_home}")
+
+        return SAM3SemanticPredictor(
+            overrides=dict(
+                conf=0.25,
+                task="segment",
+                mode="predict",
+                model=self.checkpoint,
+                half=True,
+                device=self.device,
+                verbose=False,
+                save=False,
+            )
+        )
+
+    def _extract_masks_from_results(self, results: Any) -> List[np.ndarray]:
+        """Convert Ultralytics results to boolean masks with min-area filtering."""
+        masks: List[np.ndarray] = []
+        if results is None:
+            return masks
+
+        items = results if isinstance(results, list) else [results]
+        for item in items:
+            if getattr(item, "masks", None) is None:
+                continue
+            data = item.masks.data
+            if data is None:
+                continue
+            arr = data.detach().cpu().numpy()
+            arr_bool = arr > 0.5
+            areas = arr_bool.reshape(arr_bool.shape[0], -1).sum(axis=1)
+            keep_idx = np.flatnonzero(areas >= self.min_mask_area)
+            for i in keep_idx:
+                masks.append(arr_bool[int(i)])
+
+        return masks
+
+    def predict_raw_masks(self, frame_bgr: np.ndarray, text_prompts: Optional[List[str]] = None) -> List[np.ndarray]:
+        """Generate raw SAM3 masks for the frame without any rule-based post-processing.
+        
+        Args:
+            frame_bgr: Input BGR frame.
+            text_prompts: Optional prompts to override the defaults. 
+        Returns:
+            List of boolean masks.
+        """
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        prompts = text_prompts or self.text_prompts
+        
+        results = self.semantic_predictor(source=frame_rgb, text=prompts, verbose=False)
+        return self._extract_masks_from_results(results)
