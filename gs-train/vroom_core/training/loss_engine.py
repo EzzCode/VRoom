@@ -62,7 +62,10 @@ def object_loss_fn(semantics, object_mask, id_encoder, opt, device):
         elif gt_ids.dim() == 4 and gt_ids.shape[1] == 1:
             gt_ids = gt_ids.squeeze(1)
         
-        object_loss = opt.lambda_object_loss * F.cross_entropy(logits, gt_ids, ignore_index=0, reduction="mean")
+        if (gt_ids != 0).sum() == 0:
+            object_loss = (semantics * 0.0).sum()
+        else:
+            object_loss = opt.lambda_object_loss * F.cross_entropy(logits, gt_ids, ignore_index=0, reduction="mean")
         zero_penalty = opt.lambda_zero_penalty * semantics[..., 0].mean()
         return object_loss, zero_penalty
     return None, None
@@ -128,8 +131,12 @@ class LossComposer:
         device = prediction.device
         target = viewpoint_cam.original_image.to(device)
         mask = viewpoint_cam.alpha_mask.to(device)
-        prediction = prediction * mask
-        target = target * mask
+        # Defensive: only use alpha_mask for masking if it looks like a binary opacity mask.
+        # Categorical label maps (e.g. SAM id maps with values 0-7, scaled to 0.0-0.027)
+        # would zero out the entire image and kill training.
+        if mask.max() > 0.5:
+            prediction = prediction * mask
+            target = target * mask
 
         losses: Dict[str, torch.Tensor] = {}
         

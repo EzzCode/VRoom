@@ -104,7 +104,7 @@ class RenderCamera(nn.Module):
     def _load_object_mask(self, resolution):
         source = Path(self.image_path)
         candidates = []
-        for repl in [("images", "object_mask_deva"), ("images_all", "object_mask"), ("images", "object_mask")]:
+        for repl in [("images", "tracked/id_maps"), ("images", "object_mask_deva"), ("images_all", "object_mask"), ("images", "object_mask")]:
             base_path = Path(str(source).replace(repl[0], repl[1]))
             candidates.append(base_path.with_suffix(".npz"))
             candidates.append(base_path.with_suffix(".png"))

@@ -141,8 +141,9 @@ class TrainingOrchestrator:
                     target = viewpoint.original_image.to(prediction.device)
                     if viewpoint.alpha_mask is not None:
                         alpha_mask = viewpoint.alpha_mask.to(prediction.device)
-                        prediction = prediction * alpha_mask
-                        target = target * alpha_mask
+                        if alpha_mask.max() > 0.5:  # Only mask if binary opacity, not categorical labels
+                            prediction = prediction * alpha_mask
+                            target = target * alpha_mask
                     mse = F.mse_loss(prediction, target)
                     psnr = -10.0 * torch.log10(mse + 1e-8).item()
                     progress.set_postfix({
@@ -193,8 +194,9 @@ class TrainingOrchestrator:
             gt = viewpoint.original_image.to(rendered.device)
             if viewpoint.alpha_mask is not None:
                 alpha = viewpoint.alpha_mask.to(rendered.device)
-                rendered = rendered * alpha
-                gt = gt * alpha
+                if alpha.max() > 0.5:  # Only mask if binary opacity, not categorical labels
+                    rendered = rendered * alpha
+                    gt = gt * alpha
             grid = torchvision.utils.make_grid([rendered, gt], nrow=2, padding=4)
             torchvision.utils.save_image(grid, os.path.join(vis_dir, f"iter_{iteration:06d}.png"))
         except Exception:

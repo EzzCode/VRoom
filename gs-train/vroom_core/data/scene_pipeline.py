@@ -56,7 +56,7 @@ def discover_colmap_scene(root: str, images: str, depths: str, masks: str, add_m
     elif "scannet" in root or "mipnerf360" in root:
         point_cloud_candidates = [base / "points3D.ply"]
     else:
-        point_cloud_candidates = [base / "sparse/0/points3D.ply"]
+        point_cloud_candidates = [base / "labeled_output/points3D_labeled.ply", base / "sparse/0/points3D.ply"]
 
     image_file = camera_file = None
     binary = True

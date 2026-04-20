@@ -103,7 +103,7 @@ def main():
 
     dataset_name = model_params.get("dataset_name", "")
     exp_name = model_params.get("exp_name", os.path.basename(args.config).replace(".yaml", ""))
-    model_path = os.path.join("output", dataset_name, exp_name, datetime.now().strftime("%Y-%m-%d_%H:%M:%S"))
+    model_path = os.path.join("output", dataset_name, exp_name, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     os.makedirs(model_path, exist_ok=True)
     with open(os.path.join(model_path, "config.yaml"), "w", encoding="utf-8") as handle:
         yaml.safe_dump(cfg, handle, sort_keys=False)

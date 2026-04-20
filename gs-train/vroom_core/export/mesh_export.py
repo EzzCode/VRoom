@@ -156,7 +156,13 @@ class ObjectMeshExporter:
         if not valid_depths:
             return 3.0
         merged = torch.cat(valid_depths)
-        return float(torch.quantile(merged, 0.99).item() * 1.1)
+        # Prevent memory error for very large objects by subsampling for quantile calculation
+        if merged.numel() > 1_000_000:
+            indices = torch.randperm(merged.numel(), device=merged.device)[:1_000_000]
+            merged_sub = merged[indices]
+        else:
+            merged_sub = merged
+        return float(torch.quantile(merged_sub, 0.99).item() * 1.1)
 
     def _require_open3d(self):
         try:
