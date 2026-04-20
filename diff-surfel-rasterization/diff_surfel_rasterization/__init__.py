@@ -12,6 +12,8 @@
 from typing import NamedTuple
 import torch.nn as nn
 import torch
+from torch import Tensor
+from typing import Optional, Tuple, Dict
 from . import _C
 
 def cpu_deep_copy_tuple(input_tuple):
@@ -257,7 +259,7 @@ def _get_projection_matrix(znear, zfar, fovX, fovY, device):
     P[1, 1] = 2.0 * znear / (top - bottom)
     P[0, 2] = (right + left) / (right - left)
     P[1, 2] = (top + bottom) / (top - bottom)
-    P[3, 2] = -1.0
+    P[3, 2] = 1.0
     P[2, 2] = zfar / (zfar - znear)
     P[2, 3] = -(zfar * znear) / (zfar - znear)
     return P
@@ -296,6 +298,93 @@ def _depth_to_normal(depth, viewmats_inv, Ks):
     
     return normal.unsqueeze(0)  # [1, H, W, 3]
 
+def depth_to_points(
+    depths: Tensor, camtoworlds: Tensor, Ks: Tensor, z_depth: bool = True
+) -> Tensor:
+    """Convert depth maps to 3D points
+
+    Args:
+        depths: Depth maps [..., H, W, 1]
+        camtoworlds: Camera-to-world transformation matrices [..., 4, 4]
+        Ks: Camera intrinsics [..., 3, 3]
+        z_depth: Whether the depth is in z-depth (True) or ray depth (False)
+
+    Returns:
+        points: 3D points in the world coordinate system [..., H, W, 3]
+    """
+    assert depths.shape[-1] == 1, f"Invalid depth shape: {depths.shape}"
+    assert camtoworlds.shape[-2:] == (
+        4,
+        4,
+    ), f"Invalid viewmats shape: {camtoworlds.shape}"
+    assert Ks.shape[-2:] == (3, 3), f"Invalid Ks shape: {Ks.shape}"
+    assert (
+        depths.shape[:-3] == camtoworlds.shape[:-2] == Ks.shape[:-2]
+    ), f"Shape mismatch! depths: {depths.shape}, viewmats: {camtoworlds.shape}, Ks: {Ks.shape}"
+
+    device = depths.device
+    height, width = depths.shape[-3:-1]
+
+    x, y = torch.meshgrid(
+        torch.arange(width, device=device),
+        torch.arange(height, device=device),
+        indexing="xy",
+    )  # [H, W]
+
+    fx = Ks[..., 0, 0]  # [...]
+    fy = Ks[..., 1, 1]  # [...]
+    cx = Ks[..., 0, 2]  # [...]
+    cy = Ks[..., 1, 2]  # [...]
+
+    # camera directions in camera coordinates
+    camera_dirs = F.pad(
+        torch.stack(
+            [
+                (x - cx[..., None, None] + 0.5) / fx[..., None, None],
+                (y - cy[..., None, None] + 0.5) / fy[..., None, None],
+            ],
+            dim=-1,
+        ),
+        (0, 1),
+        value=1.0,
+    )  # [..., H, W, 3]
+
+    # ray directions in world coordinates
+    directions = torch.einsum(
+        "...ij,...hwj->...hwi", camtoworlds[..., :3, :3], camera_dirs
+    )  # [..., H, W, 3]
+    origins = camtoworlds[..., :3, -1]  # [..., 3]
+
+    if not z_depth:
+        directions = F.normalize(directions, dim=-1)
+
+    points = origins[..., None, None, :] + depths * directions
+    return points
+
+def depth_to_normal(
+    depths: Tensor, camtoworlds: Tensor, Ks: Tensor, z_depth: bool = True
+) -> Tensor:
+    """Convert depth maps to surface normals
+
+    Args:
+        depths: Depth maps [..., H, W, 1]
+        camtoworlds: Camera-to-world transformation matrices [..., 4, 4]
+        Ks: Camera intrinsics [..., 3, 3]
+        z_depth: Whether the depth is in z-depth (True) or ray depth (False)
+
+    Returns:
+        normals: Surface normals in the world coordinate system [..., H, W, 3]
+    """
+    points = depth_to_points(depths, camtoworlds, Ks, z_depth=z_depth)  # [..., H, W, 3]
+    dx = torch.cat(
+        [points[..., 2:, 1:-1, :] - points[..., :-2, 1:-1, :]], dim=-3
+    )  # [..., H-2, W-2, 3]
+    dy = torch.cat(
+        [points[..., 1:-1, 2:, :] - points[..., 1:-1, :-2, :]], dim=-2
+    )  # [..., H-2, W-2, 3]
+    normals = F.normalize(torch.cross(dx, dy, dim=-1), dim=-1)  # [..., H-2, W-2, 3]
+    normals = F.pad(normals, (0, 0, 1, 1, 1, 1), value=0.0)  # [..., H, W, 3]
+    return normals
 
 def rasterization_2dgs(
     means,          # [N, 3]
@@ -325,15 +414,13 @@ def rasterization_2dgs(
         render_distort, render_median, render_features, info
     """
     device = means.device
-    C = viewmats.shape[0]  # number of cameras (usually 1)
+    C = len(viewmats)  # number of cameras (usually 1)
     
     # Normalize quats (diff-surfel doesn't do this internally)
     quats = F.normalize(quats, dim=-1).contiguous()
     # diff-surfel CUDA kernel reads scales as glm::vec2 (stride-2).
-    # Must pass exactly (N, 2) contiguous.
+    # Must pass exactly (N, 2)
     scales_2d = scales[:, :2].contiguous()
-    means = means.contiguous()
-    colors = colors.contiguous()
     
     all_render_colors = []
     all_render_features = []
@@ -361,7 +448,7 @@ def rasterization_2dgs(
         camera_center = world_view_transform.inverse()[3, :3]
         
         background = (
-            backgrounds[cid][:3] if backgrounds is not None
+            backgrounds[cid] if backgrounds is not None
             else torch.zeros(3, device=device)
         )
         
@@ -382,7 +469,6 @@ def rasterization_2dgs(
         
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
         means2D = torch.zeros_like(means, requires_grad=True, device=device)
-        means2D.retain_grad()
         
         # Determine colors
         if sh_degree is not None and colors.dim() == 3:
@@ -423,11 +509,7 @@ def rasterization_2dgs(
             
             chunk = features
             if padded_c > F_dim:
-                chunk = torch.cat([chunk, torch.zeros(chunk.shape[0], padded_c - F_dim, device=device)], dim=-1)
-                
-            # Apply geometric safeguard scaling to prevent semantic forces from violently nuking opacities
-            if chunk.requires_grad:
-                chunk.register_hook(lambda grad: grad * 0.05)
+                chunk = torch.cat([chunk, torch.zeros(chunk.shape[0], padded_c - F_dim, device=device)], dim=-1).detach().contiguous()
                 
             bg_feat = torch.zeros(padded_c, device=device)
             feat_settings = GaussianRasterizationSettings(
@@ -524,3 +606,168 @@ def rasterization_2dgs(
         render_features_out,
         info,
     )
+
+
+def rasterization_2dgs_inria_wrapper(
+    means: Tensor,  # [N, 3]
+    quats: Tensor,  # [N, 4]
+    scales: Tensor,  # [N, 3]
+    opacities: Tensor,  # [N]
+    colors: Tensor,  # [N, D] or [N, K, 3]
+    viewmats: Tensor,  # [C, 4, 4]
+    Ks: Tensor,  # [C, 3, 3]
+    width: int,
+    height: int,
+    near_plane: float = 0.01,
+    far_plane: float = 100.0,
+    eps2d: float = 0.3,
+    sh_degree: Optional[int] = None,
+    backgrounds: Optional[Tensor] = None,
+    depth_ratio: int = 0,
+    **kwargs,
+) -> Tuple[Tuple, Dict]:
+    """Wrapper for 2DGS's rasterization backend which is based on Inria's backend.
+
+    Install the 2DGS rasterization backend from
+        https://github.com/hbb1/diff-surfel-rasterization
+
+    Credit to Jeffrey Hu https://github.com/jefequien
+
+    """
+    from diff_surfel_rasterization import (
+        GaussianRasterizationSettings,
+        GaussianRasterizer,
+    )
+
+    assert eps2d == 0.3, "This is hard-coded in CUDA to be 0.3"
+    C = len(viewmats)
+    device = means.device
+    channels = colors.shape[-1]
+
+    # rasterization from inria does not do normalization internally
+    quats = F.normalize(quats, dim=-1).contiguous()  # [N, 4]
+    scales = scales[:, :2].contiguous()  # [N, 2]
+
+    render_colors = []
+    for cid in range(C):
+        FoVx = 2 * math.atan(width / (2 * Ks[cid, 0, 0].item()))
+        FoVy = 2 * math.atan(height / (2 * Ks[cid, 1, 1].item()))
+        tanfovx = math.tan(FoVx * 0.5)
+        tanfovy = math.tan(FoVy * 0.5)
+
+        world_view_transform = viewmats[cid].transpose(0, 1)
+        projection_matrix = _get_projection_matrix(
+            znear=near_plane, zfar=far_plane, fovX=FoVx, fovY=FoVy, device=device
+        ).transpose(0, 1)
+        full_proj_transform = (
+            world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))
+        ).squeeze(0)
+        camera_center = world_view_transform.inverse()[3, :3]
+
+        background = (
+            backgrounds[cid]
+            if backgrounds is not None
+            else torch.zeros(3, device=device)
+        )
+
+        raster_settings = GaussianRasterizationSettings(
+            image_height=height,
+            image_width=width,
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            bg=background,
+            scale_modifier=1.0,
+            viewmatrix=world_view_transform,
+            projmatrix=full_proj_transform,
+            sh_degree=0 if sh_degree is None else sh_degree,
+            campos=camera_center,
+            prefiltered=False,
+            debug=False,
+        )
+
+        rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
+        means2D = torch.zeros_like(means, requires_grad=True, device=device)
+
+        render_colors_ = []
+        radii = None
+        allmap = None
+        for i in range(0, channels, 3):
+            _colors = colors[..., i : i + 3]
+            shape_before = _colors.shape
+            if _colors.shape[-1] < 3:
+                pad = torch.zeros(
+                    _colors.shape[0], 3 - _colors.shape[-1], device=device
+                ).detach()
+                _colors = torch.cat([_colors, pad], dim=-1)
+            if i == 0:
+                # This is the first time we call the rasterizer, so we need to get the radii and allmap
+                _render_colors_, radii, allmap = rasterizer(
+                    means3D=means,
+                    means2D=means2D,
+                    shs=_colors if colors.dim() == 3 else None,
+                    colors_precomp=_colors if colors.dim() == 2 else None,
+                    opacities=opacities[:, None].contiguous(),
+                    scales=scales,
+                    rotations=quats,
+                    cov3D_precomp=None,
+                )
+            else:
+                # We don't need the radii and allmap for the subsequent calls
+                _render_colors_, _, _ = rasterizer(
+                    means3D=means,
+                    means2D=means2D,
+                    shs=_colors if colors.dim() == 3 else None,
+                    colors_precomp=_colors if colors.dim() == 2 else None,
+                    opacities=opacities[:, None].contiguous(),
+                    scales=scales,
+                    rotations=quats,
+                    cov3D_precomp=None,
+                )
+            if shape_before[-1] < 3:
+                _render_colors_ = _render_colors_[:shape_before[-1], :, :]
+            render_colors_.append(_render_colors_)
+
+        # render_colors_ is [ceil(channels/3), 3 (last may be <= 3), H, W]
+        render_colors_ = torch.cat(render_colors_, dim=0) # [channels, H, W]
+        render_colors_ = render_colors_.permute(1, 2, 0)  # [H, W, channels]
+        render_colors.append(render_colors_)
+    render_colors = torch.stack(render_colors, dim=0)
+
+    # additional maps
+    allmap = allmap.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, C]
+    render_depth_expected = allmap[..., 0:1]
+    render_alphas = allmap[..., 1:2]
+    render_normal = allmap[..., 2:5]
+    render_depth_median = allmap[..., 5:6]
+    render_dist = allmap[..., 6:7]
+
+    render_normal = render_normal @ (world_view_transform[:3, :3].T)
+    render_depth_expected = render_depth_expected / render_alphas
+    render_depth_expected = torch.nan_to_num(render_depth_expected, 0, 0)
+    render_depth_median = torch.nan_to_num(render_depth_median, 0, 0)
+
+    # render_depth is either median or expected by setting depth_ratio to 1 or 0
+    # for bounded scene, use median depth, i.e., depth_ratio = 1;
+    # for unbounded scene, use expected depth, i.e., depth_ratio = 0, to reduce disk aliasing.
+    render_depth = (
+        render_depth_expected * (1 - depth_ratio) + (depth_ratio) * render_depth_median
+    )
+
+    normals_surf = depth_to_normal(render_depth, torch.linalg.inv(viewmats), Ks)
+    normals_surf = normals_surf * (render_alphas).detach()
+
+    render_colors = torch.cat([render_colors, render_depth], dim=-1)
+
+    meta = {
+        "normals_rend": render_normal,
+        "normals_surf": normals_surf,
+        "render_distloss": render_dist,
+        "means2d": means2D,
+        "width": width,
+        "height": height,
+        "radii": radii.unsqueeze(0),
+        "n_cameras": C,
+        "gaussian_ids": None,
+    }
+    return (render_colors, render_alphas), meta
