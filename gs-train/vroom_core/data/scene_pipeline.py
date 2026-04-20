@@ -160,15 +160,25 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
                     data = np.load(str(mask_npz_path))
                     mask_array = data[data.files[0]]
                     if mask_array.ndim >= 3:
-                        H, W = mask_array.shape[1], mask_array.shape[2]
-                        categorical = np.zeros((H, W), dtype=np.uint8)
-                        for i in range(mask_array.shape[0]):
-                            categorical[mask_array[i]] = i + 1
-                        alpha_mask = Image.fromarray(categorical, mode='L')
+                        # Multi-channel boolean array = semantic label map (e.g. SAM masks).
+                        # NOT a binary opacity mask — skip for alpha_mask.
+                        pass
+                    elif mask_array.ndim == 2 and mask_array.max() > 128:
+                        # 2D array with large values = binary opacity mask.
+                        alpha_mask = Image.fromarray(mask_array.astype(np.uint8), mode='L')
+                    # Otherwise (2D with small values) = categorical label map, skip.
                 except Exception:
                     pass
             elif mask_png_path.exists():
-                alpha_mask = Image.open(mask_png_path)
+                try:
+                    img = Image.open(mask_png_path)
+                    arr = np.array(img)
+                    if arr.max() > 128:
+                        # Large values (0 vs 255) = binary opacity mask.
+                        alpha_mask = img
+                    # Otherwise small integer values (0-N) = categorical label map, skip.
+                except Exception:
+                    pass
         depth = None
         if layout.depth_dir is not None:
             depth_path = layout.depth_dir / extrinsic.name.replace(".JPG", ".png").replace(".jpg", ".png")
