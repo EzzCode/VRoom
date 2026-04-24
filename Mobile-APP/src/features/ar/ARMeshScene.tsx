@@ -5,7 +5,6 @@ import {
   ViroNode,
   ViroAmbientLight,
   ViroDirectionalLight,
-  ViroMaterials,
 } from '@reactvision/react-viro';
 import ARReticle from './ARReticle';
 

@@ -5,6 +5,16 @@
 /** 3D vector (position, direction, etc.) */
 export type Vec3 = [number, number, number];
 
+/** 4x4 matrix in row-major order */
+export type Matrix4 = [
+  [number, number, number, number],
+  [number, number, number, number],
+  [number, number, number, number],
+  [number, number, number, number],
+];
+
+export type TrackingState = 'unavailable' | 'limited' | 'normal';
+
 /** Camera pose captured from ARKit/ARCore via ViroReact */
 export interface CameraPose {
   /** Camera position in world space */
@@ -15,18 +25,28 @@ export interface CameraPose {
   forward: Vec3;
   /** Normalised up direction vector */
   up: Vec3;
-  /** Timestamp (ms since epoch) */
-  timestamp: number;
+  /** Timestamp (nanoseconds since Unix epoch) */
+  timestampNs: number;
+  /** AR tracking quality for this pose */
+  trackingState: TrackingState;
+  /** Camera-to-world transform in meters, row-major */
+  cameraToWorld: Matrix4;
 }
 
 /** A saved keyframe: image path + associated metadata */
 export interface Keyframe {
+  /** Stable frame ID shared across images, poses, and intrinsics */
+  frameId: string;
   /** Absolute path to the saved JPEG on device */
   imagePath: string;
   /** Camera pose at capture time */
   pose: CameraPose;
+  /** Captured image width in pixels */
+  width: number;
+  /** Captured image height in pixels */
+  height: number;
   /** Laplacian variance (sharpness score) */
-  blurScore: number;
+  qualityScore: number;
   /** Frame index within the current session */
   index: number;
 }
@@ -65,12 +85,16 @@ export interface MeshInfo {
 
 /** Capture session metadata exported alongside images */
 export interface SessionMetadata {
+  /** Session capture ID */
+  captureId: string;
   /** Session start time (ISO 8601) */
   startedAt: string;
   /** Session end time (ISO 8601) */
   endedAt?: string;
   /** All saved keyframes */
   keyframes: Keyframe[];
+  /** Overall capture status */
+  captureStatus: 'completed' | 'interrupted' | 'aborted';
   /** Coverage percentage at session end */
   coveragePercent: number;
   /** Total frames analysed */

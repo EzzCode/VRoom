@@ -40,3 +40,27 @@ export async function saveCapturedPhoto(photoPath: string, filenamePrefix = 'pos
 
   return destinationPath;
 }
+
+export async function saveCapturedAsset(sourcePath: string, targetFilename: string): Promise<string> {
+  const capturesDirectory = `${getDocumentDirectory()}captures/`;
+
+  await FileSystem.makeDirectoryAsync(capturesDirectory, { intermediates: true });
+
+  const destinationPath = `${capturesDirectory}${targetFilename}`;
+  const normalizedSourcePath = toFileUri(sourcePath);
+
+  try {
+    await FileSystem.moveAsync({
+      from: normalizedSourcePath,
+      to: destinationPath,
+    });
+  } catch {
+    await FileSystem.copyAsync({
+      from: normalizedSourcePath,
+      to: destinationPath,
+    });
+    await FileSystem.deleteAsync(normalizedSourcePath, { idempotent: true });
+  }
+
+  return destinationPath;
+}

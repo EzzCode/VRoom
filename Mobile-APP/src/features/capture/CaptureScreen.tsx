@@ -1,64 +1,88 @@
-import React, { useCallback, useEffect, useState, useRef } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity } from 'react-native';
-import {
-  Camera,
-  useCameraDevice,
-  useCameraPermission,
-  useFrameProcessor,
-} from 'react-native-vision-camera';
-import { useRunOnJS } from 'react-native-worklets-core';
-import { useResizePlugin } from 'vision-camera-resize-plugin';
-import { processBlur } from './gates/BlurGate';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, Image, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ViroARSceneNavigator } from '@reactvision/react-viro';
+import { useCameraDevice } from 'react-native-vision-camera';
 import { CAPTURE_CONFIG } from './config/captureConfig';
-import { saveCapturedPhoto } from './services/captureStorage';
-import { useSession, SessionProvider } from '../../providers/SessionProvider';
+import { saveCapturedAsset } from './services/captureStorage';
+import { useSession } from '../../providers/SessionProvider';
 import { useTheme } from '../../shared/theme';
 import { Header, Button, ProgressBar } from '../../shared/components';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../navigation/types';
+import ARCaptureScene from './ARCaptureScene';
+import { CameraPose, TrackingState } from '../../shared/core/types';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Capture'>;
 
-function shouldProcessFrame(interval: number): boolean {
-  'worklet';
-
-  const workletGlobal = globalThis as typeof globalThis & {
-    __blurFrameCount?: number;
-  };
-
-  const currentCount = workletGlobal.__blurFrameCount ?? 0;
-  workletGlobal.__blurFrameCount = currentCount + 1;
-
-  return currentCount % Math.max(1, interval) === 0;
-}
-
-function CaptureScreenInner({ navigation }: Props) {
+export default function CaptureScreen({ navigation }: Props) {
   const { theme } = useTheme();
-  const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
-  const { resize } = useResizePlugin();
-  const camera = useRef<Camera>(null);
-
-  const [isBlurry, setIsBlurry] = useState(false);
-  const [blurScore, setBlurScore] = useState(0);
-  const [guidance, setGuidance] = useState<string | null>(null);
-
-  const captureIntervalMs = 1200;
-
-  const { isRecording, startSession, stopSession, keyframes, addKeyframe, extractor, currentPose } =
-    useSession();
-
+  const arNavigatorRef = useRef<any>(null);
+  const latestPoseRef = useRef<CameraPose | null>(null);
+  const latestTrackingStateRef = useRef<TrackingState>('unavailable');
   const isRecordingRef = useRef(false);
-  const isBlurryRef = useRef(false);
-  const blurScoreRef = useRef(0);
+  const captureCounterRef = useRef(0);
+
+  const [trackingState, setTrackingState] = useState<TrackingState>('unavailable');
+  const [guidance, setGuidance] = useState<string | null>(null);
+  const [captureQuality, setCaptureQuality] = useState(0);
+
+  const {
+    isRecording,
+    startSession,
+    stopSession,
+    keyframes,
+    addKeyframe,
+    extractor,
+    setCurrentPose,
+    setCaptureStatus,
+  } = useSession();
+
+  const cameraDiagonalFov = useMemo(
+    () => device?.formats[0]?.fieldOfView ?? CAPTURE_CONFIG.coverage.cameraFovDeg,
+    [device],
+  );
+
+  const handlePoseUpdated = useCallback(
+    (pose: CameraPose) => {
+      latestPoseRef.current = pose;
+      latestTrackingStateRef.current = pose.trackingState;
+      setCurrentPose(pose);
+      setTrackingState(pose.trackingState);
+    },
+    [setCurrentPose],
+  );
+
+  const handleTrackingChanged = useCallback((state: TrackingState) => {
+    latestTrackingStateRef.current = state;
+    setTrackingState(state);
+  }, []);
+
+  const getImageSize = useCallback((uri: string) => {
+    return new Promise<{ width: number; height: number }>((resolve, reject) => {
+      Image.getSize(
+        uri,
+        (width, height) => resolve({ width, height }),
+        (error) => reject(error),
+      );
+    });
+  }, []);
 
   const handleCapture = useCallback(async () => {
-    if (!camera.current || !isRecordingRef.current) return;
+    const nav = arNavigatorRef.current;
+    const currentPose = latestPoseRef.current;
+    if (!nav || !isRecordingRef.current || !currentPose) {
+      return;
+    }
+
+    if (latestTrackingStateRef.current !== 'normal') {
+      setGuidance('Wait for stable ARCore tracking before capturing.');
+      return;
+    }
 
     const { shouldCapture, results } = extractor.evaluate(currentPose);
-
     if (!shouldCapture) {
-      const failed = results.find((r) => !r.result.passed);
+      const failed = results.find((result) => !result.result.passed);
       setGuidance(failed?.result.reason ?? 'Adjust your position.');
       return;
     }
@@ -66,25 +90,32 @@ function CaptureScreenInner({ navigation }: Props) {
     setGuidance(null);
 
     try {
-      const photo = await camera.current.takePhoto({ flash: 'off' });
-      const savedPath = await saveCapturedPhoto(photo.path);
+      const frameId = `frame_${String(captureCounterRef.current).padStart(5, '0')}`;
+      const screenshot = await nav._takeScreenshot(frameId, false);
+      if (!screenshot?.success || !screenshot.url) {
+        throw new Error('Viro screenshot failed.');
+      }
+      const savedPath = await saveCapturedAsset(screenshot.url, `${frameId}.jpg`);
+      const size = await getImageSize(savedPath);
+      const qualityScore = 1;
 
       addKeyframe({
+        frameId,
         imagePath: savedPath,
-        pose: currentPose ?? {
-          position: [0, 0, 0],
-          rotation: [0, 0, 0],
-          forward: [0, 0, -1],
-          up: [0, 1, 0],
-          timestamp: Date.now(),
-        },
-        blurScore: blurScoreRef.current,
+        pose: currentPose,
+        width: size.width,
+        height: size.height,
+        qualityScore,
         index: keyframes.length,
       });
-    } catch (e) {
-      console.error('Failed to save frame:', e);
+      captureCounterRef.current += 1;
+      setCaptureQuality(qualityScore);
+    } catch (error) {
+      console.error('Failed to save AR frame:', error);
+      setCaptureStatus('interrupted');
+      Alert.alert('Capture failed', 'The AR frame could not be saved. Please try again.');
     }
-  }, [extractor, currentPose, addKeyframe, keyframes.length]);
+  }, [addKeyframe, extractor, getImageSize, keyframes.length, setCaptureStatus]);
 
   useEffect(() => {
     if (!isRecording) {
@@ -92,81 +123,21 @@ function CaptureScreenInner({ navigation }: Props) {
     }
 
     const intervalId = setInterval(() => {
-      if (!isBlurryRef.current) {
-        void handleCapture();
-      }
-    }, captureIntervalMs);
+      void handleCapture();
+    }, 1200);
 
     return () => {
       clearInterval(intervalId);
     };
-  }, [isRecording, handleCapture]);
+  }, [handleCapture, isRecording]);
 
-  const updateBlurOnJS = useRunOnJS((blurry: boolean, score: number) => {
-    isBlurryRef.current = blurry;
-    blurScoreRef.current = score;
-    setIsBlurry(blurry);
-    setBlurScore(score);
-  }, []);
-
-  const frameProcessor = useFrameProcessor(
-    (frame) => {
-      'worklet';
-
-      if (!shouldProcessFrame(CAPTURE_CONFIG.frameSamplingInterval)) {
-        return;
-      }
-
-      let resizedBuffer: Uint8Array;
-      try {
-        resizedBuffer = resize(frame, {
-          scale: {
-            width: CAPTURE_CONFIG.resize.width,
-            height: CAPTURE_CONFIG.resize.height,
-          },
-          pixelFormat: 'rgb',
-          dataType: 'uint8',
-        });
-      } catch {
-        return;
-      }
-
-      const blurResult = processBlur(
-        resizedBuffer,
-        CAPTURE_CONFIG.resize.width,
-        CAPTURE_CONFIG.resize.height,
-        3,
-      );
-
-      void updateBlurOnJS(blurResult.isBlurry, blurResult.variance);
-    },
-    [updateBlurOnJS, resize],
-  );
-
-  if (!hasPermission) {
+  if (device == null) {
     return (
       <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
-        <Text
-          style={{
-            color: theme.colors.textSecondary,
-            fontSize: theme.typography.body.fontSize,
-            textAlign: 'center',
-            marginBottom: 20,
-          }}
-        >
-          VRoom needs camera access to scan.
-        </Text>
-        <Button title="Grant Permission" onPress={requestPermission} variant="primary" />
+        <Text style={{ color: theme.colors.textSecondary }}>Loading ARCore camera...</Text>
       </View>
     );
   }
-
-  if (device == null)
-    return (
-      <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
-        <Text style={{ color: theme.colors.textSecondary }}>Loading camera…</Text>
-      </View>
-    );
 
   const toggleRecording = () => {
     if (isRecording) {
@@ -174,22 +145,47 @@ function CaptureScreenInner({ navigation }: Props) {
       isRecordingRef.current = false;
     } else {
       startSession();
+      setCaptureStatus('aborted');
+      captureCounterRef.current = 0;
       isRecordingRef.current = true;
     }
   };
 
-  const blurProgress = Math.min(blurScore / 500, 1);
+  const trackingProgress =
+    trackingState === 'normal' ? 1 : trackingState === 'limited' ? 0.5 : 0.1;
 
   return (
     <View style={styles.container}>
-      <Camera
-        ref={camera}
+      <ViroARSceneNavigator
+        ref={arNavigatorRef}
+        autofocus={true}
+        shadowsEnabled={false}
+        pbrEnabled={false}
+        hdrEnabled={false}
+        initialScene={{
+          scene: ARCaptureScene as any,
+        }}
+        viroAppProps={{
+          onTrackingChanged: handleTrackingChanged,
+          onCameraPose: ({
+            position,
+            rotation,
+            forward,
+            up,
+            cameraToWorld,
+          }: Omit<CameraPose, 'timestampNs' | 'trackingState'>) => {
+            handlePoseUpdated({
+              position,
+              rotation,
+              forward,
+              up,
+              cameraToWorld,
+              timestampNs: Date.now() * 1_000_000,
+              trackingState: latestTrackingStateRef.current,
+            });
+          },
+        }}
         style={StyleSheet.absoluteFill}
-        device={device}
-        isActive={true}
-        photo={true}
-        pixelFormat="yuv"
-        frameProcessor={frameProcessor}
       />
 
       <View style={[styles.topBar, { paddingTop: CAPTURE_CONFIG.hudTopOffset }]}>
@@ -236,45 +232,76 @@ function CaptureScreenInner({ navigation }: Props) {
           </Text>
           <View style={{ flex: 1, marginHorizontal: 12 }}>
             <ProgressBar
-              progress={blurProgress}
-              color={isBlurry ? theme.colors.error : theme.colors.success}
+              progress={trackingProgress}
+              color={
+                trackingState === 'normal'
+                  ? theme.colors.success
+                  : trackingState === 'limited'
+                    ? theme.colors.warning
+                    : theme.colors.error
+              }
             />
           </View>
           <Text
             style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
           >
-            {blurScore.toFixed(0)}
+            {trackingState}
           </Text>
         </View>
 
-        {isBlurry && isRecording && (
+        <View
+          style={[
+            styles.banner,
+            {
+              backgroundColor: theme.colors.overlay,
+              borderRadius: theme.radii.md,
+              paddingVertical: theme.spacing.md,
+              paddingHorizontal: theme.spacing.xl,
+              marginTop: theme.spacing.md,
+              borderLeftWidth: 3,
+              borderLeftColor: theme.colors.primary,
+            },
+          ]}
+        >
+          <Text
+            style={{
+              color: theme.colors.textPrimary,
+              fontSize: theme.typography.body.fontSize,
+              fontWeight: '600',
+            }}
+          >
+            {`${Platform.OS} ARCore | FOV ${cameraDiagonalFov.toFixed(1)} deg | Quality ${(captureQuality * 100).toFixed(0)}%`}
+          </Text>
+        </View>
+
+        {trackingState !== 'normal' && isRecording && (
           <View
             style={[
               styles.banner,
               {
-                backgroundColor: theme.colors.errorBackground,
+                backgroundColor: theme.colors.warningBackground,
                 borderRadius: theme.radii.md,
                 paddingVertical: theme.spacing.md,
                 paddingHorizontal: theme.spacing.xl,
                 marginTop: theme.spacing.md,
                 borderLeftWidth: 3,
-                borderLeftColor: theme.colors.error,
+                borderLeftColor: theme.colors.warning,
               },
             ]}
           >
             <Text
               style={{
-                color: theme.colors.error,
+                color: theme.colors.warning,
                 fontSize: theme.typography.body.fontSize,
                 fontWeight: '600',
               }}
             >
-              Hold Steady! Image too blurry.
+              Move slowly until ARCore tracking is normal.
             </Text>
           </View>
         )}
 
-        {guidance && isRecording && !isBlurry && (
+        {guidance && isRecording && (
           <View
             style={[
               styles.banner,
@@ -311,14 +338,6 @@ function CaptureScreenInner({ navigation }: Props) {
         />
       </View>
     </View>
-  );
-}
-
-export default function CaptureScreen(props: Props) {
-  return (
-    <SessionProvider>
-      <CaptureScreenInner {...props} />
-    </SessionProvider>
   );
 }
 

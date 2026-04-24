@@ -83,7 +83,7 @@ class MetricBundle:
     intrinsics_by_frame: dict[str, FrameIntrinsicRecord]
     poses_by_frame: dict[str, FramePoseRecord]
     tracking_by_frame: dict[str, TrackingRecord]
-    sam_manifest: dict
+    sam_manifest: dict | None
     valid_frame_ids: list[str]
     rejected_frame_ids: list[str]
     warnings: list[str]
@@ -161,7 +161,7 @@ def load_metric_bundle(bundle_root: str | Path) -> MetricBundle:
     sam_manifest_path = root / "sam_manifest.json"
     sam_root = root / "sam_masks"
 
-    for required_path in [manifest_path, intrinsics_path, poses_path, tracking_path, sam_manifest_path]:
+    for required_path in [manifest_path, intrinsics_path, poses_path, tracking_path]:
         if not required_path.exists():
             raise FileNotFoundError(f"Missing required metric bundle artifact: {required_path}")
 
@@ -215,12 +215,14 @@ def load_metric_bundle(bundle_root: str | Path) -> MetricBundle:
             tracking_state=str(entry["tracking_state"]).lower(),
         )
 
-    sam_manifest = _load_json(sam_manifest_path)
-    _require_fields(sam_manifest, REQUIRED_SAM_MANIFEST_FIELDS, "sam_manifest.json")
-    if sam_manifest.get("frame_join_key") != "frame_id":
-        raise ValueError("sam_manifest.json must declare frame_join_key='frame_id'.")
-    if not sam_root.exists():
-        raise FileNotFoundError(f"Missing sam_masks directory: {sam_root}")
+    sam_manifest = None
+    if sam_manifest_path.exists():
+        sam_manifest = _load_json(sam_manifest_path)
+        _require_fields(sam_manifest, REQUIRED_SAM_MANIFEST_FIELDS, "sam_manifest.json")
+        if sam_manifest.get("frame_join_key") != "frame_id":
+            raise ValueError("sam_manifest.json must declare frame_join_key='frame_id'.")
+        if not sam_root.exists():
+            raise FileNotFoundError(f"Missing sam_masks directory: {sam_root}")
 
     frame_ids = sorted(poses_records.keys())
     if len(frame_ids) != int(manifest["frame_count"]):
@@ -246,7 +248,8 @@ def load_metric_bundle(bundle_root: str | Path) -> MetricBundle:
         _validate_frame_dimensions(image_path, intrinsics_records[frame_id])
         _validate_timestamp_match(frame_id, intrinsics_records[frame_id].timestamp_ns, poses_records[frame_id].timestamp_ns, "intrinsics/poses")
         _validate_timestamp_match(frame_id, tracking_records[frame_id].timestamp_ns, poses_records[frame_id].timestamp_ns, "tracking/poses")
-        _validate_mask_alignment(root, frame_id, sam_root)
+        if sam_manifest is not None:
+            _validate_mask_alignment(root, frame_id, sam_root)
 
         tracking_state = tracking_records[frame_id].tracking_state
         pose_tracking_state = poses_records[frame_id].tracking_state

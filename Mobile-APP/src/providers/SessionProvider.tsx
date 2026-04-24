@@ -26,6 +26,8 @@ export interface SessionContextValue {
   setCurrentPose: (pose: CameraPose) => void;
   /** Session metadata for export */
   getMetadata: () => SessionMetadata;
+  /** Mark the session export lifecycle status */
+  setCaptureStatus: (status: SessionMetadata['captureStatus']) => void;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -36,6 +38,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [keyframes, setKeyframes] = useState<Keyframe[]>([]);
   const [currentPose, setCurrentPose] = useState<CameraPose | null>(null);
   const sessionStartRef = useRef<string>('');
+  const captureIdRef = useRef<string>('');
+  const captureStatusRef = useRef<SessionMetadata['captureStatus']>('aborted');
 
   // Create the extractor once and register gates
   const extractor = useMemo(() => {
@@ -51,10 +55,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setCurrentPose(null);
     extractor.resetAll();
     sessionStartRef.current = new Date().toISOString();
+    captureIdRef.current = `capture_${Date.now()}`;
+    captureStatusRef.current = 'aborted';
     setIsRecording(true);
   }, [extractor]);
 
   const stopSession = useCallback(() => {
+    captureStatusRef.current = 'completed';
     setIsRecording(false);
   }, []);
 
@@ -64,13 +71,19 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const getMetadata = useCallback((): SessionMetadata => {
     return {
+      captureId: captureIdRef.current,
       startedAt: sessionStartRef.current,
       endedAt: new Date().toISOString(),
       keyframes,
+      captureStatus: captureStatusRef.current,
       coveragePercent: 0, // Populated in Build 3
       totalFramesAnalysed: 0, // Updated by frame processor
     };
   }, [keyframes]);
+
+  const setCaptureStatus = useCallback((status: SessionMetadata['captureStatus']) => {
+    captureStatusRef.current = status;
+  }, []);
 
   const value: SessionContextValue = {
     isRecording,
@@ -82,6 +95,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     currentPose,
     setCurrentPose,
     getMetadata,
+    setCaptureStatus,
   };
 
   return (
