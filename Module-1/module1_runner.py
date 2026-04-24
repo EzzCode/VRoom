@@ -37,8 +37,11 @@ def run_step(step_name, cmd, dry_run=False):
 
 def build_paths(data_path):
     """Build canonical per-stage filesystem paths for a scene folder."""
+    image_root = data_path / "images"
+    if not image_root.exists() and (data_path / "frames").exists():
+        image_root = data_path / "frames"
     return {
-        "images": data_path / "images",
+        "images": image_root,
         "sam_output": data_path / "sam_output",
         "sam_masks": data_path / "sam_output" / "masks",
         "tracked": data_path / "tracked",
@@ -57,6 +60,12 @@ def main():
     parser.add_argument("--skip_masks", action="store_true", help="Skip mask_processor step")
     parser.add_argument("--skip_tracking", action="store_true", help="Skip object_tracker step")
     parser.add_argument("--skip_voting", action="store_true", help="Skip vote step")
+    parser.add_argument(
+        "--reconstruction_mode",
+        default=None,
+        choices=["standard_sfm", "known_pose_triangulation"],
+        help="Override reconstruction mode. Defaults to known_pose_triangulation when manifest.json is present.",
+    )
 
     # COLMAP
     parser.add_argument("--camera_model", default="OPENCV", choices=["PINHOLE", "OPENCV", "SIMPLE_RADIAL", "RADIAL"])
@@ -106,7 +115,11 @@ def main():
         raise FileNotFoundError(f"data_path does not exist: {data_path}")
 
     paths = build_paths(data_path)
-    if not paths["images"].exists() and not args.skip_masks and not args.skip_tracking:
+    reconstruction_mode = args.reconstruction_mode
+    if reconstruction_mode is None:
+        reconstruction_mode = "known_pose_triangulation" if (data_path / "manifest.json").exists() else "standard_sfm"
+
+    if not paths["images"].exists() and (not args.skip_masks or not args.skip_tracking):
         raise FileNotFoundError(f"Missing images directory: {paths['images']}")
 
     py = sys.executable
@@ -119,6 +132,7 @@ def main():
             "--data_path", str(data_path),
             "--camera_model", args.camera_model,
             "--matcher_type", args.matcher_type,
+            "--reconstruction_mode", reconstruction_mode,
         ]
         if args.force_colmap:
             colmap_cmd.append("--force")
