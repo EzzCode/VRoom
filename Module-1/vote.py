@@ -448,6 +448,13 @@ def run_voting(args):
             min_covisibility=args.alias_min_covisibility,
         )
         if merge_map:
+            import json
+            map_path = os.path.join(data, args.output_dir, "alias_merge_map.json")
+            os.makedirs(os.path.dirname(map_path), exist_ok=True)
+            with open(map_path, "w") as f:
+                json.dump({str(k): int(v) for k, v in merge_map.items()}, f, indent=2)
+            print(f"  Saved alias map -> {map_path}")
+            
             unique, counts = np.unique(labels, return_counts=True)
             print(f"\nPost-merge label distribution ({len(unique)} labels):")
             for lbl, cnt in zip(unique, counts):

@@ -7,7 +7,7 @@ This module processes raw images to generate sparse 3D point clouds and per-obje
 The pipeline consists of four main scripts:
 1. **`colmap_runner.py`**: Automates COLMAP feature extraction and sparse reconstruction.
 2. **`mask_processor.py`**: Uses SAM 2 to generate per-frame segmentation masks and filters backgrounds.
-3. **`object_tracker.py`**: Tracks segmented objects across frames using Optical Flow, Color, and Shape features, generating consistent 16-bit ID maps.
+3. **`object_tracker.py`**: Tracks segmented objects across frames using Optical Flow, Color, LBP texture, and centroid priors, generating consistent 16-bit ID maps.
 4. **`vote.py`**: Projects the 3D points from COLMAP onto the 2D ID maps to assign labels to the point cloud through multi-view voting.
 
 ---

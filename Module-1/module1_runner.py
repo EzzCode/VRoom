@@ -75,7 +75,7 @@ def main():
     parser.add_argument("--sam_ckpt", default="Module-1/models/sam3.pt", help="SAM3 checkpoint (e.g., sam3.pt, sam3_b.pt)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
-    parser.add_argument("--text_prompts", nargs="+", default=["furniture"])
+    parser.add_argument("--text_prompts", nargs="+", default=["chair", "table", "sofa", "bed", "desk", "cabinet"])
     parser.add_argument("--min_mask_area", type=int, default=120)
     parser.add_argument("--max_area_ratio", type=float, default=0.50)
     parser.add_argument("--border_touch_threshold", type=float, default=0.35)

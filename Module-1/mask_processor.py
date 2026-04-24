@@ -26,22 +26,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from sam_inference import SAM3TextSegmenter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
-
-
-def _resolve_ultralytics_home(requested_home: Optional[str]) -> Path:
-	"""Resolve and create the Ultralytics cache/checkpoint directory."""
-	if requested_home:
-		home = Path(requested_home).expanduser().resolve()
-	else:
-		env_root = Path(sys.executable).resolve().parent.parent
-		home = (env_root / ".ultralytics").resolve()
-	home.mkdir(parents=True, exist_ok=True)
-	os.environ["ULTRALYTICS_HOME"] = str(home)
-	return home
-
 
 def _mask_to_box(mask: np.ndarray) -> Optional[List[int]]:
 	"""Return [x1, y1, x2, y2] for a boolean mask, or None if empty."""
@@ -212,104 +200,41 @@ def split_disconnected(masks: List[np.ndarray], min_component_area: int = 1) -> 
 	return out
 
 
-class SAM3TextSegmenter:
-	"""Thin SAM3 semantic segmenter wrapper for text-only inference."""
-	def __init__(
-		self,
-		checkpoint: str,
-		device: str,
-		text_prompts: Optional[List[str]] = None,
-		min_mask_area: int = 120,
-		ultralytics_home: Optional[str] = None,
-	):
-		self.ultralytics_home = _resolve_ultralytics_home(ultralytics_home)
-		self.checkpoint = checkpoint
-		self.device = device
-		self.text_prompts = text_prompts or ["furniture"]
-		self.min_mask_area = int(min_mask_area)
-		self.semantic_predictor = self._load_model()
+def postprocess_masks(
+	raw_masks: List[np.ndarray],
+	frame_bgr: np.ndarray,
+	min_mask_area: int = 120,
+	max_area_ratio: float = 0.50,
+	border_touch_threshold: float = 0.35,
+	merge_thresh: float = 0.78,
+	proximity_gap: int = 20,
+	proximity_color_thresh: float = 0.32,
+	split_components: bool = True,
+) -> Tuple[List[np.ndarray], Dict[str, int]]:
+	"""Clean up raw SAM3 masks using rule-based spatial processing.
 
-	def _load_model(self):
-		"""Create and configure a SAM3 semantic predictor."""
-		from ultralytics.models.sam import SAM3SemanticPredictor  # type: ignore
+	Args:
+		raw_masks: Unprocessed boolean masks from SAM3.
+		frame_bgr: Input frame in BGR format.
+		min_mask_area: Minimum kept component area in pixels.
+		max_area_ratio: Maximum allowed mask area ratio.
+		border_touch_threshold: Maximum allowed border-touch ratio.
+		merge_thresh: Containment threshold for overlap merging.
+		proximity_gap: Max pixel gap for proximity merge.
+		proximity_color_thresh: Max normalized HSV distance for merge.
+		split_components: Whether to split disconnected components.
 
-		logger.info(f"Loading Ultralytics SAM3 model: {self.checkpoint}")
-		logger.info(f"Ultralytics home: {self.ultralytics_home}")
+	Returns:
+		Tuple of `(final_masks, debug_stats)` where masks are boolean arrays.
+	"""
+	masks = filter_background_masks(raw_masks, max_area_ratio=max_area_ratio, border_touch_threshold=border_touch_threshold)
+	masks = merge_overlapping_masks(masks, thresh=merge_thresh)
+	masks = merge_by_proximity(masks, frame_bgr=frame_bgr, gap_px=proximity_gap, color_thresh=proximity_color_thresh)
+	if split_components:
+		masks = split_disconnected(masks, min_component_area=min_mask_area)
 
-		return SAM3SemanticPredictor(
-			overrides=dict(
-				conf=0.25,
-				task="segment",
-				mode="predict",
-				model=self.checkpoint,
-				half=True,
-				device=self.device,
-				verbose=False,
-			)
-		)
-
-	def _extract_masks_from_results(self, results: Any) -> List[np.ndarray]:
-		"""Convert Ultralytics results to boolean masks with min-area filtering."""
-		masks: List[np.ndarray] = []
-		if results is None:
-			return masks
-
-		items = results if isinstance(results, list) else [results]
-		for item in items:
-			if getattr(item, "masks", None) is None:
-				continue
-			data = item.masks.data
-			if data is None:
-				continue
-			arr = data.detach().cpu().numpy()
-			arr_bool = arr > 0.5
-			areas = arr_bool.reshape(arr_bool.shape[0], -1).sum(axis=1)
-			keep_idx = np.flatnonzero(areas >= self.min_mask_area)
-			for i in keep_idx:
-				masks.append(arr_bool[int(i)])
-
-		return masks
-
-	def segment_frame(
-		self,
-		frame_bgr: np.ndarray,
-		text_prompts: Optional[List[str]] = None,
-		max_area_ratio: float = 0.50,
-		border_touch_threshold: float = 0.35,
-		merge_thresh: float = 0.78,
-		proximity_gap: int = 20,
-		proximity_color_thresh: float = 0.32,
-		split_components: bool = True,
-	) -> Tuple[List[np.ndarray], Dict[str, int]]:
-		"""Segment and postprocess a single frame.
-
-		Args:
-			frame_bgr: Input frame in BGR format.
-			text_prompts: Optional prompt override for this frame.
-			max_area_ratio: Maximum allowed mask area ratio.
-			border_touch_threshold: Maximum allowed border-touch ratio.
-			merge_thresh: Containment threshold for overlap merging.
-			proximity_gap: Max pixel gap for proximity merge.
-			proximity_color_thresh: Max normalized HSV distance for merge.
-			split_components: Whether to split disconnected components.
-
-		Returns:
-			Tuple of `(final_masks, debug_stats)` where masks are boolean arrays.
-		"""
-		frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-		prompts = text_prompts or self.text_prompts
-
-		results = self.semantic_predictor(source=frame_rgb, text=prompts, verbose=False)
-		raw_masks = self._extract_masks_from_results(results)
-
-		masks = filter_background_masks(raw_masks, max_area_ratio=max_area_ratio, border_touch_threshold=border_touch_threshold)
-		masks = merge_overlapping_masks(masks, thresh=merge_thresh)
-		masks = merge_by_proximity(masks, frame_bgr=frame_bgr, gap_px=proximity_gap, color_thresh=proximity_color_thresh)
-		if split_components:
-			masks = split_disconnected(masks, min_component_area=self.min_mask_area)
-
-		masks = [m.astype(bool) for m in masks if int(m.sum()) >= self.min_mask_area]
-		return masks, {"raw_mask_count": len(raw_masks), "final_mask_count": len(masks)}
+	masks = [m.astype(bool) for m in masks if int(m.sum()) >= min_mask_area]
+	return masks, {"raw_mask_count": len(raw_masks), "final_mask_count": len(masks)}
 
 
 def generate_colors(n: int) -> List[Tuple[int, int, int]]:
@@ -373,9 +298,12 @@ def run_pipeline(args):
 			logger.warning(f"Could not read image: {img_path}")
 			continue
 
-		final_masks, debug = segmenter.segment_frame(
+		raw_masks = segmenter.predict_raw_masks(frame, text_prompts=args.text_prompts)
+
+		final_masks, debug = postprocess_masks(
+			raw_masks=raw_masks,
 			frame_bgr=frame,
-			text_prompts=args.text_prompts,
+			min_mask_area=args.min_mask_area,
 			max_area_ratio=args.max_area_ratio,
 			border_touch_threshold=args.border_touch_threshold,
 			merge_thresh=args.merge_thresh,
