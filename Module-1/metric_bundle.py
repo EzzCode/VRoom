@@ -274,14 +274,8 @@ def load_metric_bundle(bundle_root: str | Path) -> MetricBundle:
         image_path = _resolve_frame_asset(image_root, frame_id)
         if image_path is None:
             raise FileNotFoundError(f"No image asset found for frame_id={frame_id} under {image_root}.")
-        adjusted_intrinsics, dimensions_warning = _validate_and_maybe_rescale_intrinsics(
-            image_path,
-            intrinsics_records[frame_id],
-        )
-        intrinsics_records[frame_id] = adjusted_intrinsics
-        if dimensions_warning is not None:
-            warnings.append(dimensions_warning)
-        _validate_timestamp_match(frame_id, adjusted_intrinsics.timestamp_ns, poses_records[frame_id].timestamp_ns, "intrinsics/poses")
+        _validate_frame_dimensions(image_path, intrinsics_records[frame_id])
+        _validate_timestamp_match(frame_id, intrinsics_records[frame_id].timestamp_ns, poses_records[frame_id].timestamp_ns, "intrinsics/poses")
         _validate_timestamp_match(frame_id, tracking_records[frame_id].timestamp_ns, poses_records[frame_id].timestamp_ns, "tracking/poses")
         if sam_manifest is not None:
             _validate_mask_alignment(root, frame_id, sam_root)
@@ -350,10 +344,10 @@ def _resolve_frame_asset(image_root: Path, frame_id: str) -> Path | None:
     return None
 
 
-def _validate_and_maybe_rescale_intrinsics(
+def _validate_frame_dimensions(
     image_path: Path,
     intrinsics: FrameIntrinsicRecord,
-) -> tuple[FrameIntrinsicRecord, str | None]:
+) -> None:
     try:
         from PIL import Image
     except ImportError as exc:
@@ -362,35 +356,7 @@ def _validate_and_maybe_rescale_intrinsics(
         image_width, image_height = image.size
 
     if image_width == intrinsics.width and image_height == intrinsics.height:
-        return intrinsics, None
-
-    if intrinsics.width <= 0 or intrinsics.height <= 0:
-        raise ValueError(
-            f"Invalid intrinsics dimensions for frame_id={intrinsics.frame_id}: "
-            f"{intrinsics.width}x{intrinsics.height}"
-        )
-
-    scale_x = image_width / float(intrinsics.width)
-    scale_y = image_height / float(intrinsics.height)
-    if abs(scale_x - scale_y) <= 1e-6 and scale_x > 0.0:
-        scaled_intrinsics = FrameIntrinsicRecord(
-            frame_id=intrinsics.frame_id,
-            timestamp_ns=intrinsics.timestamp_ns,
-            fx=intrinsics.fx * scale_x,
-            fy=intrinsics.fy * scale_y,
-            cx=intrinsics.cx * scale_x,
-            cy=intrinsics.cy * scale_y,
-            width=image_width,
-            height=image_height,
-            distortion=list(intrinsics.distortion),
-        )
-        warning = (
-            f"Rescaled intrinsics for frame_id={intrinsics.frame_id}: "
-            f"image={image_width}x{image_height}, "
-            f"intrinsics={intrinsics.width}x{intrinsics.height}, "
-            f"scale={scale_x:.6f}"
-        )
-        return scaled_intrinsics, warning
+        return
 
     raise ValueError(
         f"Image size mismatch for frame_id={intrinsics.frame_id}: image={image_width}x{image_height}, "

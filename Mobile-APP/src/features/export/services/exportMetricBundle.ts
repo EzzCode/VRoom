@@ -69,7 +69,6 @@ async function copyImageToSaf(
 
 export interface ExportMetricBundleOptions {
   sceneId: string;
-  cameraDiagonalFovDeg: number;
   appVersion: string;
   deviceModel: string;
 }
@@ -95,12 +94,31 @@ export async function exportMetricBundle(
   await ensureDir(bundleRoot);
   await ensureDir(framesRoot);
 
+  const firstFrame = metadata.keyframes[0]!;
+  const expectedWidth = firstFrame.width;
+  const expectedHeight = firstFrame.height;
+  for (const frame of metadata.keyframes) {
+    if (frame.width !== expectedWidth || frame.height !== expectedHeight) {
+      throw new Error(
+        `Inconsistent frame dimensions detected. Expected ${expectedWidth}x${expectedHeight} but got ${frame.width}x${frame.height} for ${frame.frameId}.`,
+      );
+    }
+  }
+
   const intrinsics = metadata.keyframes.map((frame) => {
-    const estimated = estimateIntrinsicsFromVerticalFov(
-      frame.width,
-      frame.height,
-      options.cameraDiagonalFovDeg,
-    );
+    const estimated =
+      frame.intrinsics ??
+      {
+        ...estimateIntrinsicsFromVerticalFov(
+          frame.width,
+          frame.height,
+          60,
+        ),
+        width: frame.width,
+        height: frame.height,
+        distortion: [],
+        source: 'fov_fallback',
+      };
     return {
       frame_id: frame.frameId,
       timestamp_ns: frame.pose.timestampNs,
@@ -110,7 +128,8 @@ export async function exportMetricBundle(
       cy: estimated.cy,
       width: frame.width,
       height: frame.height,
-      distortion: [],
+      distortion: estimated.distortion,
+      intrinsics_source: estimated.source,
     };
   });
 
@@ -136,7 +155,6 @@ export async function exportMetricBundle(
     });
   }
 
-  const firstFrame = metadata.keyframes[0]!;
   const manifest = {
     scene_id: options.sceneId,
     capture_id: metadata.captureId,
@@ -152,6 +170,9 @@ export async function exportMetricBundle(
     units: 'meters',
     capture_mode: 'arcore_rgb',
     capture_status: metadata.captureStatus,
+    intrinsics_source: intrinsics.every((frame) => frame.intrinsics_source !== 'fov_fallback')
+      ? 'android_camera2_intrinsic_calibration'
+      : 'fov_fallback',
     frames: metadata.keyframes.map((frame) => ({
       frame_id: frame.frameId,
       path: toRelativeFramesPath(bundleRoot, `${framesRoot}${frame.frameId}.jpg`),

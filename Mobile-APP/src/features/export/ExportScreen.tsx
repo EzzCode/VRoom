@@ -24,7 +24,6 @@ export default function ExportScreen({ navigation }: Props) {
       setIsExporting(true);
       const result = await exportMetricBundle(metadata, {
         sceneId: sceneId.trim() || 'room_scan',
-        cameraDiagonalFovDeg: device?.formats[0]?.fieldOfView ?? 60,
         appVersion: '1.0.0',
         deviceModel: device?.name ?? Platform.OS,
       });

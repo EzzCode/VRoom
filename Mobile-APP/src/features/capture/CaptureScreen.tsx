@@ -11,6 +11,7 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../navigation/types';
 import ARCaptureScene from './ARCaptureScene';
 import { CameraPose, TrackingState } from '../../shared/core/types';
+import { getBackCameraCalibration } from '../../services/camera/cameraIntrinsics';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Capture'>;
 
@@ -97,6 +98,7 @@ export default function CaptureScreen({ navigation }: Props) {
       }
       const savedPath = await saveCapturedAsset(screenshot.url, `${frameId}.jpg`);
       const size = await getImageSize(savedPath);
+      const intrinsics = await getBackCameraCalibration(size);
       const qualityScore = 1;
 
       addKeyframe({
@@ -105,6 +107,7 @@ export default function CaptureScreen({ navigation }: Props) {
         pose: currentPose,
         width: size.width,
         height: size.height,
+        intrinsics: intrinsics ?? undefined,
         qualityScore,
         index: keyframes.length,
       });

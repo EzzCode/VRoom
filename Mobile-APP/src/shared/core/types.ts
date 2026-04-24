@@ -15,6 +15,17 @@ export type Matrix4 = [
 
 export type TrackingState = 'unavailable' | 'limited' | 'normal';
 
+export interface CameraIntrinsics {
+  fx: number;
+  fy: number;
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+  distortion: number[];
+  source: string;
+}
+
 /** Camera pose captured from ARKit/ARCore via ViroReact */
 export interface CameraPose {
   /** Camera position in world space */
@@ -45,6 +56,8 @@ export interface Keyframe {
   width: number;
   /** Captured image height in pixels */
   height: number;
+  /** Intrinsics matched to the saved image */
+  intrinsics?: CameraIntrinsics;
   /** Laplacian variance (sharpness score) */
   qualityScore: number;
   /** Frame index within the current session */
