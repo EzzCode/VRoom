@@ -49,6 +49,39 @@ VRoom/
 
 Assuming your raw images are in `data/room_scene/images`, run the following steps in order from the `VRoom` system root or `Module-1` directory (paths in examples assume running from the root containing `Module-1`).
 
+### One-Command Runner (Recommended)
+
+Run the full Module-1 pipeline end-to-end:
+
+```bash
+python Module-1/module1_runner.py --data_path data/room_scene
+```
+
+Useful options:
+
+```bash
+# Balanced robust defaults (recommended)
+python Module-1/module1_runner.py --data_path data/room_scene --profile balanced
+
+# Conservative profile: avoid accidental object merges
+python Module-1/module1_runner.py --data_path data/room_scene --profile conservative
+
+# Recall profile: keep more candidate masks (for missing objects)
+python Module-1/module1_runner.py --data_path data/room_scene --profile recall
+
+# Rebuild COLMAP output
+python Module-1/module1_runner.py --data_path data/room_scene --force_colmap
+
+# Skip expensive earlier stages and only run voting
+python Module-1/module1_runner.py --data_path data/room_scene --skip_colmap --skip_masks --skip_tracking
+
+# Use CPU for SAM (slower, but works without CUDA)
+python Module-1/module1_runner.py --data_path data/room_scene --device cpu
+
+# Tighten voting confidence
+python Module-1/module1_runner.py --data_path data/room_scene --min_confidence 0.45 --min_support 4
+```
+
 ### Step 1: 3D Reconstruction (COLMAP)
 Extract camera poses and build a sparse point cloud.
 
@@ -65,7 +98,7 @@ python Module-1/mask_processor.py \
     --input_dir data/room_scene/images \
     --output_dir data/room_scene/sam_output
 ```
-**Output**: Creates `masks/` (.npy files) and `visible_masks/` (debug PNG overlays).
+**Output**: Creates `masks/` (`.npz` archives keyed by the image stem) and `visible_masks/` (debug PNG overlays).
 
 ### Step 3: Object Tracking
 Link the SAM masks across frames to assign consistent IDs.
@@ -76,8 +109,8 @@ python Module-1/object_tracker.py \
     --mask_dir data/room_scene/sam_output/masks \
     --output_dir data/room_scene/tracked
 ```
-*Note: This generates 8-bit PNG ID maps, where pixel values correspond to object IDs. A value of 0 is background.*
-**Output**: Creates `id_maps/` (8-bit PNGs) and `tracked_vis/` (debug tracking overlays).
+*Note: This generates 16-bit PNG ID maps, where pixel values correspond to object IDs. A value of 0 is background.*
+**Output**: Creates `id_maps/` (16-bit PNGs whose filenames exactly match the source image stem) and `tracked_vis/` (debug tracking overlays).
 
 ### Step 4: 3D Point Cloud Voting
 Project the 3D points onto the tracked 2D ID maps to label the scene in 3D space.
@@ -91,3 +124,11 @@ python Module-1/vote.py \
     --algorithm majority
 ```
 **Output**: Creates labeled PLY point clouds in `data/room_scene/labeled_output/`, including separate clouds per tracked object.
+
+### Naming Contract
+
+Module-1 now expects a strict one-to-one filename contract:
+- image `train_rgb_0000.png` -> tracker ID map `train_rgb_0000.png`
+- COLMAP image stem -> voter mask filename with the same stem plus `.png`
+
+The pipeline fails fast if a mask is missing instead of guessing an alternate frame name.

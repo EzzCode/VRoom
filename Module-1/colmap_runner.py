@@ -1,30 +1,34 @@
 """
-COLMAP Automation Pipeline for VRoom / ObjectGS
+COLMAP automation pipeline for VRoom / ObjectGS.
 
-Automates the Structure-from-Motion (SfM) pipeline to extract camera poses 
-and sparse point clouds from a directory of images.
-
-Usage:
-    python colmap_runner.py --data_path data/room_scene --camera_model OPENCV
+Supports both:
+- standard scale-ambiguous SfM with COLMAP mapper
+- metric known-pose triangulation from ARCore mobile scene bundles
 """
 
-import os
-import sys
-import subprocess
+from __future__ import annotations
+
 import argparse
+import json
 import logging
+import os
+import struct
+import subprocess
+import sys
 from pathlib import Path
 
-# Configure professional logging
+from metric_bundle import export_known_pose_colmap_workspace, load_metric_bundle
+
+
 logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
+
 def check_colmap_installed():
-    """Verify COLMAP is accessible in the system path."""
     try:
         subprocess.run(["colmap", "help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -32,105 +36,227 @@ def check_colmap_installed():
         logger.error("Please install COLMAP: https://colmap.github.io/install.html")
         sys.exit(1)
 
+
 def run_step(cmd, step_name):
-    """
-    Run a subprocess command by delegating to the terminal (no capture),
-    so the terminal can show native formatting, colors, and progress bars.
-    """
     logger.info(f"--- Starting {step_name} ---")
-    
-    # Print the command for reproducibility
-    cmd_str = ' '.join(str(x) for x in cmd)
-    logger.debug(f"[CMD] {cmd_str}")
+    logger.debug("CMD: %s", " ".join(str(x) for x in cmd))
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        logger.error("Fatal error during %s. Exit code: %s", step_name, result.returncode)
+        sys.exit(result.returncode)
+    logger.info("--- Finished %s ---\n", step_name)
 
-    try:
-        # By omitting stdout and stderr, the child process inherits the parent's 
-        # terminal handles natively. This preserves COLMAP's \r line-replacement!
-        result = subprocess.run(cmd, check=False)
-        
-        if result.returncode != 0:
-            logger.error(f"Fatal error during {step_name}. Exit code: {result.returncode}")
-            sys.exit(1)
-            
-        logger.info(f"--- Finished {step_name} ---\n")
-        
-    except Exception as e:
-        logger.error(f"Command execution failed: {e}")
-        sys.exit(1)
 
-def run_colmap_pipeline(args):
-    """Orchestrates the COLMAP feature extraction and mapping process."""
-    data_path = Path(args.data_path)
+def _count_points3d(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.suffix == ".bin":
+        with open(path, "rb") as handle:
+            payload = handle.read(8)
+            if len(payload) != 8:
+                return 0
+            return int(struct.unpack("<Q", payload)[0])
+    count = 0
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                count += 1
+    return count
+
+
+def _read_json(path: Path) -> dict:
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
+def _feature_extract(database_path: Path, image_dir: Path, args, camera_model: str | None = None) -> None:
+    extract_cmd = [
+        "colmap",
+        "feature_extractor",
+        "--database_path",
+        str(database_path),
+        "--image_path",
+        str(image_dir),
+        "--ImageReader.camera_model",
+        camera_model or args.camera_model,
+        "--ImageReader.single_camera",
+        "1" if args.single_camera else "0",
+    ]
+    run_step(extract_cmd, "Feature Extraction")
+
+
+def _feature_match(database_path: Path, args) -> None:
+    match_cmd = [
+        "colmap",
+        f"{args.matcher_type}_matcher",
+        "--database_path",
+        str(database_path),
+    ]
+    run_step(match_cmd, "Feature Matching")
+
+
+def _update_summary(data_path: Path, update: dict) -> None:
+    summary_path = data_path / "reconstruction_summary.json"
+    summary = _read_json(summary_path) if summary_path.exists() else {}
+    summary.update(update)
+    _write_json(summary_path, summary)
+
+
+def run_standard_colmap_pipeline(args):
+    data_path = Path(args.data_path).resolve()
     image_dir = data_path / "images"
     database_path = data_path / "database.db"
     sparse_dir = data_path / "sparse" / "0"
 
-    # 1. Validation
     if not image_dir.exists() or not any(image_dir.iterdir()):
-        logger.error(f"Image directory not found or empty: {image_dir}")
+        logger.error("Image directory not found or empty: %s", image_dir)
         sys.exit(1)
 
     sparse_dir.mkdir(parents=True, exist_ok=True)
     check_colmap_installed()
 
-    # 2. Feature Extraction
     if database_path.exists() and not args.force:
-        logger.info(f"Database {database_path} already exists. Skipping extraction (use --force to overwrite).")
+        logger.info("Database %s already exists. Skipping extraction (use --force to overwrite).", database_path)
     else:
         if args.force and database_path.exists():
-            database_path.unlink() # Delete old database
-            
-        extract_cmd = [
-            "colmap", "feature_extractor",
-            "--database_path", str(database_path),
-            "--image_path", str(image_dir),
-            "--ImageReader.camera_model", args.camera_model,
-            "--ImageReader.single_camera", "1" if args.single_camera else "0"
-        ]
-        run_step(extract_cmd, "Feature Extraction")
+            database_path.unlink()
+        _feature_extract(database_path, image_dir, args)
 
-    # 3. Feature Matching
-    # Exhaustive is better for unordered photos; Sequential is faster for video frames
-    match_cmd = [
-        "colmap", args.matcher_type + "_matcher",
-        "--database_path", str(database_path)
-    ]
-    run_step(match_cmd, "Feature Matching")
+    _feature_match(database_path, args)
 
-    # 4. Mapper (Sparse Reconstruction)
-    # Check if we already have a successful reconstruction
     if (sparse_dir / "cameras.bin").exists() and not args.force:
-        logger.info(f"Sparse model already exists in {sparse_dir}. Skipping mapping.")
+        logger.info("Sparse model already exists in %s. Skipping mapping.", sparse_dir)
     else:
         map_cmd = [
-            "colmap", "mapper",
-            "--database_path", str(database_path),
-            "--image_path", str(image_dir),
-            "--output_path", str(sparse_dir.parent) # COLMAP creates the '0' subfolder automatically
+            "colmap",
+            "mapper",
+            "--database_path",
+            str(database_path),
+            "--image_path",
+            str(image_dir),
+            "--output_path",
+            str(sparse_dir.parent),
         ]
         run_step(map_cmd, "Sparse Mapping")
 
-    # 5. Summary & Hand-off
-    cameras_file = sparse_dir / "cameras.bin"
-    if cameras_file.exists():
-        logger.info("COLMAP Pipeline completed successfully! 🎉")
-        logger.info(f"Data is ready for the Voting Script at: {sparse_dir}")
+    point_path = sparse_dir / "points3D.bin"
+    if not point_path.exists():
+        point_path = sparse_dir / "points3D.txt"
+
+    _write_json(
+        data_path / "reconstruction_summary.json",
+        {
+            "reconstruction_mode": "standard_sfm",
+            "input_frame_count": len(list(image_dir.iterdir())),
+            "valid_frame_count": len(list(image_dir.iterdir())),
+            "rejected_frame_count": 0,
+            "rejected_frame_ids": [],
+            "camera_path_length_m": None,
+            "angular_coverage_deg": None,
+            "contiguous_tracking_runs": None,
+            "tracking_quality_summary": "unknown",
+            "triangulated_point_count": _count_points3d(point_path),
+            "colmap_workspace": str(data_path),
+            "frames_root": str(image_dir),
+        },
+    )
+
+    if (sparse_dir / "cameras.bin").exists() or (sparse_dir / "cameras.txt").exists():
+        logger.info("COLMAP Pipeline completed successfully.")
+        logger.info("Data is ready for the voting script at: %s", sparse_dir)
     else:
-        logger.error("COLMAP Pipeline finished, but no cameras.bin was generated. COLMAP failed to reconstruct the scene.")
-        logger.error("Try using more images, ensuring better overlap, or checking for blurry frames.")
+        logger.error("COLMAP Pipeline finished, but no sparse model was generated.")
+        sys.exit(1)
+
+
+def run_known_pose_pipeline(args):
+    data_path = Path(args.data_path).resolve()
+    database_path = data_path / "database.db"
+    sparse_dir = data_path / "sparse" / "0"
+
+    check_colmap_installed()
+    bundle = load_metric_bundle(data_path)
+    export_known_pose_colmap_workspace(bundle, data_path)
+
+    if args.force and database_path.exists():
+        database_path.unlink()
+
+    if not database_path.exists():
+        _feature_extract(database_path, data_path / "images", args, camera_model="PINHOLE")
+    else:
+        logger.info("Database %s already exists. Reusing extracted features.", database_path)
+
+    _feature_match(database_path, args)
+
+    triangulate_cmd = [
+        "colmap",
+        "point_triangulator",
+        "--database_path",
+        str(database_path),
+        "--image_path",
+        str(data_path / "images"),
+        "--input_path",
+        str(sparse_dir),
+        "--output_path",
+        str(sparse_dir),
+    ]
+    run_step(triangulate_cmd, "Known-Pose Triangulation")
+
+    point_path = sparse_dir / "points3D.bin"
+    if not point_path.exists():
+        point_path = sparse_dir / "points3D.txt"
+    _update_summary(
+        data_path,
+        {
+            "triangulated_point_count": _count_points3d(point_path),
+            "valid_frame_ids": bundle.valid_frame_ids,
+            "rejected_frame_ids": bundle.rejected_frame_ids,
+        },
+    )
+    logger.info("Known-pose COLMAP pipeline completed successfully.")
+    logger.info("Data is ready for the voting script at: %s", sparse_dir)
+
+
+def run_colmap_pipeline(args):
+    if args.reconstruction_mode == "known_pose_triangulation":
+        run_known_pose_pipeline(args)
+    else:
+        run_standard_colmap_pipeline(args)
+
 
 if __name__ == "__main__":
-    check_colmap_installed() # Early check before parsing arguments
-    parser = argparse.ArgumentParser(description="Automated COLMAP Pipeline for VRoom")
-    parser.add_argument("--data_path", required=True, help="Root folder containing the 'images' directory")
-    parser.add_argument("--camera_model", default="OPENCV", choices=["PINHOLE", "OPENCV", "SIMPLE_RADIAL", "RADIAL"], 
-                        help="Camera lens model (Gaussian Splatting highly prefers OPENCV or PINHOLE)")
-    parser.add_argument("--matcher_type", default="sequential", choices=["exhaustive", "sequential", "spatial"],
-                        help="Use 'sequential' if images were extracted directly from a video")
-    parser.add_argument("--single_camera", action="store_true", default=True,
-                        help="Assume all images were taken with the exact same camera lens (Recommended)")
-    parser.add_argument("--force", action="store_true", 
-                        help="Force overwrite of existing database and models")
-    
+    parser = argparse.ArgumentParser(description="Automated COLMAP pipeline for VRoom")
+    parser.add_argument("--data_path", required=True, help="Root folder containing images/ or a metric bundle manifest")
+    parser.add_argument(
+        "--camera_model",
+        default="OPENCV",
+        choices=["PINHOLE", "OPENCV", "SIMPLE_RADIAL", "RADIAL"],
+        help="Camera lens model used by COLMAP feature extraction",
+    )
+    parser.add_argument(
+        "--matcher_type",
+        default="sequential",
+        choices=["exhaustive", "sequential", "spatial"],
+        help="Use 'sequential' if images were extracted directly from a video",
+    )
+    parser.add_argument(
+        "--single_camera",
+        action="store_true",
+        default=True,
+        help="Assume all images were taken with the exact same camera lens",
+    )
+    parser.add_argument("--force", action="store_true", help="Force overwrite of existing database and model artifacts")
+    parser.add_argument(
+        "--reconstruction_mode",
+        default="standard_sfm",
+        choices=["standard_sfm", "known_pose_triangulation"],
+        help="Use known_pose_triangulation for ARCore metric bundles",
+    )
     args = parser.parse_args()
     run_colmap_pipeline(args)

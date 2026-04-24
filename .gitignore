@@ -1,11 +1,70 @@
+# CUDA compilation artifacts
 *.i
 *.ii
 *.gpu
 *.ptx
 *.cubin
 *.fatbin
+
+# Images and media
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.webp
+*.exr
+*.hdr
+*.pfm
+*.ppm
+*.pgm
+
+# ML checkpoints and weights
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.bin
+*.safetensors
+mlp.pt
+
+# Gaussian splatting outputs
+*.ply
+*.splat
+point_cloud/
+output/
+outputs/
+*/output/
+*/outputs/
+*output*
+bed_vroom_output/
+office3dgsvroom/
+vroom_output/
+
+# Datasets and large data
 \data
 \models
+datasets/
+*.db
+*.sqlite
+*.sqlite3
+
+# Cloud / storage metadata
+.identifier
+*.identifier
+*.Identifier
+
+# Logs
+logs/
+*.log
+runs/
+wandb/
+events.out.tfevents.*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
 
 # Python
 __pycache__/
@@ -28,30 +87,33 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# Virtual environments and env files
 .env
 .venv
+.venv/
 venv/
 env/
 ENV/
-.env
+.env*.local
 
-# ─── Jupyter ──────────────────────────────────────────────────────────────────
+# Jupyter
 .ipynb_checkpoints/
 *.ipynb
 
-# ─── IDEs & Editors ───────────────────────────────────────────────────────────
+# IDEs and editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# ─── OS ───────────────────────────────────────────────────────────────────────
+# OS files
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ─── Archives & Temp ──────────────────────────────────────────────────────────
+# Archives and temp
 *.zip
 *.tar.gz
 *.tar
@@ -59,7 +121,26 @@ desktop.ini
 *.7z
 tmp/
 temp/
+temp_deps/
 
-
-android/
+# React Native / Expo
 node_modules/
+.expo/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+
+# Native mobile artifacts
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+ios/
+android/
+
+# Misc
+*.pem
+Scaffold-GS-Viewer/

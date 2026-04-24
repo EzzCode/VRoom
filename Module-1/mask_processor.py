@@ -1,247 +1,425 @@
-"""
-VRoom Mask Post-Processing Pipeline
+"""Module-1 mask generation with SAM3 text prompting and deterministic cleanup.
 
-Consolidates all mask post-processing: background filtering, containment-based
-merging, disconnected-island splitting, and debug visualization. Reads raw SAM
-output from sam_inference.py and produces clean per-frame masks ready for tracking.
+This module is responsible for producing per-frame binary instance masks that
+are consumed by the vanilla tracker. It intentionally keeps a stable output
+contract and uses rule-based postprocessing to improve temporal robustness.
 
-Usage:
-    python mask_processor.py --input_dir data/images --output_dir data/sam_output
+Output contract:
+- `masks/masks_%05d.npz`: compressed bool tensor with shape `(N, H, W)`.
+- `visible_masks/vis_%05d.png`: visualization overlay for inspection.
 
-Outputs:
-    <output_dir>/masks/        — .npy files (list of bool arrays per frame)
-    <output_dir>/debug_vis/    — overlay PNGs showing each mask in a unique color
+Processing pipeline:
+1. SAM3 semantic segmentation from text prompts.
+2. Background and border-touch filtering.
+3. Overlap-based merge for containment cases.
+4. Proximity and color-consistency merge.
+5. Optional connected-component split.
 """
 
 import sys
+import os
 import argparse
 import logging
 from pathlib import Path
-import numpy as np
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
 import cv2
+import numpy as np
 
-from sam_inference import load_sam, generate_masks
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
 
-# ── Background Filtering ─────────────────────────────────────────────────────
-
-def filter_background_masks(sam_masks, img_h, img_w, max_area_ratio=0.40, border_touch_threshold=0.25):
-    """Filter SAM mask dicts, returning only foreground binary masks based on area and border touch."""
-    foreground_masks = []
-    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-
-    for mask_data in sam_masks:
-        mask = mask_data['segmentation']
-        
-        # 1. Area check
-        mask_area = np.count_nonzero(mask)
-        if (mask_area / (img_h * img_w)) > max_area_ratio:
-            continue
-
-        # 2. Border touch check
-        mask_uint8 = mask.astype(np.uint8)
-        # outline of the object
-        perimeter_mask = cv2.morphologyEx(mask_uint8, cv2.MORPH_GRADIENT, kernel)
-        total_perimeter = np.count_nonzero(perimeter_mask)
-        
-        if total_perimeter == 0:
-            continue
-
-        border_pixels = (
-            np.count_nonzero(perimeter_mask[0, :]) +
-            np.count_nonzero(perimeter_mask[img_h - 1, :]) +
-            np.count_nonzero(perimeter_mask[:, 0]) +
-            np.count_nonzero(perimeter_mask[:, img_w - 1])
-        )
-        
-        if (border_pixels / total_perimeter) > border_touch_threshold:
-            continue
-
-        foreground_masks.append(mask)
-
-    return foreground_masks
+def _resolve_ultralytics_home(requested_home: Optional[str]) -> Path:
+	"""Resolve and create the Ultralytics cache/checkpoint directory."""
+	if requested_home:
+		home = Path(requested_home).expanduser().resolve()
+	else:
+		env_root = Path(sys.executable).resolve().parent.parent
+		home = (env_root / ".ultralytics").resolve()
+	home.mkdir(parents=True, exist_ok=True)
+	os.environ["ULTRALYTICS_HOME"] = str(home)
+	return home
 
 
-# ── Mask Merging ──────────────────────────────────────────────────────────────
-
-def merge_overlapping_masks(masks, containment_thresh=0.7):
-    """Merge masks where a smaller mask is mostly contained within a larger one.
-
-    If mask A's overlap with mask B is > containment_thresh of A's area,
-    A is absorbed into B (union). This merges sub-parts of objects into
-    whole-object masks.
-    """
-    if len(masks) <= 1:
-        return masks
-
-    # Sort largest first so small parts get absorbed into bigger masks
-    areas = [m.sum() for m in masks]
-    order = np.argsort(areas)[::-1]
-    masks = [masks[i] for i in order]
-    areas = [areas[i] for i in order]
-
-    merged = [True] * len(masks)
-
-    for i in range(len(masks)):
-        if not merged[i]:
-            continue
-        for j in range(i + 1, len(masks)):
-            if not merged[j]:
-                continue
-            overlap = np.logical_and(masks[i], masks[j]).sum()
-            if areas[j] > 0 and (overlap / areas[j]) > containment_thresh:
-                masks[i] = np.logical_or(masks[i], masks[j])
-                areas[i] = masks[i].sum()
-                merged[j] = False
-
-    return [m for m, alive in zip(masks, merged) if alive]
+def _mask_to_box(mask: np.ndarray) -> Optional[List[int]]:
+	"""Return [x1, y1, x2, y2] for a boolean mask, or None if empty."""
+	ys, xs = np.where(mask)
+	if xs.size == 0:
+		return None
+	return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
 
 
-# ── Disconnected Island Splitting ─────────────────────────────────────────────
-
-def split_disconnected_masks(masks, min_area=100):
-    """Split masks containing multiple disconnected islands into separate masks."""
-    refined = []
-    for mask in masks:
-        mask_uint8 = (mask * 255).astype(np.uint8)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-            mask_uint8, connectivity=8
-        )
-        if num_labels == 2:
-            refined.append(mask)
-        elif num_labels > 2:
-            for i in range(1, num_labels):
-                if stats[i, cv2.CC_STAT_AREA] >= min_area:
-                    refined.append(labels == i)
-    return refined
+def _bbox_gap_px(a: Sequence[int], b: Sequence[int]) -> float:
+	"""Compute edge-to-edge Euclidean gap between two XYXY boxes."""
+	ax1, ay1, ax2, ay2 = a
+	bx1, by1, bx2, by2 = b
+	dx = max(0, max(ax1 - bx2, bx1 - ax2))
+	dy = max(0, max(ay1 - by2, by1 - ay2))
+	return float(np.hypot(dx, dy))
 
 
-# ── Visualization ─────────────────────────────────────────────────────────────
-
-def generate_colors(n):
-    """Generate N visually distinct colors using HSV spacing."""
-    colors = []
-    for i in range(n):
-        hue = int(180 * i / max(n, 1))
-        color = cv2.cvtColor(
-            np.array([[[hue, 200, 255]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
-        )[0][0]
-        colors.append(tuple(int(c) for c in color))
-    return colors
+def _mean_hsv(frame_hsv: np.ndarray, mask: np.ndarray) -> np.ndarray:
+	"""Compute masked mean HSV color; returns zeros for empty masks."""
+	px = frame_hsv[mask]
+	if px.size == 0:
+		return np.array([0.0, 0.0, 0.0], dtype=np.float32)
+	return px.mean(axis=0).astype(np.float32)
 
 
-def draw_mask_overlay(image, masks, alpha=0.5):
-    """Draw colored semi-transparent masks on top of the original image."""
-    overlay = image.copy()
-    colors = generate_colors(len(masks))
-    for mask, color in zip(masks, colors):
-        overlay[mask] = color
-    return cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
+def filter_background_masks(
+	masks: List[np.ndarray],
+	max_area_ratio: float = 0.50,
+	border_touch_threshold: float = 0.35,
+) -> List[np.ndarray]:
+	"""Drop likely background masks using area and border-touch heuristics."""
+	if not masks:
+		return []
+
+	stack = np.stack(masks, axis=0).astype(bool, copy=False)
+	n, h, w = stack.shape
+
+	img_area = float(h * w)
+	areas = stack.reshape(n, -1).sum(axis=1).astype(np.float32)
+	area_ok = (areas / max(1.0, img_area)) <= float(max_area_ratio)
+
+	border_len = float((w * 2) + (h * 2) - 4)
+	top_hits = stack[:, 0, :].sum(axis=1)
+	bottom_hits = stack[:, h - 1, :].sum(axis=1)
+	if h > 2:
+		left_hits = stack[:, 1:h - 1, 0].sum(axis=1)
+		right_hits = stack[:, 1:h - 1, w - 1].sum(axis=1)
+	else:
+		left_hits = np.zeros(n, dtype=np.int64)
+		right_hits = np.zeros(n, dtype=np.int64)
+	border_ratio = (top_hits + bottom_hits + left_hits + right_hits) / max(1.0, border_len)
+	border_ok = border_ratio <= float(border_touch_threshold)
+
+	keep = area_ok & border_ok
+	idx = np.flatnonzero(keep)
+	return [stack[i] for i in idx]
 
 
-# ── Pipeline ──────────────────────────────────────────────────────────────────
+def merge_overlapping_masks(masks: List[np.ndarray], thresh: float = 0.78) -> List[np.ndarray]:
+	"""Merge masks when one is strongly contained in another."""
+	if not masks:
+		return []
+
+	merged = [m.copy() for m in masks]
+	changed = True
+	while changed:
+		changed = False
+		out: List[np.ndarray] = []
+		used = [False] * len(merged)
+
+		for i in range(len(merged)):
+			if used[i]:
+				continue
+			base = merged[i].copy()
+			used[i] = True
+			area_base = float(base.sum())
+
+			for j in range(i + 1, len(merged)):
+				if used[j]:
+					continue
+				other = merged[j]
+				inter = np.logical_and(base, other).sum()
+				min_area = max(1.0, min(area_base, float(other.sum())))
+				containment = float(inter) / min_area
+				if containment >= thresh:
+					base = np.logical_or(base, other)
+					used[j] = True
+					changed = True
+					area_base = float(base.sum())
+
+			out.append(base)
+
+		merged = out
+
+	return merged
+
+
+def merge_by_proximity(
+	masks: List[np.ndarray],
+	frame_bgr: np.ndarray,
+	gap_px: int = 20,
+	color_thresh: float = 0.32,
+) -> List[np.ndarray]:
+	"""Merge nearby masks if mean HSV distance is below threshold."""
+	if len(masks) <= 1:
+		return masks
+
+	frame_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+	boxes = [_mask_to_box(m) for m in masks]
+	means = [_mean_hsv(frame_hsv, m) for m in masks]
+
+	hsv_norm = float(np.linalg.norm(np.array([180.0, 255.0, 255.0], dtype=np.float32)))
+	merged = [m.copy() for m in masks]
+	changed = True
+	while changed:
+		changed = False
+		out: List[np.ndarray] = []
+		used = [False] * len(merged)
+
+		for i in range(len(merged)):
+			if used[i]:
+				continue
+			base = merged[i].copy()
+			used[i] = True
+
+			for j in range(i + 1, len(merged)):
+				if used[j]:
+					continue
+				if boxes[i] is None or boxes[j] is None:
+					continue
+				gap = _bbox_gap_px(boxes[i], boxes[j])
+				if gap > float(gap_px):
+					continue
+				color_dist = np.linalg.norm(means[i] - means[j]) / hsv_norm
+				if color_dist > float(color_thresh):
+					continue
+
+				base = np.logical_or(base, merged[j])
+				used[j] = True
+				changed = True
+
+			out.append(base)
+
+		merged = out
+		boxes = [_mask_to_box(m) for m in merged]
+		means = [_mean_hsv(frame_hsv, m) for m in merged]
+
+	return merged
+
+
+def split_disconnected(masks: List[np.ndarray], min_component_area: int = 1) -> List[np.ndarray]:
+	"""Split each mask into connected components and keep sufficiently large ones."""
+	if not masks:
+		return []
+
+	out: List[np.ndarray] = []
+	for mask in masks:
+		num_labels, labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+		if num_labels <= 2:
+			out.append(mask)
+			continue
+		for label in range(1, num_labels):
+			comp = labels == label
+			if int(comp.sum()) >= int(min_component_area):
+				out.append(comp)
+
+	return out
+
+
+class SAM3TextSegmenter:
+	"""Thin SAM3 semantic segmenter wrapper for text-only inference."""
+	def __init__(
+		self,
+		checkpoint: str,
+		device: str,
+		text_prompts: Optional[List[str]] = None,
+		min_mask_area: int = 120,
+		ultralytics_home: Optional[str] = None,
+	):
+		self.ultralytics_home = _resolve_ultralytics_home(ultralytics_home)
+		self.checkpoint = checkpoint
+		self.device = device
+		self.text_prompts = text_prompts or ["furniture"]
+		self.min_mask_area = int(min_mask_area)
+		self.semantic_predictor = self._load_model()
+
+	def _load_model(self):
+		"""Create and configure a SAM3 semantic predictor."""
+		from ultralytics.models.sam import SAM3SemanticPredictor  # type: ignore
+
+		logger.info(f"Loading Ultralytics SAM3 model: {self.checkpoint}")
+		logger.info(f"Ultralytics home: {self.ultralytics_home}")
+
+		return SAM3SemanticPredictor(
+			overrides=dict(
+				conf=0.25,
+				task="segment",
+				mode="predict",
+				model=self.checkpoint,
+				half=True,
+				device=self.device,
+				verbose=False,
+			)
+		)
+
+	def _extract_masks_from_results(self, results: Any) -> List[np.ndarray]:
+		"""Convert Ultralytics results to boolean masks with min-area filtering."""
+		masks: List[np.ndarray] = []
+		if results is None:
+			return masks
+
+		items = results if isinstance(results, list) else [results]
+		for item in items:
+			if getattr(item, "masks", None) is None:
+				continue
+			data = item.masks.data
+			if data is None:
+				continue
+			arr = data.detach().cpu().numpy()
+			arr_bool = arr > 0.5
+			areas = arr_bool.reshape(arr_bool.shape[0], -1).sum(axis=1)
+			keep_idx = np.flatnonzero(areas >= self.min_mask_area)
+			for i in keep_idx:
+				masks.append(arr_bool[int(i)])
+
+		return masks
+
+	def segment_frame(
+		self,
+		frame_bgr: np.ndarray,
+		text_prompts: Optional[List[str]] = None,
+		max_area_ratio: float = 0.50,
+		border_touch_threshold: float = 0.35,
+		merge_thresh: float = 0.78,
+		proximity_gap: int = 20,
+		proximity_color_thresh: float = 0.32,
+		split_components: bool = True,
+	) -> Tuple[List[np.ndarray], Dict[str, int]]:
+		"""Segment and postprocess a single frame.
+
+		Args:
+			frame_bgr: Input frame in BGR format.
+			text_prompts: Optional prompt override for this frame.
+			max_area_ratio: Maximum allowed mask area ratio.
+			border_touch_threshold: Maximum allowed border-touch ratio.
+			merge_thresh: Containment threshold for overlap merging.
+			proximity_gap: Max pixel gap for proximity merge.
+			proximity_color_thresh: Max normalized HSV distance for merge.
+			split_components: Whether to split disconnected components.
+
+		Returns:
+			Tuple of `(final_masks, debug_stats)` where masks are boolean arrays.
+		"""
+		frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+		prompts = text_prompts or self.text_prompts
+
+		results = self.semantic_predictor(source=frame_rgb, text=prompts, verbose=False)
+		raw_masks = self._extract_masks_from_results(results)
+
+		masks = filter_background_masks(raw_masks, max_area_ratio=max_area_ratio, border_touch_threshold=border_touch_threshold)
+		masks = merge_overlapping_masks(masks, thresh=merge_thresh)
+		masks = merge_by_proximity(masks, frame_bgr=frame_bgr, gap_px=proximity_gap, color_thresh=proximity_color_thresh)
+		if split_components:
+			masks = split_disconnected(masks, min_component_area=self.min_mask_area)
+
+		masks = [m.astype(bool) for m in masks if int(m.sum()) >= self.min_mask_area]
+		return masks, {"raw_mask_count": len(raw_masks), "final_mask_count": len(masks)}
+
+
+def generate_colors(n: int) -> List[Tuple[int, int, int]]:
+	"""Generate stable visually distinct BGR colors."""
+	colors: List[Tuple[int, int, int]] = []
+	for i in range(n):
+		hue = int(180 * i / max(n, 1))
+		color = cv2.cvtColor(np.array([[[hue, 200, 255]]], dtype=np.uint8), cv2.COLOR_HSV2BGR)[0][0]
+		colors.append(tuple(int(c) for c in color))
+	return colors
+
+
+def draw_mask_overlay(image: np.ndarray, masks: List[np.ndarray], alpha: float = 0.5) -> np.ndarray:
+	"""Overlay colored masks on top of the input frame."""
+	overlay = image.copy()
+	colors = generate_colors(len(masks))
+	for mask, color in zip(masks, colors):
+		overlay[mask] = color
+	return cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
+
+
+def save_frame_masks(path: Path, masks: List[np.ndarray]):
+	"""Persist masks as compressed NPZ in dense boolean format."""
+	if masks:
+		stacked = np.stack([m.astype(np.bool_) for m in masks], axis=0)
+	else:
+		stacked = np.zeros((0, 0, 0), dtype=np.bool_)
+	np.savez_compressed(str(path), masks=stacked)
+
 
 def run_pipeline(args):
-    """Full pipeline: SAM → filter background → merge → split → save masks + debug visualization."""
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
-    mask_dir = output_dir / "masks"
-    vis_dir = output_dir / "visible_masks"
+	"""Run segmentation pipeline over all frames in input_dir."""
+	input_dir = Path(args.input_dir)
+	output_dir = Path(args.output_dir)
+	mask_dir = output_dir / "masks"
+	vis_dir = output_dir / "visible_masks"
 
-    if not input_dir.exists():
-        sys.exit(logger.error(f"Input directory missing: {input_dir}"))
+	if not input_dir.exists():
+		sys.exit(logger.error(f"Input directory missing: {input_dir}"))
 
-    mask_dir.mkdir(parents=True, exist_ok=True)
-    vis_dir.mkdir(parents=True, exist_ok=True)
+	mask_dir.mkdir(parents=True, exist_ok=True)
+	vis_dir.mkdir(parents=True, exist_ok=True)
 
-    # SAM2
-    mask_generator = load_sam(
-        args.model_cfg, args.sam_ckpt, args.device,
-        points_per_side=args.points_per_side,
-        pred_iou_thresh=args.pred_iou_thresh,
-        stability_score_thresh=args.stability_score_thresh,
-        min_mask_region_area=args.min_mask_area,
-    )
+	segmenter = SAM3TextSegmenter(
+		checkpoint=args.sam_ckpt,
+		device=args.device,
+		text_prompts=args.text_prompts,
+		min_mask_area=args.min_mask_area,
+		ultralytics_home=args.ultralytics_home,
+	)
 
+	image_paths = sorted([p for p in input_dir.iterdir() if p.suffix.lower() in [".png", ".jpg", ".jpeg"]])
+	if not image_paths:
+		sys.exit(logger.error(f"No images found in {input_dir}"))
 
-    image_paths = sorted([
-        p for p in input_dir.iterdir()
-        if p.suffix.lower() in ['.png', '.jpg', '.jpeg']
-    ])
-    if not image_paths:
-        sys.exit(logger.error(f"No images found in {input_dir}"))
+	logger.info(f"Processing {len(image_paths)} frames with SAM3 text prompting + postprocessing...")
 
-    logger.info(f"Processing {len(image_paths)} frames...")
+	for frame_idx, img_path in enumerate(image_paths):
+		frame = cv2.imread(str(img_path))
+		if frame is None:
+			logger.warning(f"Could not read image: {img_path}")
+			continue
 
-    for frame_idx, img_path in enumerate(image_paths):
-        frame = cv2.imread(str(img_path))
-        if frame is None:
-            logger.warning(f"Could not read image: {img_path}")
-            continue
+		final_masks, debug = segmenter.segment_frame(
+			frame_bgr=frame,
+			text_prompts=args.text_prompts,
+			max_area_ratio=args.max_area_ratio,
+			border_touch_threshold=args.border_touch_threshold,
+			merge_thresh=args.merge_thresh,
+			proximity_gap=args.proximity_gap,
+			proximity_color_thresh=args.proximity_color_thresh,
+			split_components=not args.no_split_disconnected,
+		)
 
-        frame_h, frame_w = frame.shape[:2]
+		save_frame_masks(mask_dir / f"masks_{frame_idx:05d}.npz", final_masks)
 
-        # SAM inference
-        raw_masks = generate_masks(mask_generator, frame)
+		vis = draw_mask_overlay(frame, final_masks)
+		cv2.putText(
+			vis,
+			f"Frame {frame_idx:05d} | Raw={debug['raw_mask_count']} Final={debug['final_mask_count']}",
+			(10, 30),
+			cv2.FONT_HERSHEY_SIMPLEX,
+			0.7,
+			(255, 255, 255),
+			2,
+		)
+		cv2.imwrite(str(vis_dir / f"vis_{frame_idx:05d}.png"), vis)
 
-        # Post-processing chain: filter → merge → split
-        fg_masks = filter_background_masks(
-            raw_masks, frame_h, frame_w, 
-            max_area_ratio=args.max_area, 
-            border_touch_threshold=args.border_touch
-        )
-        merged_masks = merge_overlapping_masks(fg_masks, containment_thresh=args.merge_thresh)
-        final_masks = split_disconnected_masks(merged_masks, min_area=100)
+		logger.info(
+			f"Frame {frame_idx:05d} ({img_path.name}) | "
+			f"Raw={debug['raw_mask_count']} Final={debug['final_mask_count']}"
+		)
 
-        logger.info(
-            f"Frame {frame_idx:05d} ({img_path.name}) | "
-            f"Raw: {len(raw_masks)}, FG: {len(fg_masks)}, "
-            f"Merged: {len(merged_masks)}, Final: {len(final_masks)}"
-        )
+	logger.info(f"Done. Masks: {mask_dir}, Visualizations: {vis_dir}")
 
-        # Save masks
-        np.save(
-            str(mask_dir / f"masks_{frame_idx:05d}.npy"),
-            np.array(final_masks, dtype=object), allow_pickle=True
-        )
-
-        # Save debug overlay
-        vis = draw_mask_overlay(frame, final_masks)
-        cv2.putText(
-            vis, f"Frame {frame_idx:05d} | {len(final_masks)} objects",
-            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2
-        )
-        cv2.imwrite(str(vis_dir / f"vis_{frame_idx:05d}.png"), vis)
-
-    logger.info(f"Done. Masks: {mask_dir}, Visualizations: {vis_dir}")
-
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="VRoom Mask Post-Processing Pipeline")
-    parser.add_argument("--input_dir", required=True, help="Path to input images directory")
-    parser.add_argument("--output_dir", required=True, help="Path to save masks and visualizations")
+	parser = argparse.ArgumentParser(description="VRoom SAM3 Text-Prompt Mask Processor")
+	parser.add_argument("--input_dir", required=True, help="Path to input images directory")
+	parser.add_argument("--output_dir", required=True, help="Path to save masks and visualizations")
+	parser.add_argument("--sam_ckpt", default="Module-1/models/sam3.pt", help="Ultralytics SAM3 checkpoint name or .pt path")
+	parser.add_argument("--device", default="cuda", help="Device ('cuda' or 'cpu')")
+	parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
+	parser.add_argument("--text_prompts", nargs="+", default=["desk", "table", "chair", "couch", "sofa", "cabinet"], help="Open-vocabulary text prompts")
+	parser.add_argument("--min_mask_area", type=int, default=120, help="Minimum kept mask area in pixels")
+	parser.add_argument("--max_area_ratio", type=float, default=0.50, help="Drop masks larger than this image area ratio")
+	parser.add_argument("--border_touch_threshold", type=float, default=0.35, help="Drop masks with high border-touch ratio")
+	parser.add_argument("--merge_thresh", type=float, default=0.78, help="Containment threshold for overlap merge")
+	parser.add_argument("--proximity_gap", type=int, default=20, help="Pixel gap threshold for proximity merge") 
+	parser.add_argument("--proximity_color_thresh", type=float, default=0.32, help="HSV distance threshold for proximity merge") 
+	parser.add_argument("--no_split_disconnected", action="store_true", help="Disable splitting disconnected components")
 
-    # Background filter
-    parser.add_argument("--max_area", type=float, default=0.40, help="Max image area %% for foreground")
-    parser.add_argument("--border_touch", type=float, default=0.25, help="Max perimeter %% touching edges")
-
-    # SAM 2 model
-    parser.add_argument("--model_cfg", default="sam2.1_hiera_l", help="SAM 2 config key or YAML path (sam2.1_hiera_t/s/b+/l)")
-    parser.add_argument("--sam_ckpt", default=r"Module-1\models\sam2.1_hiera_large.pt", help="SAM 2 checkpoint path (.pt)")
-    parser.add_argument("--device", default="cuda", help="Device ('cuda' or 'cpu')")
-
-    # SAM tuning
-    parser.add_argument("--points_per_side", type=int, default=16, help="Grid points per side (default SAM: 32)")
-    parser.add_argument("--pred_iou_thresh", type=float, default=0.90, help="Min predicted IoU (default SAM: 0.88)")
-    parser.add_argument("--stability_score_thresh", type=float, default=0.96, help="Min stability score (default SAM: 0.95)")
-    parser.add_argument("--min_mask_area", type=int, default=500, help="Min mask area in pixels (default SAM: 0)")
-
-    # Merge
-    parser.add_argument("--merge_thresh", type=float, default=0.6, help="Containment ratio to merge masks (0-1)")
-
-    run_pipeline(parser.parse_args())
+	run_pipeline(parser.parse_args())
