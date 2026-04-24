@@ -6,19 +6,48 @@ import json
 import math
 import os
 import shutil
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
+ARCORE_TO_COLMAP_CAMERA = np.diag([1.0, -1.0, -1.0]).astype(np.float64)
 
-GS_TRAIN_ROOT = Path(__file__).resolve().parents[1] / "gs-train"
-if str(GS_TRAIN_ROOT) not in sys.path:
-    sys.path.insert(0, str(GS_TRAIN_ROOT))
 
-from vroom_core.utils.geometry import arcore_camera_to_world_to_colmap_extrinsics, rotation_matrix_to_quaternion
+def rotation_matrix_to_quaternion(rotation: np.ndarray) -> np.ndarray:
+    matrix = np.asarray(rotation, dtype=np.float64)
+    if matrix.shape != (3, 3):
+        raise ValueError(f"Expected a 3x3 rotation matrix, got {matrix.shape}.")
+
+    rxx, ryx, rzx, rxy, ryy, rzy, rxz, ryz, rzz = matrix.flat
+    k_matrix = np.array(
+        [
+            [rxx - ryy - rzz, 0.0, 0.0, 0.0],
+            [ryx + rxy, ryy - rxx - rzz, 0.0, 0.0],
+            [rzx + rxz, rzy + ryz, rzz - rxx - ryy, 0.0],
+            [ryz - rzy, rzx - rxz, rxy - ryx, rxx + ryy + rzz],
+        ],
+        dtype=np.float64,
+    ) / 3.0
+    eigenvalues, eigenvectors = np.linalg.eigh(k_matrix)
+    quaternion = eigenvectors[[3, 0, 1, 2], np.argmax(eigenvalues)]
+    if quaternion[0] < 0.0:
+        quaternion *= -1.0
+    return quaternion
+
+
+def arcore_camera_to_world_to_colmap_extrinsics(camera_to_world: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    transform = np.asarray(camera_to_world, dtype=np.float64)
+    if transform.shape != (4, 4):
+        raise ValueError(f"Expected a 4x4 camera_to_world matrix, got {transform.shape}.")
+
+    rotation_world_from_camera = transform[:3, :3]
+    translation_world_from_camera = transform[:3, 3]
+
+    rotation_camera_from_world = ARCORE_TO_COLMAP_CAMERA @ rotation_world_from_camera.T
+    translation_camera_from_world = -rotation_camera_from_world @ translation_world_from_camera
+    return rotation_camera_from_world.astype(np.float64), translation_camera_from_world.astype(np.float64)
 
 
 REQUIRED_MANIFEST_FIELDS = {
