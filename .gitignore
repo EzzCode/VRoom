@@ -5,7 +5,9 @@
 *.ptx
 *.cubin
 *.fatbin
-
+/inputs
+/objects
+/__pycache__/
 # ─── Images & Media ───────────────────────────────────────────────────────────
 *.png
 *.jpg
