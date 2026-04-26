@@ -15,6 +15,7 @@ For each object label found in the semantic maps:
 Output: objects/ folder with one OBJ per object label.
 """
 
+import argparse
 import numpy as np
 import json
 import os
@@ -24,10 +25,18 @@ from marching_cubes import run_marching_cubes
 from export_ply import export_ply_binary
 
 # ============================================================================
+# 0. Parse Command Line Arguments
+# ============================================================================
+parser = argparse.ArgumentParser(description="Extract object meshes using semantic masks.")
+parser.add_argument("--inputs", type=str, required=True, help="Path to the mesh_inputs directory")
+args = parser.parse_args()
+
+# ============================================================================
 # 1. Load Camera Data
 # ============================================================================
-input_dir = os.path.join(os.path.dirname(__file__), "inputs")
-output_dir = os.path.join(os.path.dirname(__file__), "objects")
+input_dir = args.inputs
+# Create the 'objects' folder right next to 'mesh_inputs' in the model directory
+output_dir = os.path.join(os.path.dirname(input_dir), "objects")
 os.makedirs(output_dir, exist_ok=True)
 
 with open(os.path.join(input_dir, "cameras.json"), "r") as f:
