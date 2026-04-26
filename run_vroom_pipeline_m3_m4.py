@@ -179,7 +179,7 @@ def main():
         py_u + [str(trainer_script), "--config", str(new_config_path), "--scene_name", args.scene_name],
         "GS Optimization",
         total=30000,
-        pattern=r"Iter (\d+)"
+        pattern=r"(\d+)/30000"
     )
 
     # ==========================================
