@@ -200,8 +200,8 @@ def main():
     
     print(f" Found fresh model at: {fresh_model_dir.relative_to(workspace_root)}")
 
-    extractor_script = workspace_root / "vroom_core" / "export" / "mesh_inputs_extractor.py"
-    
+    extractor_script = workspace_root / "gs-train" / "vroom_core" / "export" / "mesh_inputs_extractor.py"
+
     stream_command(
         py_u + [str(extractor_script), "--model_path", str(fresh_model_dir), "--output_dir", str(mesh_inputs_dir)],
         "Extracting 2D Arrays",
@@ -213,7 +213,7 @@ def main():
     # STEP 3: MESH GENERATION (Module 4)
     # ==========================================
     print("\n[3/3] STAGE: Meshing")
-    mesher_script = workspace_root / "vroom_core" / "export" / "extract_object_meshes.py"
+    mesher_script = workspace_root / "gs-train" / "vroom_core" / "export" / "extract_object_meshes.py"
     
     stream_command(
         py_u + [str(mesher_script), "--inputs", str(mesh_inputs_dir)],

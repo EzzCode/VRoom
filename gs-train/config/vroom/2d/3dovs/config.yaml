@@ -24,7 +24,7 @@ model_params: {
     images: images,
     depths: depths,
     masks: masks,
-    resolution: -1,
+    resolution: 2,
     white_background: False,
     random_background: False,
     resolution_scales: [1.0],
