@@ -111,3 +111,20 @@ def extract_mesh_inputs(model_path, output_dir, iteration=30000):
         
     print(f"\n All mesh inputs extracted to: {exp_dir}")
     return exp_dir
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+    
+    parser = argparse.ArgumentParser(description="Extract 2D arrays from trained GS model")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to the trained model directory")
+    parser.add_argument("--output_dir", type=str, required=True, help="Path to save the extracted arrays")
+    parser.add_argument("--iteration", type=int, default=30000, help="Iteration number to load")
+    
+    args = parser.parse_args()
+    
+    try:
+        extract_mesh_inputs(args.model_path, args.output_dir, args.iteration)
+    except Exception as e:
+        print(f"Error extracting mesh inputs: {e}", file=sys.stderr)
+        sys.exit(1)
