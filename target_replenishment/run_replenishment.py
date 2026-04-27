@@ -93,6 +93,13 @@ def run_replenishment(
     repair_filter_min_target_iou: float = 0.30,
     repair_filter_min_views: int = 2,
     repair_filter_allow_inspect_prior: bool = True,
+    aligned_repair_candidates: bool = False,
+    aligned_repair_candidates_only: bool = False,
+    aligned_repair_support_dilate_px: int = 12,
+    aligned_repair_min_component_px: int = 32,
+    aligned_repair_max_components: int = 6,
+    aligned_repair_max_area_ratio: float = 0.40,
+    aligned_repair_min_target_render_iou: float = 0.20,
     azimuth_sign: int = -1,
     elevation_sign: int = 1,
 ):
@@ -124,6 +131,7 @@ def run_replenishment(
     from target_replenishment.core.optimizer import optimize_with_novel_views
     from target_replenishment.core.anchor_seeding import seed_backside_anchors
     from target_replenishment.core.repair_diagnostics import analyze_repair_candidates
+    from target_replenishment.core.repair_candidate_stage import analyze_aligned_repair_candidates
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -364,6 +372,7 @@ def run_replenishment(
         raw_supervision_count = len(supervision_views)
         repair_diag_result = {}
         repair_filter_result = {}
+        aligned_repair_result = {}
         if repair_diagnostics or repair_diagnostics_only:
             logger.info("Running read-only repair diagnostics before seeding/fine-tune...")
             repair_diag_result = analyze_repair_candidates(
@@ -381,7 +390,37 @@ def run_replenishment(
             with open(obj_dir / "repair_diagnostics.json", "w", encoding="utf-8") as f:
                 json.dump(repair_diag_result, f, indent=2)
 
-            if repair_diagnostics_only:
+        if aligned_repair_candidates or aligned_repair_candidates_only:
+            logger.info("Running read-only aligned repair-candidate stage (no model mutation)...")
+            aligned_repair_result = analyze_aligned_repair_candidates(
+                gaussians=gaussians,
+                pipe_config=pipe_config,
+                supervision_views=supervision_views,
+                object_id=int(obj_id),
+                object_anchors=object_anchors,
+                object_radius=float(coverage.object_radius),
+                output_dir=obj_dir / "repair_candidates",
+                target_mask_erode_px=int(max(0, target_mask_erode_px)),
+                alpha_threshold=float(repair_diag_alpha_threshold),
+                support_dilate_px=int(aligned_repair_support_dilate_px),
+                min_repair_component_px=int(aligned_repair_min_component_px),
+                max_repair_components=int(aligned_repair_max_components),
+                max_repair_area_ratio=float(aligned_repair_max_area_ratio),
+                min_target_render_iou=float(aligned_repair_min_target_render_iou),
+                save_debug_images=True,
+            )
+            with open(obj_dir / "repair_candidates.json", "w", encoding="utf-8") as f:
+                json.dump(aligned_repair_result, f, indent=2)
+            logger.info(
+                "Aligned repair-candidate stage: accept=%d inspect=%d reject=%d (n_views=%d)",
+                aligned_repair_result.get('summary', {}).get('n_accept_repair_views', 0),
+                aligned_repair_result.get('summary', {}).get('n_inspect_repair_views', 0),
+                aligned_repair_result.get('summary', {}).get('n_reject_repair_views', 0),
+                aligned_repair_result.get('n_views', 0),
+            )
+
+        if repair_diagnostics or repair_diagnostics_only or aligned_repair_candidates_only:
+            if repair_diagnostics_only or aligned_repair_candidates_only:
                 results[obj_id] = {
                     'diagnostic_only': True,
                     'n_gap_bins': len(coverage.gap_azimuths),
@@ -389,6 +428,7 @@ def run_replenishment(
                     'n_aligned_views': len(aligned_cameras),
                     'n_supervision_views': len(supervision_views),
                     'repair_diagnostics': repair_diag_result,
+                    'aligned_repair_candidates': aligned_repair_result,
                 }
                 with open(obj_dir / "replenishment_summary.json", "w", encoding="utf-8") as f:
                     json.dump(results[obj_id], f, indent=2)
@@ -424,6 +464,7 @@ def run_replenishment(
                         'n_supervision_views_raw': int(raw_supervision_count),
                         'n_supervision_views': 0,
                         'repair_diagnostics': repair_diag_result,
+                        'aligned_repair_candidates': aligned_repair_result,
                         'repair_filter': repair_filter_result,
                     }
                     with open(obj_dir / "replenishment_summary.json", "w", encoding="utf-8") as f:
@@ -700,6 +741,7 @@ def run_replenishment(
                 'n_supervision_views': len(supervision_views),
                 'n_seeded_anchors': int(n_seeded),
                 'repair_diagnostics': repair_diag_result,
+                'aligned_repair_candidates': aligned_repair_result,
                 'repair_filter': repair_filter_result,
                 'optimizer_result': opt_result,
             }
@@ -887,6 +929,7 @@ def run_replenishment(
             'seed_opacity_accept_threshold': float(seed_opacity_accept_threshold),
             'seed_visual_hull_stats': seed_visual_hull_stats,
             'repair_diagnostics': repair_diag_result,
+            'aligned_repair_candidates': aligned_repair_result,
             'repair_filter': repair_filter_result,
             'comparison': compare_summary,
         }
@@ -1464,6 +1507,20 @@ def main():
                         help="Minimum number of accepted diagnostic views required before mutating the model")
     parser.add_argument("--no_repair_filter_inspect_prior", action="store_true",
                         help="Only allow usable_prior views through the repair diagnostic filter")
+    parser.add_argument("--aligned_repair_candidates", action="store_true",
+                        help="Run the read-only aligned repair-candidate stage (current-render-aligned conservative repair masks)")
+    parser.add_argument("--aligned_repair_candidates_only", action="store_true",
+                        help="Run aligned repair-candidate stage and skip seeding/fine-tune/model mutation")
+    parser.add_argument("--aligned_repair_support_dilate_px", type=int, default=12,
+                        help="Pixels of dilation around the current render mask defining the support zone for repair components")
+    parser.add_argument("--aligned_repair_min_component_px", type=int, default=32,
+                        help="Minimum connected-component size for a missing region to be considered a repair candidate")
+    parser.add_argument("--aligned_repair_max_components", type=int, default=6,
+                        help="Maximum number of repair components kept per view (largest by area)")
+    parser.add_argument("--aligned_repair_max_area_ratio", type=float, default=0.40,
+                        help="Reject views whose total repair-mask area exceeds this fraction of the target-mask area")
+    parser.add_argument("--aligned_repair_min_target_render_iou", type=float, default=0.20,
+                        help="Minimum target/render IoU required for a view to be considered for aligned repair")
     parser.add_argument("--azimuth_sign", type=int, choices=[-1, 1], default=-1,
                         help="Azimuth rotation sign for novel cameras. Default -1 matches Zero123++ v1.2 convention.")
     parser.add_argument("--elevation_sign", type=int, choices=[-1, 1], default=1,
@@ -1529,6 +1586,13 @@ def main():
         repair_filter_min_target_iou=args.repair_filter_min_target_iou,
         repair_filter_min_views=args.repair_filter_min_views,
         repair_filter_allow_inspect_prior=not args.no_repair_filter_inspect_prior,
+        aligned_repair_candidates=args.aligned_repair_candidates,
+        aligned_repair_candidates_only=args.aligned_repair_candidates_only,
+        aligned_repair_support_dilate_px=args.aligned_repair_support_dilate_px,
+        aligned_repair_min_component_px=args.aligned_repair_min_component_px,
+        aligned_repair_max_components=args.aligned_repair_max_components,
+        aligned_repair_max_area_ratio=args.aligned_repair_max_area_ratio,
+        aligned_repair_min_target_render_iou=args.aligned_repair_min_target_render_iou,
         azimuth_sign=args.azimuth_sign,
         elevation_sign=args.elevation_sign,
     )
