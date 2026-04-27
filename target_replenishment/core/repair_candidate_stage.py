@@ -57,6 +57,8 @@ def analyze_aligned_repair_candidates(
     max_repair_components: int = 6,
     max_repair_area_ratio: float = 0.40,
     min_target_render_iou: float = 0.20,
+    max_target_render_area_ratio: float = 2.25,
+    max_outside_alpha_ratio: float = 0.20,
     min_target_area_px: int = 64,
     floater_min_component_px: int = 32,
     save_debug_images: bool = True,
@@ -85,6 +87,10 @@ def analyze_aligned_repair_candidates(
             larger than this fraction of the target-mask area.
         min_target_render_iou: Minimum target/render IoU required to even
             consider a view for repair (sanity gate).
+        max_target_render_area_ratio: Reject/inspect views where the generated
+            target mask is much larger than the cleaned render support.
+        max_outside_alpha_ratio: Reject/inspect views with too much render
+            alpha in floater components outside the generated target.
         min_target_area_px: Minimum target-mask area in pixels.
         floater_min_component_px: Minimum component size for floater
             candidates reported in the outside-alpha region.
@@ -112,6 +118,8 @@ def analyze_aligned_repair_candidates(
         "max_repair_components": int(max(1, max_repair_components)),
         "max_repair_area_ratio": float(max_repair_area_ratio),
         "min_target_render_iou": float(min_target_render_iou),
+        "max_target_render_area_ratio": float(max_target_render_area_ratio),
+        "max_outside_alpha_ratio": float(max_outside_alpha_ratio),
         "min_target_area_px": int(max(0, min_target_area_px)),
         "floater_min_component_px": int(max(1, floater_min_component_px)),
     }
@@ -178,50 +186,60 @@ def analyze_aligned_repair_candidates(
             ) > 0
 
         render_mask = alpha > float(alpha_threshold)
-        outside_mask = render_mask & (~target_mask)
-        missing_mask_raw = target_mask & (~render_mask)
+        raw_outside_mask = render_mask & (~target_mask)
+        floater_mask = _large_component_mask(
+            raw_outside_mask,
+            min_pixels=int(params["floater_min_component_px"]),
+        )
+        render_support_mask = render_mask & (~_dilate_mask(floater_mask, 2))
+        missing_mask_raw = target_mask & (~render_support_mask)
 
         target_area = float(target_mask.sum())
         render_area = float(render_mask.sum())
+        render_support_area = float(render_support_mask.sum())
+        target_render_area_ratio = float(target_area / max(render_support_area, 1.0))
 
-        target_render_iou = _binary_iou(target_mask, render_mask)
+        raw_target_render_iou = _binary_iou(target_mask, render_mask)
+        target_render_iou = _binary_iou(target_mask, render_support_mask)
         target_render_ious.append(target_render_iou)
 
-        support_zone = _dilate_mask(render_mask, support_dilate_px)
+        support_zone = _dilate_mask(render_support_mask, support_dilate_px)
         missing_in_support = missing_mask_raw & support_zone
 
         repair_mask, repair_components = _filter_repair_components(
             missing_in_support,
-            render_mask,
+            render_support_mask,
             support_dilate_px=support_dilate_px,
             min_component_px=int(params["min_repair_component_px"]),
             max_components=int(params["max_repair_components"]),
         )
         repair_area = float(repair_mask.sum())
-        total_repair_area_px += int(repair_area)
         repair_area_ratio = float(repair_area / max(target_area, 1.0))
         repair_area_ratios.append(repair_area_ratio)
 
         floater_components = _component_stats(
-            outside_mask,
+            floater_mask,
             alpha,
             min_pixels=int(params["floater_min_component_px"]),
             limit=int(params["max_repair_components"]),
         )
 
-        outside_alpha_mass = float(alpha[outside_mask].sum()) if outside_mask.any() else 0.0
+        outside_alpha_mass = float(alpha[floater_mask].sum()) if floater_mask.any() else 0.0
         total_alpha_mass = float(alpha[render_mask].sum()) if render_mask.any() else 0.0
         outside_alpha_ratio = float(outside_alpha_mass / max(total_alpha_mass, 1e-6))
 
         recommendation, reason = _recommend(
             target_area=target_area,
             target_render_iou=target_render_iou,
+            target_render_area_ratio=target_render_area_ratio,
             repair_mask_area=repair_area,
             repair_area_ratio=repair_area_ratio,
             outside_alpha_ratio=outside_alpha_ratio,
             min_target_area_px=int(params["min_target_area_px"]),
             min_target_render_iou=float(params["min_target_render_iou"]),
+            max_target_render_area_ratio=float(params["max_target_render_area_ratio"]),
             max_repair_area_ratio=float(params["max_repair_area_ratio"]),
+            max_outside_alpha_ratio=float(params["max_outside_alpha_ratio"]),
         )
 
         view_score = {
@@ -241,8 +259,12 @@ def analyze_aligned_repair_candidates(
             },
             "target_area_px": int(target_area),
             "render_area_px": int(render_area),
+            "render_support_area_px": int(render_support_area),
+            "raw_target_render_iou": float(raw_target_render_iou),
             "target_render_iou": float(target_render_iou),
+            "target_render_area_ratio": float(target_render_area_ratio),
             "outside_alpha_ratio": float(outside_alpha_ratio),
+            "floater_area_px": int(floater_mask.sum()),
             "repair_mask_area_px": int(repair_area),
             "repair_area_ratio": float(repair_area_ratio),
             "n_repair_components": int(len(repair_components)),
@@ -253,6 +275,8 @@ def analyze_aligned_repair_candidates(
             "reason": reason,
         }
         view_scores.append(view_score)
+        if recommendation == "accept_repair":
+            total_repair_area_px += int(repair_area)
 
         if out_dir is not None and save_debug_images:
             prefix = out_dir / f"view_{idx:02d}"
@@ -262,11 +286,12 @@ def analyze_aligned_repair_candidates(
                 alpha=alpha,
                 target_rgb=target_rgb_aligned,
                 target_mask=target_mask,
-                render_mask=render_mask,
-                outside_mask=outside_mask,
+                render_mask=render_support_mask,
+                outside_mask=floater_mask,
                 missing_mask_raw=missing_mask_raw,
                 repair_mask=repair_mask,
                 support_zone=support_zone,
+                recommendation=recommendation,
             )
 
     n_accept = sum(1 for v in view_scores if v["recommendation"] == "accept_repair")
@@ -346,6 +371,20 @@ def _dilate_mask(mask: np.ndarray, radius_px: int) -> np.ndarray:
     kernel_size = 2 * radius_px + 1
     kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
     return cv2.dilate(mask_u8, kernel, iterations=1).astype(bool)
+
+
+def _large_component_mask(mask: np.ndarray, min_pixels: int) -> np.ndarray:
+    mask_u8 = (np.asarray(mask).astype(np.uint8) > 0).astype(np.uint8)
+    if int(mask_u8.sum()) < int(min_pixels):
+        return np.zeros_like(mask_u8, dtype=bool)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    if n_labels <= 1:
+        return np.zeros_like(mask_u8, dtype=bool)
+    out = np.zeros_like(mask_u8, dtype=bool)
+    for label in range(1, n_labels):
+        if int(stats[label, cv2.CC_STAT_AREA]) >= int(min_pixels):
+            out |= labels == label
+    return out
 
 
 def _filter_repair_components(
@@ -442,23 +481,28 @@ def _component_stats(
 def _recommend(
     target_area: float,
     target_render_iou: float,
+    target_render_area_ratio: float,
     repair_mask_area: float,
     repair_area_ratio: float,
     outside_alpha_ratio: float,
     min_target_area_px: int,
     min_target_render_iou: float,
+    max_target_render_area_ratio: float,
     max_repair_area_ratio: float,
+    max_outside_alpha_ratio: float,
 ) -> tuple:
     """Return (recommendation, reason)."""
     if float(target_area) < float(min_target_area_px):
         return "reject_repair", "target_mask_too_small"
     if float(target_render_iou) < float(min_target_render_iou):
         return "reject_repair", "low_target_render_iou"
+    if float(target_render_area_ratio) > float(max_target_render_area_ratio):
+        return "inspect_repair", "target_mask_too_large_for_render"
     if float(repair_mask_area) <= 0.0:
         return "inspect_repair", "no_repair_region"
     if float(repair_area_ratio) > float(max_repair_area_ratio):
         return "inspect_repair", "repair_region_too_large"
-    if float(outside_alpha_ratio) > 0.40:
+    if float(outside_alpha_ratio) > float(max_outside_alpha_ratio):
         return "inspect_repair", "high_outside_alpha"
     return "accept_repair", "ok"
 
@@ -474,6 +518,7 @@ def _save_debug_images(
     missing_mask_raw: np.ndarray,
     repair_mask: np.ndarray,
     support_zone: np.ndarray,
+    recommendation: str,
 ) -> None:
     cv2.imwrite(
         str(prefix.with_name(prefix.name + "_render.png")),
@@ -514,20 +559,21 @@ def _save_debug_images(
         outside_mask.astype(np.uint8) * 255,
     )
 
-    overlay = rgb.copy()
-    # Blue for accepted repair regions (small, support-anchored).
-    if repair_mask.any():
+    cleaned = rgb.copy()
+    if outside_mask.any():
+        cleaned[outside_mask] = 255
+    cv2.imwrite(
+        str(prefix.with_name(prefix.name + "_cleaned_render.png")),
+        cv2.cvtColor(cleaned, cv2.COLOR_RGB2BGR),
+    )
+
+    overlay = cleaned.copy()
+    if str(recommendation) == "accept_repair" and repair_mask.any():
         overlay[repair_mask] = (
             0.45 * overlay[repair_mask] + 0.55 * np.array([64, 128, 255])
         ).astype(np.uint8)
-    # Red for floater candidates (render outside target).
-    if outside_mask.any():
-        overlay[outside_mask] = (
-            0.55 * overlay[outside_mask] + 0.45 * np.array([255, 64, 64])
-        ).astype(np.uint8)
-    # Faint green for current render support boundary.
-    boundary = support_zone & (~render_mask)
-    if boundary.any():
+    boundary = support_zone & (~render_mask) if str(recommendation) == "accept_repair" else None
+    if boundary is not None and boundary.any():
         overlay[boundary] = (
             0.80 * overlay[boundary] + 0.20 * np.array([64, 200, 64])
         ).astype(np.uint8)
@@ -540,6 +586,7 @@ def _save_debug_images(
 # Re-export private helpers used in tests / wiring.
 __all__.extend([
     "_dilate_mask",
+    "_large_component_mask",
     "_filter_repair_components",
     "_component_stats",
     "_recommend",
