@@ -129,9 +129,21 @@ def run_replenishment(
     )
     from target_replenishment.core.view_alignment import compute_novel_cameras
     from target_replenishment.core.optimizer import optimize_with_novel_views
-    from target_replenishment.core.anchor_seeding import seed_backside_anchors
-    from target_replenishment.core.repair_diagnostics import analyze_repair_candidates
+    from target_replenishment.core.anchor_seeding import (
+        seed_backside_anchors, build_visual_hull_seed_constraints,
+    )
+    from target_replenishment.core.repair_diagnostics import (
+        analyze_repair_candidates, filter_supervision_views,
+    )
     from target_replenishment.core.repair_candidate_stage import analyze_aligned_repair_candidates
+    from target_replenishment.core.io_utils import (
+        save_image as _save_image,
+        save_coverage_plot as _save_coverage_plot,
+        build_comparison_cameras as _build_comparison_cameras,
+        render_object_with_cameras as _render_object_with_cameras,
+        save_camera_metadata as _save_camera_metadata,
+        save_auto_comparison as _save_auto_comparison,
+    )
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -436,7 +448,7 @@ def run_replenishment(
                 continue
 
             if repair_filter_supervision:
-                supervision_views, repair_filter_result = _filter_supervision_by_repair_diagnostics(
+                supervision_views, repair_filter_result = filter_supervision_views(
                     supervision_views,
                     repair_diag_result,
                     min_trust=float(repair_filter_min_trust),
@@ -538,7 +550,7 @@ def run_replenishment(
         }
         visual_hull_constraints = []
         if visual_hull_seed_filter:
-            visual_hull_constraints = _build_visual_hull_seed_constraints(
+            visual_hull_constraints = build_visual_hull_seed_constraints(
                 supervision_views,
                 object_anchors,
                 erode_px=max(0, int(target_mask_erode_px)),
@@ -985,393 +997,6 @@ def run_replenishment(
         json.dump(results, f, indent=2)
 
     return results
-
-
-def _filter_supervision_by_repair_diagnostics(
-    supervision_views: list,
-    repair_diag_result: dict,
-    min_trust: float = 0.45,
-    max_outside_alpha_ratio: float = 0.20,
-    max_missing_ratio: float = 0.55,
-    min_target_render_iou: float = 0.30,
-    min_kept_views: int = 2,
-    allow_inspect_prior: bool = True,
-):
-    """Keep only candidate views that passed read-only repair diagnostics.
-
-    The filter is intentionally conservative: views flagged as floaters or
-    rejected priors are not allowed to drive seeding/optimization. Kept views
-    are reweighted by their trust score so marginal priors contribute less.
-    """
-    view_scores = repair_diag_result.get('view_scores', []) if repair_diag_result else []
-    scores_by_index = {
-        int(score.get('view_index')): score
-        for score in view_scores
-        if score.get('view_index') is not None
-    }
-
-    kept_views = []
-    kept_entries = []
-    rejected_entries = []
-
-    for idx, view in enumerate(supervision_views):
-        score = scores_by_index.get(idx)
-        if score is None:
-            rejected_entries.append({
-                'view_index': int(idx),
-                'reason': 'missing_repair_diagnostic_score',
-            })
-            continue
-
-        recommendation = str(score.get('recommendation', ''))
-        trust_score = float(score.get('trust_score', 0.0))
-        outside_alpha_ratio = float(score.get('outside_alpha_ratio', 1.0))
-        missing_ratio = float(score.get('missing_ratio', 1.0))
-        target_render_iou = float(score.get('target_render_iou', 0.0))
-
-        metric_ok = (
-            trust_score >= float(min_trust)
-            and outside_alpha_ratio <= float(max_outside_alpha_ratio)
-            and missing_ratio <= float(max_missing_ratio)
-            and target_render_iou >= float(min_target_render_iou)
-        )
-        keep = recommendation == 'usable_prior' and metric_ok
-        if allow_inspect_prior and recommendation == 'inspect_prior':
-            keep = metric_ok
-
-        entry = {
-            'view_index': int(idx),
-            'azimuth_offset_deg': score.get('azimuth_offset_deg'),
-            'elevation_offset_deg': score.get('elevation_offset_deg'),
-            'recommendation': recommendation,
-            'trust_score': trust_score,
-            'outside_alpha_ratio': outside_alpha_ratio,
-            'missing_ratio': missing_ratio,
-            'target_render_iou': target_render_iou,
-        }
-
-        if keep:
-            filtered_view = dict(view)
-            original_weight = float(filtered_view.get('weight', 1.0))
-            filtered_view['weight'] = original_weight * max(trust_score, 1e-3)
-            filtered_view['repair_diagnostic'] = entry
-            entry['original_weight'] = original_weight
-            entry['filtered_weight'] = float(filtered_view['weight'])
-            kept_views.append(filtered_view)
-            kept_entries.append(entry)
-        else:
-            if recommendation in {'inspect_floaters', 'reject_prior'}:
-                reason = recommendation
-            elif trust_score < float(min_trust):
-                reason = 'below_min_trust'
-            elif outside_alpha_ratio > float(max_outside_alpha_ratio):
-                reason = 'above_max_outside_alpha'
-            elif missing_ratio > float(max_missing_ratio):
-                reason = 'above_max_missing_ratio'
-            elif target_render_iou < float(min_target_render_iou):
-                reason = 'below_min_target_render_iou'
-            else:
-                reason = 'not_allowed_by_filter'
-            entry['reason'] = reason
-            rejected_entries.append(entry)
-
-    min_kept_views = max(0, int(min_kept_views))
-    if len(kept_views) < min_kept_views:
-        for entry in kept_entries:
-            rejected = dict(entry)
-            rejected['reason'] = 'below_min_filtered_view_count'
-            rejected_entries.append(rejected)
-        kept_views = []
-        kept_entries = []
-
-    filter_result = {
-        'enabled': True,
-        'raw_view_count': int(len(supervision_views)),
-        'kept_view_count': int(len(kept_views)),
-        'rejected_view_count': int(len(rejected_entries)),
-        'min_trust': float(min_trust),
-        'max_outside_alpha_ratio': float(max_outside_alpha_ratio),
-        'max_missing_ratio': float(max_missing_ratio),
-        'min_target_render_iou': float(min_target_render_iou),
-        'min_kept_views': int(min_kept_views),
-        'allow_inspect_prior': bool(allow_inspect_prior),
-        'kept_view_indices': [int(entry['view_index']) for entry in kept_entries],
-        'kept_views': kept_entries,
-        'rejected_views': rejected_entries,
-    }
-    return kept_views, filter_result
-
-
-def _save_image(img: np.ndarray, path: Path):
-    """Save an image to disk."""
-    if img.ndim == 3 and img.shape[2] == 3:
-        cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
-    else:
-        cv2.imwrite(str(path), img)
-
-
-def _save_coverage_plot(coverage, path: Path):
-    """Save a simple coverage histogram visualization."""
-    n_bins = len(coverage.coverage_map)
-    H, W = 200, 400
-    img = np.ones((H, W, 3), dtype=np.uint8) * 255
-
-    bar_w = W // n_bins
-    for i, val in enumerate(coverage.coverage_map):
-        bar_h = int(val * (H - 20))
-        x0 = i * bar_w
-        x1 = x0 + bar_w - 1
-        y0 = H - 10 - bar_h
-        y1 = H - 10
-
-        # Green = covered, red = gap
-        color = (0, 180, 0) if val >= 0.1 else (0, 0, 200)
-        cv2.rectangle(img, (x0, y0), (x1, y1), color, -1)
-
-    # Mark input camera azimuth
-    input_bin = int((coverage.input_azimuth + np.pi) / (2 * np.pi) * n_bins)
-    input_bin = np.clip(input_bin, 0, n_bins - 1)
-    cx = input_bin * bar_w + bar_w // 2
-    cv2.circle(img, (cx, 5), 5, (255, 0, 0), -1)
-
-    cv2.imwrite(str(path), img)
-
-
-def _build_comparison_cameras(center, radius, orbit_radius, up_vector, input_cam_position, width, height, n_views):
-    from target_replenishment.render_360 import look_at
-
-    up = up_vector.astype(np.float32)
-
-    # Keep comparison cameras outside the object and near training-view distance.
-    dist = max(float(orbit_radius) * 0.9, float(radius) * 2.5, 0.5)
-
-    # Recompute a wider focal length for comparison rendering so object framing is stable.
-    angular = 2.0 * np.arctan(float(radius) / max(dist, 1e-6))
-    fov = np.clip(angular / 0.55, np.radians(30.0), np.radians(100.0))
-    fx = (width / 2.0) / np.tan(fov / 2.0)
-    fy = (height / 2.0) / np.tan(fov / 2.0)
-    k = np.array([[fx, 0.0, width / 2.0], [0.0, fy, height / 2.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-
-    # Use input camera direction as the orbit start to avoid random extreme angles.
-    ref_vec = (input_cam_position.astype(np.float32) - center.astype(np.float32))
-    vertical = float(np.dot(ref_vec, up))
-    horizontal = ref_vec - vertical * up
-    if np.linalg.norm(horizontal) < 1e-6:
-        horizontal = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        if abs(np.dot(horizontal, up)) > 0.9:
-            horizontal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    basis_h = horizontal / (np.linalg.norm(horizontal) + 1e-8)
-    basis_v = np.cross(up, basis_h)
-    basis_v = basis_v / (np.linalg.norm(basis_v) + 1e-8)
-
-    # Preserve some elevation from the source camera while clamping extremes.
-    z_offset = float(np.clip(vertical, -0.3 * dist, 0.3 * dist))
-
-    cams = []
-    for i in range(n_views):
-        angle = 2.0 * np.pi * i / n_views
-        cam_pos = (
-            center
-            + dist * np.cos(angle) * basis_h
-            + dist * np.sin(angle) * basis_v
-            + z_offset * up
-        ).astype(np.float32)
-        r, t = look_at(cam_pos.astype(np.float32), center.astype(np.float32), up)
-        cams.append(
-            {
-                'index': i,
-                'azimuth_deg': float(np.degrees(angle)),
-                'cam_pos': cam_pos,
-                'R': r,
-                'T': t,
-                'K': k.copy(),
-                'width': width,
-                'height': height,
-            }
-        )
-    return cams
-
-
-def _render_object_with_cameras(gaussians, pipe_config, cameras, object_id):
-    from target_replenishment.core.objectgs_bridge import create_virtual_camera, render_view
-
-    bg = torch.ones(3, dtype=torch.float32, device='cuda')
-    frames = []
-    for cam_data in cameras:
-        cam = create_virtual_camera(
-            cam_data['R'],
-            cam_data['T'],
-            cam_data['K'],
-            cam_data['width'],
-            cam_data['height'],
-        )
-        res = render_view(gaussians, cam, pipe_config, bg, object_label_id=object_id)
-        rgb = (res['rgb'].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-        frames.append(rgb)
-    return frames
-
-
-def _build_visual_hull_seed_constraints(supervision_views, object_anchors, erode_px: int = 0):
-    """Build coarse foreground masks for pre-seed visual-hull carving.
-
-    Zero123++ outputs are object-centered, while our novel cameras use scene
-    intrinsics. Aligning the generated foreground bbox to the projected object
-    AABB gives the seeder a rough but useful multi-view support test before it
-    appends any renderable anchors.
-    """
-    from target_replenishment.core.image_alignment import align_image_to_render_bbox
-
-    object_anchors_np = np.asarray(object_anchors, dtype=np.float32)
-    if object_anchors_np.size == 0:
-        return []
-
-    q_low = np.quantile(object_anchors_np, 0.02, axis=0)
-    q_high = np.quantile(object_anchors_np, 0.98, axis=0)
-    corners = np.array([
-        [q_low[0], q_low[1], q_low[2]],
-        [q_high[0], q_low[1], q_low[2]],
-        [q_low[0], q_high[1], q_low[2]],
-        [q_high[0], q_high[1], q_low[2]],
-        [q_low[0], q_low[1], q_high[2]],
-        [q_high[0], q_low[1], q_high[2]],
-        [q_low[0], q_high[1], q_high[2]],
-        [q_high[0], q_high[1], q_high[2]],
-    ], dtype=np.float32)
-
-    constraints = []
-    for view in supervision_views:
-        cam = view.get('camera')
-        rgb = np.asarray(view.get('rgb'))
-        if cam is None or rgb.ndim != 3:
-            continue
-
-        height = int(cam.get('height', rgb.shape[0]))
-        width = int(cam.get('width', rgb.shape[1]))
-        mask = (rgb.astype(np.float32).mean(axis=2) < 250.0)
-        mask = _largest_component_mask_np(mask, min_pixels=64)
-        if int(erode_px) > 0 and mask.any():
-            kernel_size = 2 * int(erode_px) + 1
-            kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
-            eroded = cv2.erode(mask.astype(np.uint8), kernel, iterations=1) > 0
-            if eroded.sum() >= 64:
-                mask = eroded
-        if not mask.any():
-            continue
-
-        ref = _project_aabb_bbox_image(cam, corners, height, width)
-        if ref is None:
-            continue
-
-        target_img = np.ones((rgb.shape[0], rgb.shape[1], 3), dtype=np.uint8) * 255
-        target_img[mask] = 0
-        aligned = align_image_to_render_bbox(target_img, ref, bg_color=(255, 255, 255))
-        aligned_mask = aligned.mean(axis=2) < 250.0
-        aligned_mask = _largest_component_mask_np(aligned_mask, min_pixels=64)
-        if aligned_mask.shape[:2] != (height, width):
-            aligned_mask = cv2.resize(
-                aligned_mask.astype(np.uint8),
-                (width, height),
-                interpolation=cv2.INTER_NEAREST,
-            ) > 0
-        if aligned_mask.sum() >= 64:
-            constraints.append({
-                'camera': cam,
-                'mask': aligned_mask.astype(bool),
-                'azimuth_offset_deg': cam.get('azimuth_offset_deg'),
-                'elevation_offset_deg': cam.get('elevation_offset_deg'),
-            })
-    return constraints
-
-
-def _project_aabb_bbox_image(cam, corners: np.ndarray, height: int, width: int):
-    R = np.asarray(cam['R'], dtype=np.float32)
-    T = np.asarray(cam['T'], dtype=np.float32).reshape(1, 3)
-    K = np.asarray(cam['K'], dtype=np.float32)
-    cam_pts = (R @ corners.T).T + T
-    z = cam_pts[:, 2]
-    valid = z > 1e-4
-    if not np.any(valid):
-        return None
-    u = K[0, 0] * cam_pts[:, 0] / (z + 1e-8) + K[0, 2]
-    v = K[1, 1] * cam_pts[:, 1] / (z + 1e-8) + K[1, 2]
-    valid &= np.isfinite(u) & np.isfinite(v)
-    if not np.any(valid):
-        return None
-    x0 = int(np.floor(np.clip(np.min(u[valid]), 0, width - 1)))
-    x1 = int(np.ceil(np.clip(np.max(u[valid]), 0, width - 1)))
-    y0 = int(np.floor(np.clip(np.min(v[valid]), 0, height - 1)))
-    y1 = int(np.ceil(np.clip(np.max(v[valid]), 0, height - 1)))
-    if x1 <= x0 or y1 <= y0:
-        return None
-    ref = np.ones((height, width, 3), dtype=np.uint8) * 255
-    cv2.rectangle(ref, (x0, y0), (x1, y1), (0, 0, 0), thickness=-1)
-    return ref
-
-
-def _largest_component_mask_np(mask: np.ndarray, min_pixels: int = 16) -> np.ndarray:
-    mask_u8 = (np.asarray(mask).astype(np.uint8) > 0).astype(np.uint8)
-    if int(mask_u8.sum()) < min_pixels:
-        return mask_u8.astype(bool)
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
-    if n_labels <= 1:
-        return mask_u8.astype(bool)
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    if areas.size == 0 or int(areas.max()) < min_pixels:
-        return mask_u8.astype(bool)
-    keep_label = 1 + int(np.argmax(areas))
-    return labels == keep_label
-
-
-def _save_camera_metadata(path, object_id, center, radius, cameras):
-    payload = {
-        'object_id': int(object_id),
-        'object_center': np.asarray(center, dtype=np.float32).tolist(),
-        'object_radius': float(radius),
-        'n_views': len(cameras),
-        'cameras': [
-            {
-                'index': c['index'],
-                'azimuth_deg': c['azimuth_deg'],
-                'cam_pos': np.asarray(c['cam_pos'], dtype=np.float32).tolist(),
-                'R': np.asarray(c['R'], dtype=np.float32).tolist(),
-                'T': np.asarray(c['T'], dtype=np.float32).tolist(),
-                'K': np.asarray(c['K'], dtype=np.float32).tolist(),
-                'width': int(c['width']),
-                'height': int(c['height']),
-            }
-            for c in cameras
-        ],
-    }
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(payload, f, indent=2)
-
-
-def _save_auto_comparison(before_frames, after_frames, out_dir):
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    diffs = []
-    for i, (before_rgb, after_rgb) in enumerate(zip(before_frames, after_frames)):
-        _save_image(before_rgb, out_dir / f"before_view_{i}.png")
-        _save_image(after_rgb, out_dir / f"after_view_{i}.png")
-
-        compare = np.hstack([before_rgb.copy(), after_rgb.copy()])
-        cv2.putText(compare, 'BEFORE', (12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 0), 2)
-        cv2.putText(compare, 'AFTER', (before_rgb.shape[1] + 12, 34), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-        _save_image(compare, out_dir / f"compare_view_{i}.png")
-
-        abs_diff = np.abs(after_rgb.astype(np.int16) - before_rgb.astype(np.int16)).astype(np.uint8)
-        diff_gray = np.mean(abs_diff, axis=2).astype(np.uint8)
-        boosted = np.clip(diff_gray.astype(np.float32) * 4.0, 0, 255).astype(np.uint8)
-        diff_heat = cv2.applyColorMap(boosted, cv2.COLORMAP_JET)
-        cv2.imwrite(str(out_dir / f"diff_view_{i}.png"), diff_heat)
-
-        diffs.append(float(diff_gray.mean()))
-
-    return {
-        'n_views': len(diffs),
-        'mean_abs_diff': float(np.mean(diffs)) if diffs else 0.0,
-        'max_abs_diff': float(np.max(diffs)) if diffs else 0.0,
-    }
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

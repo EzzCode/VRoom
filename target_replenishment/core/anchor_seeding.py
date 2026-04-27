@@ -6,9 +6,10 @@ physical dimensions.
 
 Public API:
     seed_backside_anchors(...) -> int
+    build_visual_hull_seed_constraints(...) -> list
 """
 
-__all__ = ['seed_backside_anchors']
+__all__ = ['seed_backside_anchors', 'build_visual_hull_seed_constraints']
 
 import sys
 import logging
@@ -493,3 +494,121 @@ def seed_backside_anchors(
         f"total anchors now: {gaussians._anchor.shape[0]})"
     )
     return n_new
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Pre-seed visual-hull constraints (extracted from run_replenishment.py)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def build_visual_hull_seed_constraints(supervision_views, object_anchors, erode_px: int = 0):
+    """Build coarse foreground masks for pre-seed visual-hull carving.
+
+    Zero123++ outputs are object-centered, while novel cameras use scene
+    intrinsics. Aligning the generated foreground bbox to the projected object
+    AABB gives the seeder a rough but useful multi-view support test before it
+    appends any renderable anchors.
+    """
+    import cv2 as _cv2
+    from target_replenishment.core.image_alignment import align_image_to_render_bbox
+
+    object_anchors_np = np.asarray(object_anchors, dtype=np.float32)
+    if object_anchors_np.size == 0:
+        return []
+
+    q_low = np.quantile(object_anchors_np, 0.02, axis=0)
+    q_high = np.quantile(object_anchors_np, 0.98, axis=0)
+    corners = np.array([
+        [q_low[0], q_low[1], q_low[2]],
+        [q_high[0], q_low[1], q_low[2]],
+        [q_low[0], q_high[1], q_low[2]],
+        [q_high[0], q_high[1], q_low[2]],
+        [q_low[0], q_low[1], q_high[2]],
+        [q_high[0], q_low[1], q_high[2]],
+        [q_low[0], q_high[1], q_high[2]],
+        [q_high[0], q_high[1], q_high[2]],
+    ], dtype=np.float32)
+
+    constraints = []
+    for view in supervision_views:
+        cam = view.get("camera")
+        rgb = np.asarray(view.get("rgb"))
+        if cam is None or rgb.ndim != 3:
+            continue
+
+        height = int(cam.get("height", rgb.shape[0]))
+        width = int(cam.get("width", rgb.shape[1]))
+        mask = (rgb.astype(np.float32).mean(axis=2) < 250.0)
+        mask = _largest_component_mask(mask, min_pixels=64)
+        if int(erode_px) > 0 and mask.any():
+            kernel_size = 2 * int(erode_px) + 1
+            kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+            eroded = _cv2.erode(mask.astype(np.uint8), kernel, iterations=1) > 0
+            if eroded.sum() >= 64:
+                mask = eroded
+        if not mask.any():
+            continue
+
+        ref = _project_aabb_bbox_image(cam, corners, height, width)
+        if ref is None:
+            continue
+
+        target_img = np.ones((rgb.shape[0], rgb.shape[1], 3), dtype=np.uint8) * 255
+        target_img[mask] = 0
+        aligned = align_image_to_render_bbox(target_img, ref, bg_color=(255, 255, 255))
+        aligned_mask = aligned.mean(axis=2) < 250.0
+        aligned_mask = _largest_component_mask(aligned_mask, min_pixels=64)
+        if aligned_mask.shape[:2] != (height, width):
+            aligned_mask = _cv2.resize(
+                aligned_mask.astype(np.uint8),
+                (width, height),
+                interpolation=_cv2.INTER_NEAREST,
+            ) > 0
+        if aligned_mask.sum() >= 64:
+            constraints.append({
+                "camera": cam,
+                "mask": aligned_mask.astype(bool),
+                "azimuth_offset_deg": cam.get("azimuth_offset_deg"),
+                "elevation_offset_deg": cam.get("elevation_offset_deg"),
+            })
+    return constraints
+
+
+def _project_aabb_bbox_image(cam, corners, height, width):
+    import cv2 as _cv2
+    R = np.asarray(cam["R"], dtype=np.float32)
+    T = np.asarray(cam["T"], dtype=np.float32).reshape(1, 3)
+    K = np.asarray(cam["K"], dtype=np.float32)
+    cam_pts = (R @ corners.T).T + T
+    z = cam_pts[:, 2]
+    valid = z > 1e-4
+    if not np.any(valid):
+        return None
+    u = K[0, 0] * cam_pts[:, 0] / (z + 1e-8) + K[0, 2]
+    v = K[1, 1] * cam_pts[:, 1] / (z + 1e-8) + K[1, 2]
+    valid &= np.isfinite(u) & np.isfinite(v)
+    if not np.any(valid):
+        return None
+    x0 = int(np.floor(np.clip(np.min(u[valid]), 0, width - 1)))
+    x1 = int(np.ceil(np.clip(np.max(u[valid]), 0, width - 1)))
+    y0 = int(np.floor(np.clip(np.min(v[valid]), 0, height - 1)))
+    y1 = int(np.ceil(np.clip(np.max(v[valid]), 0, height - 1)))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    ref = np.ones((height, width, 3), dtype=np.uint8) * 255
+    _cv2.rectangle(ref, (x0, y0), (x1, y1), (0, 0, 0), thickness=-1)
+    return ref
+
+
+def _largest_component_mask(mask, min_pixels: int = 16):
+    import cv2 as _cv2
+    mask_u8 = (np.asarray(mask).astype(np.uint8) > 0).astype(np.uint8)
+    if int(mask_u8.sum()) < min_pixels:
+        return mask_u8.astype(bool)
+    n_labels, labels, stats, _ = _cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    if n_labels <= 1:
+        return mask_u8.astype(bool)
+    areas = stats[1:, _cv2.CC_STAT_AREA]
+    if areas.size == 0 or int(areas.max()) < min_pixels:
+        return mask_u8.astype(bool)
+    keep_label = 1 + int(np.argmax(areas))
+    return labels == keep_label
