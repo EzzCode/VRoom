@@ -16,9 +16,11 @@ Usage:
 """
 
 import sys
+import json
 import logging
 import numpy as np
 import torch
+import cv2
 import yaml
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +57,7 @@ def load_gaussians(model_path: str, iteration: int = -1) -> tuple:
     Args:
         model_path: ObjectGS training output folder containing config.yaml
                     and point_cloud/iteration_XXXXX/.
+                    fallback to final_model/ if not found or model.
         iteration: Which iteration to load (-1 = latest).
 
     Returns:
@@ -70,17 +73,65 @@ def load_gaussians(model_path: str, iteration: int = -1) -> tuple:
     lp, op, pp = parse_cfg(cfg)
 
     pc_base = model_path / "point_cloud"
+    final_model_dir = model_path / "final_model"
+
+    # Optional direct-export fallback (model files stored at model root)
+    root_model_dir = model_path if (model_path / "point_cloud.ply").exists() else None
+
+    def _iter_index(d: Path):
+        try:
+            return int(d.name.split("_")[-1])
+        except ValueError:
+            return None
+
     if iteration == -1:
-        iter_dirs = sorted(
-            [d for d in pc_base.iterdir() if d.is_dir() and d.name.startswith("iteration_")],
-            key=lambda d: int(d.name.split("_")[-1])
-        )
-        if not iter_dirs:
-            raise FileNotFoundError(f"No iteration dirs in {pc_base}")
-        iter_dir = iter_dirs[-1]
-        iteration = int(iter_dir.name.split("_")[-1])
+        iter_dirs = []
+        if pc_base.exists():
+            iter_dirs = [
+                d for d in pc_base.iterdir()
+                if d.is_dir() and d.name.startswith("iteration_") and _iter_index(d) is not None
+            ]
+            iter_dirs = sorted(iter_dirs, key=_iter_index)
+
+        if iter_dirs:
+            iter_dir = iter_dirs[-1]
+            iteration = _iter_index(iter_dir)
+        elif final_model_dir.exists():
+            iter_dir = final_model_dir
+            iteration = -1
+        elif root_model_dir is not None:
+            iter_dir = root_model_dir
+            iteration = -1
+        else:
+            raise FileNotFoundError(
+                f"No ObjectGS checkpoint found. Checked:\n"
+                f" - {pc_base}/iteration_*\n"
+                f" - {final_model_dir}\n"
+                f" - {model_path}/point_cloud.ply"
+            )
     else:
-        iter_dir = pc_base / f"iteration_{iteration}"
+        # Support both unpadded and zero-padded iteration folder names
+        candidates = [
+            pc_base / f"iteration_{iteration}",
+            pc_base / f"iteration_{iteration:05d}",
+        ]
+        iter_dir = next((c for c in candidates if c.exists()), None)
+
+        if iter_dir is None:
+            if final_model_dir.exists():
+                logger.warning(
+                    f"Requested iteration {iteration} not found; falling back to final_model."
+                )
+                iter_dir = final_model_dir
+            elif root_model_dir is not None:
+                logger.warning(
+                    f"Requested iteration {iteration} not found; falling back to model root export."
+                )
+                iter_dir = root_model_dir
+            else:
+                raise FileNotFoundError(
+                    f"Iteration {iteration} not found in {pc_base} and no fallback model found."
+                )
 
     ply_path = iter_dir / "point_cloud.ply"
     if not ply_path.exists():
@@ -93,6 +144,44 @@ def load_gaussians(model_path: str, iteration: int = -1) -> tuple:
     gaussians.load_ply(str(ply_path))
     gaussians.load_mlp_checkpoints(str(iter_dir))
     gaussians.id_encoder = OneHotEncoder(gaussians.label_ids)
+
+    rep_candidates = [
+        iter_dir / "replenishment.json",
+        model_path / "replenishment.json",
+        iter_dir.parent.parent / "replenishment.json" if iter_dir.parent.name == "point_cloud" else None,
+    ]
+    for rep_path in [p for p in rep_candidates if p is not None]:
+        if not rep_path.exists():
+            continue
+        try:
+            with open(rep_path, "r", encoding="utf-8") as f:
+                rep_data = json.load(f)
+            if 'n_original_anchors' in rep_data:
+                gaussians.n_original_anchors = int(rep_data['n_original_anchors'])
+            if 'override_view_dir' in rep_data:
+                gaussians.override_view_dir = torch.tensor(
+                    rep_data['override_view_dir'], dtype=torch.float32, device="cuda"
+                )
+            if 'seeded_opacity_gates' in rep_data:
+                gates = torch.tensor(
+                    rep_data['seeded_opacity_gates'], dtype=torch.float32, device="cuda"
+                ).reshape(-1, 1)
+                gaussians.replenishment_seed_opacity_gate = gates
+            if 'seeded_opacity_lifts' in rep_data:
+                lifts = torch.tensor(
+                    rep_data['seeded_opacity_lifts'], dtype=torch.float32, device="cuda"
+                )
+                if lifts.numel() == 0:
+                    lifts = lifts.reshape(0, 1)
+                elif lifts.ndim == 1:
+                    lifts = lifts.reshape(-1, 1)
+                else:
+                    lifts = lifts.reshape(lifts.shape[0], -1)
+                gaussians.replenishment_seed_opacity_lift = lifts
+            logger.info("Loaded replenishment metadata from %s", rep_path)
+            break
+        except Exception as exc:
+            logger.warning("Failed to load replenishment metadata from %s: %s", rep_path, exc)
     
     # Initialize the optimizer strictly matching original training configuration 
     # to prevent gradient explosiveness and catastrophic forgetting.
@@ -244,6 +333,90 @@ def build_anchor_id_map(render_result: dict, H: int, W: int, n_anchors: int) -> 
     logger.info(f"Anchor ID map: {(anchor_map >= 0).sum()} / {H*W} pixels covered, "
                 f"{len(np.unique(anchor_map[anchor_map >= 0]))} unique anchors")
     return anchor_map
+
+
+def project_anchor_silhouette(
+    camera,
+    anchor_positions: np.ndarray,
+    object_radius: float,
+    height: int = None,
+    width: int = None,
+    blur_size: int = 9,
+) -> np.ndarray:
+    """Project 3D anchors into a soft 2D silhouette mask.
+
+    The mask is a coarse occupancy prior used to supervise alpha/coverage.
+    It is intentionally smooth so the optimizer can fill holes without
+    overfitting to single projected points.
+    """
+    if anchor_positions is None or len(anchor_positions) == 0:
+        h = int(height or camera.image_height)
+        w = int(width or camera.image_width)
+        return np.zeros((h, w), dtype=np.float32)
+
+    h = int(height or camera.image_height)
+    w = int(width or camera.image_width)
+
+    anchors = np.asarray(anchor_positions, dtype=np.float32)
+    if anchors.ndim != 2 or anchors.shape[1] != 3:
+        raise ValueError(f"anchor_positions must have shape (N, 3), got {anchors.shape}")
+
+    pts_h = np.concatenate([anchors, np.ones((anchors.shape[0], 1), dtype=np.float32)], axis=1)
+    view = camera.world_view_transform.detach().cpu().numpy().astype(np.float32)
+    proj = camera.projection_matrix.detach().cpu().numpy().astype(np.float32)
+
+    clip = pts_h @ view @ proj
+    w_coord = clip[:, 3]
+    valid = np.isfinite(w_coord) & (w_coord > 1e-6)
+    if not np.any(valid):
+        return np.zeros((h, w), dtype=np.float32)
+
+    clip = clip[valid]
+    ndc = clip[:, :3] / np.clip(clip[:, 3:4], 1e-6, None)
+
+    in_view = (
+        np.isfinite(ndc).all(axis=1)
+        & (ndc[:, 0] >= -1.5) & (ndc[:, 0] <= 1.5)
+        & (ndc[:, 1] >= -1.5) & (ndc[:, 1] <= 1.5)
+    )
+    if not np.any(in_view):
+        return np.zeros((h, w), dtype=np.float32)
+
+    ndc = ndc[in_view]
+    cam_space = (pts_h[valid][in_view] @ view)
+    depth = np.clip(cam_space[:, 2], 1e-3, None)
+
+    pixels = np.empty((ndc.shape[0], 2), dtype=np.float32)
+    pixels[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * (w - 1)
+    pixels[:, 1] = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * (h - 1)
+
+    fx = float(camera.fx)
+    fy = float(camera.fy)
+    focal = max((fx + fy) * 0.5, 1.0)
+    object_radius = float(object_radius) if object_radius is not None else 1.0
+
+    # Convert the object radius to a conservative projected footprint.
+    base_radius = np.clip((object_radius / np.median(depth)) * focal * 0.18, 2.0, 48.0)
+    mask = np.zeros((h, w), dtype=np.float32)
+
+    for (x, y), z in zip(pixels, depth):
+        radius = int(np.clip(base_radius * np.clip(np.median(depth) / z, 0.75, 1.75), 2.0, 64.0))
+        cx = int(round(x))
+        cy = int(round(y))
+        if cx < -radius or cy < -radius or cx >= w + radius or cy >= h + radius:
+            continue
+        cv2.circle(mask, (cx, cy), radius, 1.0, -1)
+
+    if blur_size > 1:
+        blur_size = int(blur_size)
+        if blur_size % 2 == 0:
+            blur_size += 1
+        mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+
+    if mask.max() > 0:
+        mask = mask / mask.max()
+
+    return np.clip(mask, 0.0, 1.0)
 
 
 # ── Spatial Hole Detection (No MLP invocation) ──────────────────────────────

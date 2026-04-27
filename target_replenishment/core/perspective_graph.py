@@ -2,7 +2,7 @@
 Perspective Graph — Training camera adjacency and view selection for object enhancement.
 
 Builds a perspective graph from ObjectGS training cameras (cameras.json) that models
-spatial overlap between viewpoints. Used by anchor_renderer to:
+spatial overlap between viewpoints. Used by run_replenishment to:
   - Select multiple training cameras that see an object (for multi-view scoring)
   - Pick the best anchor view for a defect (with frontality weighting)
   - Provide neighbor views for content propagation
