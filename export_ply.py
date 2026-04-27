@@ -1,9 +1,12 @@
 import struct
+import numpy as np
 
 def export_ply_binary(vertices, triangles, filename, vertex_colors=None):
     """
     Exports a mesh to a binary PLY file without relying on external libraries like Open3D.
     This saves massive amounts of space compared to OBJ files and loads instantly.
+    
+    Uses bulk NumPy operations instead of per-element struct.pack loops for speed.
     
     Inputs:
     - vertices: List of (x, y, z) tuples.
@@ -42,21 +45,28 @@ def export_ply_binary(vertices, triangles, filename, vertex_colors=None):
         # Write header
         f.write('\n'.join(header).encode('ascii'))
 
-        # 2. Write Vertices (Binary)
-        for i in range(len(vertices)):
-            v = vertices[i]
-            # Pack 3 floats (x, y, z) into binary format '<3f'
-            f.write(struct.pack('<3f', v[0], v[1], v[2]))
-            
-            if has_colors:
-                c = vertex_colors[i]
-                # Scale [0, 1] to [0, 255]
-                r, g, b = int(c[0]*255), int(c[1]*255), int(c[2]*255)
-                # Pack 3 unsigned chars (r, g, b) into binary format '<3B'
-                f.write(struct.pack('<3B', r, g, b))
+        # 2. Write Vertices (Binary) — bulk NumPy operation instead of per-vertex loop
+        verts_arr = np.array(vertices, dtype=np.float32)  # (V, 3)
 
-        # 3. Write Faces (Binary)
-        for t in triangles:
-            # PLY face format: [number_of_vertices, v1, v2, v3]
-            # Pack 1 unsigned char (3) and 3 integers (indices) into '<B3i'
-            f.write(struct.pack('<B3i', 3, t[0], t[1], t[2]))
+        if has_colors:
+            # Convert [0,1] float colors to [0,255] uint8
+            colors_arr = np.clip(np.array(vertex_colors, dtype=np.float64) * 255, 0, 255).astype(np.uint8)  # (V, 3)
+            
+            # Interleave: [x y z r g b] per vertex using a structured dtype
+            # Each vertex record = 3 floats (12 bytes) + 3 uint8s (3 bytes) = 15 bytes
+            vertex_record = np.dtype([('pos', '<f4', 3), ('col', 'u1', 3)])
+            buf = np.empty(len(vertices), dtype=vertex_record)
+            buf['pos'] = verts_arr
+            buf['col'] = colors_arr
+            f.write(buf.tobytes())
+        else:
+            f.write(verts_arr.tobytes())
+
+        # 3. Write Faces (Binary) — bulk NumPy operation instead of per-face loop
+        # PLY face format: [number_of_vertices(uint8), v1(int32), v2(int32), v3(int32)]
+        # = 1 + 12 = 13 bytes per face
+        face_record = np.dtype([('count', 'u1'), ('indices', '<i4', 3)])
+        face_buf = np.empty(len(triangles), dtype=face_record)
+        face_buf['count'] = 3
+        face_buf['indices'] = np.array(triangles, dtype=np.int32)
+        f.write(face_buf.tobytes())

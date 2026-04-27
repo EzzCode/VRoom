@@ -493,6 +493,8 @@ def run_marching_cubes(voxel_grid, N, color_grid=None):
     """
     Run the Marching Cubes algorithm on a voxel grid.
     
+    Fully vectorized NumPy implementation — no per-voxel Python loops.
+    
     Inputs:
     - voxel_grid: (N, N, N) numpy array of SDF values.
     - N: grid resolution (number of corners along each axis).
@@ -504,162 +506,212 @@ def run_marching_cubes(voxel_grid, N, color_grid=None):
     - vertex_colors: list of (r, g, b) tuples, or None if color_grid not provided.
     """
 
-    def calculate_cube_index(x, y, z):
-        """
-        Grab the SDF values of the 8 corners for voxel (x, y, z),
-        check which are inside the surface (< 0), and build
-        the 8-bit cube index used for Marching Cubes table lookups.
+    # =========================================================================
+    # VECTORIZED IMPLEMENTATION
+    #
+    # Instead of looping over every voxel one at a time with Python for-loops,
+    # we process ALL voxels simultaneously using NumPy array operations.
+    # The algorithm is identical — same lookup tables, same interpolation —
+    # but ~20-50× faster because NumPy runs in C under the hood.
+    #
+    # The key ideas:
+    #   1. Extract the 8 corner SDF values for ALL (N-1)³ voxels at once
+    #      using array slicing (no loops needed).
+    #   2. Build ALL cube indices simultaneously with vectorized bitwise ops.
+    #   3. For each of the 12 edges, find ALL voxels where that edge is
+    #      intersected, and batch-interpolate their vertices.
+    #   4. Assemble triangles by iterating over the 256 MC cases (not voxels).
+    # =========================================================================
 
-        Corner i is at offset: ( i&1, (i>>1)&1, (i>>2)&1 )
-        """
-        # 1. Grab the SDF values of the 8 corners for this voxel
-        corner_sdf = []
-        for i in range(8):
-            dx = i & 1
-            dy = (i >> 1) & 1
-            dz = (i >> 2) & 1
-            corner_sdf.append(voxel_grid[x + dx, y + dy, z + dz])
+    M = N - 1  # number of voxels along each axis
 
-        # 2. Check which ones are < 0  →  inside the surface
-        # 3. Build the 8-bit binary integer to get the cube_index
-        # cube index is a number from 0 to 255 that represents the configuration of the cube
-        # if the corner is inside the surface, the bit is set to 1
-        # if the corner is outside the surface, the bit is set to 0
-        cube_index = 0
-        for i in range(8):
-            if corner_sdf[i] < 0:
-                cube_index |= (1 << i)
-        # example: if corner 0 and 3 only are inside the object
-        # corner 0: if statement is true, 0 | 00000001 = 00000001
-        # corner 3: if statement is true, 00000001 | 00001000 = 00001001
-        # result is 00001001 (decimal 9)
+    # =========================================================================
+    # Step 1: Extract corner SDF values for ALL voxels at once
+    # =========================================================================
+    # Corner i is at offset (i&1, (i>>1)&1, (i>>2)&1) relative to voxel origin.
+    # For each corner, we slice the full grid to get an (M, M, M) array of
+    # that corner's SDF value across every voxel.
+    corner_vals = []
+    for i in range(8):
+        dx = i & 1
+        dy = (i >> 1) & 1
+        dz = (i >> 2) & 1
+        corner_vals.append(voxel_grid[dx:dx+M, dy:dy+M, dz:dz+M])
+    # corner_vals[i] has shape (M, M, M) — the SDF at corner i for every voxel
 
-        # cube_index shows which corners are inside and outside, (8-bit master key)
-        # and is used to look up the triangle table 
-        # # To find which edges are intersected, we look up EdgeMasks[cube_index].
-        # EdgeMasks returns a 12-bit number where each bit corresponds to one of the 12 edges.
-        # In that 12-bit mask:
-        # if the bit is 1, the edge is intersected.
-        # if the bit is 0, the edge is not intersected.
-        return cube_index, corner_sdf
+    # =========================================================================
+    # Step 2: Build cube indices for ALL voxels at once
+    # =========================================================================
+    # cube_index is an 8-bit integer where bit i is set if corner i < 0 (inside).
+    # We build this with vectorized bitwise OR across all corners.
+    cube_indices = np.zeros((M, M, M), dtype=np.int32)
+    for i in range(8):
+        cube_indices |= ((corner_vals[i] < 0).astype(np.int32) << i)
 
-    def interpolate_vertex(x, y, z, corner_a, corner_b, val_a, val_b):
-        """
-        Find the exact point on the edge between corner_a and corner_b
-        where the SDF crosses zero, using linear interpolation.
-        Returns an (x, y, z) coordinate.
-        """
-        # Avoid division by zero — if both values are the same, place at midpoint
-        if abs(val_a - val_b) < 1e-10:
-            t = 0.5
+    # =========================================================================
+    # Step 3: Find active voxels (where the surface passes through)
+    # =========================================================================
+    # Convert EdgeMasks to a NumPy array for vectorized lookup.
+    edge_masks_arr = np.array(EdgeMasks, dtype=np.int32)
+    all_edge_masks = edge_masks_arr[cube_indices]  # (M, M, M)
+    active_mask = all_edge_masks > 0  # voxels with at least one intersected edge
+
+    # Get (x, y, z) coordinates of all active voxels
+    active_x, active_y, active_z = np.where(active_mask)
+    n_active = len(active_x)
+
+    if n_active == 0:
+        return [], [], ([] if color_grid is not None else None)
+
+    # Gather the cube index and 8 corner SDF values for active voxels only
+    active_cube_idx = cube_indices[active_x, active_y, active_z]     # (n_active,)
+    active_corners = np.empty((n_active, 8))                          # (n_active, 8)
+    for i in range(8):
+        active_corners[:, i] = corner_vals[i][active_x, active_y, active_z]
+    active_emasks = all_edge_masks[active_x, active_y, active_z]     # (n_active,)
+
+    # =========================================================================
+    # Step 4: Vectorized edge interpolation
+    # =========================================================================
+    # For each of the 12 edges, find which active voxels have that edge
+    # intersected, interpolate the vertex position (and color), and record
+    # the global vertex ID so triangles can reference it later.
+    #
+    # edge_vertex_ids[voxel_index, edge_index] = global vertex index
+    # This replaces the per-voxel `edge_vertices = [None]*12` sticky-note list.
+    edge_vertex_ids = np.full((n_active, 12), -1, dtype=np.int64)
+
+    all_vertices = []     # will be concatenated at the end
+    all_colors = []       # (only if color_grid is provided)
+    vertex_offset = 0     # running count of total vertices emitted so far
+
+    corner_offsets_arr = np.array(CORNER_OFFSETS, dtype=np.float64)  # (8, 3)
+
+    for edge_i in range(12):
+        # Which active voxels have this edge intersected?
+        hit = (active_emasks & (1 << edge_i)) != 0  # (n_active,) bool
+        n_hit = np.sum(hit)
+        if n_hit == 0:
+            continue
+
+        # The two corners that define this edge
+        c_a, c_b = EDGE_CORNERS[edge_i]
+        val_a = active_corners[hit, c_a]  # (n_hit,)
+        val_b = active_corners[hit, c_b]  # (n_hit,)
+
+        # Interpolation factor t: where does the zero-crossing fall along the edge?
+        denom = val_a - val_b
+        t = np.where(np.abs(denom) < 1e-10, 0.5, val_a / denom)  # (n_hit,)
+
+        # Corner offsets for the two endpoints of this edge
+        off_a = corner_offsets_arr[c_a]  # (3,)
+        off_b = corner_offsets_arr[c_b]  # (3,)
+
+        # Interpolated vertex positions (in grid coordinates)
+        hx = active_x[hit].astype(np.float64)
+        hy = active_y[hit].astype(np.float64)
+        hz = active_z[hit].astype(np.float64)
+
+        vx = hx + off_a[0] + t * (off_b[0] - off_a[0])
+        vy = hy + off_a[1] + t * (off_b[1] - off_a[1])
+        vz = hz + off_a[2] + t * (off_b[2] - off_a[2])
+
+        edge_verts = np.stack([vx, vy, vz], axis=1)  # (n_hit, 3)
+        all_vertices.append(edge_verts)
+
+        # Record the global vertex IDs for these edge intersections
+        ids = np.arange(vertex_offset, vertex_offset + n_hit, dtype=np.int64)
+        edge_vertex_ids[hit, edge_i] = ids
+        vertex_offset += n_hit
+
+        # Interpolate colors if provided
+        if color_grid is not None:
+            ix = active_x[hit]
+            iy = active_y[hit]
+            iz = active_z[hit]
+            da = CORNER_OFFSETS[c_a]
+            db = CORNER_OFFSETS[c_b]
+            col_a = color_grid[ix + da[0], iy + da[1], iz + da[2]]  # (n_hit, 3)
+            col_b = color_grid[ix + db[0], iy + db[1], iz + db[2]]  # (n_hit, 3)
+            interp_col = col_a + t[:, np.newaxis] * (col_b - col_a)  # (n_hit, 3)
+            all_colors.append(interp_col)
+
+    # Concatenate all vertices into a single array
+    if len(all_vertices) == 0:
+        return [], [], ([] if color_grid is not None else None)
+
+    vertices_arr = np.concatenate(all_vertices, axis=0)  # (total_verts, 3)
+
+    # =========================================================================
+    # Step 5: Assemble triangles
+    # =========================================================================
+    # Instead of looping over every active voxel and walking its TriangleTable
+    # entry one by one, we group voxels by cube_index (only 256 possible values)
+    # and emit all triangles for each case in one batch.
+    tri_list_all = []
+
+    for case_idx in range(256):
+        tri_entry = TriangleTable[case_idx]
+        if tri_entry[0] == -1:
+            continue  # no triangles for this case
+
+        # Find active voxels with this cube index
+        case_mask = active_cube_idx == case_idx
+        n_case = np.sum(case_mask)
+        if n_case == 0:
+            continue
+
+        # Read edge indices from the triangle table in groups of 3
+        case_evids = edge_vertex_ids[case_mask]  # (n_case, 12)
+
+        i = 0
+        while i < len(tri_entry) and tri_entry[i] != -1:
+            e0, e1, e2 = tri_entry[i], tri_entry[i+1], tri_entry[i+2]
+            v0 = case_evids[:, e0]  # (n_case,)
+            v1 = case_evids[:, e1]
+            v2 = case_evids[:, e2]
+            tris = np.stack([v0, v1, v2], axis=1)  # (n_case, 3)
+            tri_list_all.append(tris)
+            i += 3
+
+    # =========================================================================
+    # Step 6: Convert to output format
+    # =========================================================================
+    # Convert numpy arrays to lists of tuples (matching the original API)
+    vertices = [tuple(v) for v in vertices_arr]
+
+    if len(tri_list_all) > 0:
+        triangles_arr = np.concatenate(tri_list_all, axis=0)
+        triangles = [tuple(t) for t in triangles_arr]
+    else:
+        triangles = []
+
+    vertex_colors = None
+    if color_grid is not None:
+        if len(all_colors) > 0:
+            colors_arr = np.concatenate(all_colors, axis=0)
+            vertex_colors = [tuple(c) for c in colors_arr]
         else:
-            t = val_a / (val_a - val_b)
+            vertex_colors = []
 
-        ax, ay, az = CORNER_OFFSETS[corner_a]
-        bx, by, bz = CORNER_OFFSETS[corner_b]
-
-        return (
-            x + ax + t * (bx - ax),
-            y + ay + t * (by - ay),
-            z + az + t * (bz - az),
-        )
-
-    vertices = []
-    triangles = []
-    vertex_colors = [] if color_grid is not None else None
-
-    # Loop through every voxel in the grid
-    for z in range(N - 1):
-        for y in range(N - 1):
-            for x in range(N - 1):
-
-                # 5. Calculate the Case Index (0-255)
-                cube_index, corner_sdf = calculate_cube_index(x, y, z)
-                # cube_index indicates which corners are inside and outside
-                # corner_sdf contains the SDF values of the 8 corners to be used later in 
-                # interpolation
-
-                # EdgeMasks returns a 12-bit number where each bit corresponds to one of the
-                # 12 edges. If the bit is 1, the edge is intersected. If 0, the edge is not.
-                # Check the mask. If it's 0, the cube is empty, skip to the next loop
-                if EdgeMasks[cube_index] == 0:
-                    continue
-
-                # 6. Find the Edge Intersections
-                # For each of the 12 edges, check if it is intersected (bit is set)
-                # and interpolate the exact vertex position on that edge.
-                edge_vertices = [None] * 12  # one slot per edge
-                edge_mask = EdgeMasks[cube_index]
-
-                for edge_i in range(12):
-                    if edge_mask & (1 << edge_i): # if the edge is intersected
-                        c_a, c_b = EDGE_CORNERS[edge_i] # get the two corners of the edge
-                        val_a = corner_sdf[c_a]
-                        val_b = corner_sdf[c_b]
-                        vertex = interpolate_vertex(x, y, z, c_a, c_b, val_a, val_b) #apply linear interpolation
-                        edge_vertices[edge_i] = len(vertices) #edge_vertices shows the ID of the vertex
-                        vertices.append(vertex) # the actual vertex is stored in vertices
-
-                        # Interpolate color with the same t-factor as position
-                        if color_grid is not None:
-                            if abs(val_a - val_b) < 1e-10:
-                                t = 0.5
-                            else:
-                                t = val_a / (val_a - val_b)
-                            da = CORNER_OFFSETS[c_a]
-                            db = CORNER_OFFSETS[c_b]
-                            col_a = color_grid[x + da[0], y + da[1], z + da[2]]
-                            col_b = color_grid[x + db[0], y + db[1], z + db[2]]
-                            color = tuple(col_a[ch] + t * (col_b[ch] - col_a[ch]) for ch in range(3))
-                            vertex_colors.append(color)
-
-                # 7. Draw the Triangles
-                # Read edge indices from TriangleTable in groups of 3
-                tri_list = TriangleTable[cube_index]
-                i = 0
-                while i < len(tri_list) and tri_list[i] != -1:
-                    e0 = tri_list[i] # get the first edge index
-                    e1 = tri_list[i + 1] # get the second edge index
-                    e2 = tri_list[i + 2] # get the third edge index
-                    triangles.append((edge_vertices[e0], edge_vertices[e1], edge_vertices[e2])) #append the triangle
-                    i += 3 # move to the next triangle
-
-    # ============================================================================
-    # EXAMPLE: The relationship between `vertices` and `edge_vertices`
-    # ============================================================================
+    # =========================================================================
+    # CONCEPTUAL SUMMARY (same algorithm, vectorized execution):
     #
     # 1. THE WAREHOUSE (vertices):
-    # This is the global list of actual 3D coordinates for the whole model.
-    # Let's say it already has 50 points stored from previous cubes.
-    # vertices = [ (0.1, 0.5, 0.2), ... 49 more points ... ]
-    # Currently, len(vertices) == 50.
+    #    All vertex coordinates are computed in bulk by edge, then concatenated.
     #
-    # 2. THE STICKY NOTES (edge_vertices):
-    # This is a temporary list of 12 slots, wiped clean for every new cube.
-    # It links the 12 edges of THIS cube to the global warehouse IDs.
-    # edge_vertices = [None, None, None, None, None, None, ... ]
+    # 2. THE STICKY NOTES (edge_vertex_ids):
+    #    A (n_active, 12) array maps each active voxel's 12 edges to global
+    #    vertex IDs — replacing the per-voxel `edge_vertices = [None]*12`.
     #
     # 3. THE INTERSECTION (Interpolation):
-    # Our bitwise math finds the surface slices exactly through Edge 3.
-    # We calculate the exact physical 3D coordinate: new_point = (1.5, 2.0, 3.0)
+    #    For each edge, ALL intersected voxels are interpolated simultaneously
+    #    with vectorized NumPy ops (no per-voxel Python loop).
     #
-    # 4. THE HANDOFF:
-    # We write the next available ID (50) on the sticky note for Edge 3:
-    # edge_vertices[3] = 50  
-    # Then, we permanently store the coordinate in the warehouse:
-    # vertices.append((1.5, 2.0, 3.0))
-    #
-    # 5. DRAWING THE TRIANGLE:
-    # The TriangleTable blueprint says: "Connect Edge 3, Edge 8, and Edge 1."
-    # We check our sticky notes to find the actual warehouse IDs:
-    # ID_A = edge_vertices[3]  ---> 50
-    # ID_B = edge_vertices[8]  ---> 51 (calculated on a previous loop step)
-    # ID_C = edge_vertices[1]  ---> 52 (calculated on a previous loop step)
-    #
-    # We save the triangle using the global IDs:
-    # triangles.append((50, 51, 52))
-    # later, the OBJ file will read these IDs, get the vertices themselves from "vertices" and draw the triangle
-    # ============================================================================
+    # 4. DRAWING TRIANGLES:
+    #    We group voxels by cube_index and emit all triangles for each MC case
+    #    in one batch (256 iterations, not (N-1)³ iterations).
+    # =========================================================================
 
     return vertices, triangles, vertex_colors
 

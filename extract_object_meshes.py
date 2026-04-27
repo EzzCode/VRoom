@@ -1,11 +1,6 @@
 """
 Extract single-object meshes using semantic masks.
 
-Inputs required in the `inputs/` directory:
-- `cameras.json`: Camera intrinsics and extrinsics
-- `raw_depth/`: Directory containing raw depth maps
-- RGB images and Semantic masks: Used to colorize and isolate specific objects
-
 For each object label found in the semantic maps:
 1. Mask depth maps (zero out pixels that don't belong to this object)
 2. Unproject remaining pixels to 3D to find the object's bounding box
@@ -18,6 +13,7 @@ Output: objects/ folder with one OBJ per object label.
 import numpy as np
 import json
 import os
+import time
 from PIL import Image
 from generate_sdf import fuse_tsdf
 from marching_cubes import run_marching_cubes
@@ -102,7 +98,76 @@ for label_id in sorted_labels:
     print(f"  Label {label_id:3d}: {label_counts[label_id]:,} pixels")
 
 # ============================================================================
-# 4a. Helper: Auto-compute depth_trunc from actual depth data
+# 4a. Helper: Remove small disconnected mesh components
+# ============================================================================
+def remove_small_components(vertices, triangles, vertex_colors=None, min_ratio=0.05):
+    """Remove small disconnected mesh fragments.
+    
+    Uses union-find on triangle connectivity to find connected components,
+    then keeps only components with at least `min_ratio` of the largest
+    component's triangle count.
+    
+    Returns filtered (vertices, triangles, vertex_colors).
+    """
+    if len(triangles) == 0:
+        return vertices, triangles, vertex_colors
+    
+    tri_arr = np.array(triangles)
+    n_verts = len(vertices)
+    
+    # Union-Find
+    parent = np.arange(n_verts)
+    
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # path compression
+            x = parent[x]
+        return x
+    
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+    
+    # Connect vertices that share a triangle
+    for v0, v1, v2 in tri_arr:
+        union(v0, v1)
+        union(v1, v2)
+    
+    # Find component for each triangle (use first vertex's root)
+    tri_roots = np.array([find(t[0]) for t in tri_arr])
+    
+    # Count triangles per component
+    unique_roots, counts = np.unique(tri_roots, return_counts=True)
+    max_count = counts.max()
+    threshold = int(max_count * min_ratio)
+    
+    # Keep components above threshold
+    keep_roots = set(unique_roots[counts >= threshold])
+    keep_mask = np.array([r in keep_roots for r in tri_roots])
+    
+    kept_tris = tri_arr[keep_mask]
+    
+    # Remap vertices (only keep referenced ones)
+    used_verts = np.unique(kept_tris)
+    vert_map = np.full(n_verts, -1, dtype=int)
+    vert_map[used_verts] = np.arange(len(used_verts))
+    
+    new_vertices = [vertices[i] for i in used_verts]
+    new_triangles = [(vert_map[a], vert_map[b], vert_map[c]) for a, b, c in kept_tris]
+    
+    new_colors = None
+    if vertex_colors is not None:
+        new_colors = [vertex_colors[i] for i in used_verts]
+    
+    removed = len(triangles) - len(new_triangles)
+    if removed > 0:
+        print(f"  Cleanup: removed {removed} triangles in small components")
+    
+    return new_vertices, new_triangles, new_colors
+
+# ============================================================================
+# 4b. Helper: Auto-compute depth_trunc from actual depth data
 # ============================================================================
 def compute_depth_trunc(depth_maps, semantic_maps, label_id, percentile=99, margin=1.1):
     """Auto-compute depth_trunc from actual masked depth values for a given label.
@@ -230,7 +295,8 @@ for label_id in sorted_labels:
 
     # --- Step D: Run TSDF fusion ---
     print(f"  Fusing...")
-    fused_grid, fused_colors = fuse_tsdf(
+    t0 = time.time()
+    fused_grid, fused_colors, obs_count = fuse_tsdf(
         masked_depths, intrinsics_list, extrinsics_list,
         grid_shape=(N, N, N),
         voxel_size=voxel_size,
@@ -239,27 +305,48 @@ for label_id in sorted_labels:
         grid_origin=grid_min,
         depth_trunc=depth_trunc
     )
+    t1 = time.time()
+    print(f"  TSDF fusion: {t1 - t0:.2f}s")
+
+    # --- Step D2: Filter low-confidence voxels (removes flying pixels) ---
+    # Voxels seen by fewer than min_obs cameras are unreliable — set to +1 (outside)
+    # so Marching Cubes won't generate surfaces there.
+    min_obs = 2
+    low_conf_mask = obs_count < min_obs
+    n_removed = np.sum((fused_grid < 0) & low_conf_mask)
+    fused_grid[low_conf_mask] = 1.0
+    if fused_colors is not None:
+        fused_colors[low_conf_mask] = 0.0
+    print(f"  Confidence filter: removed {n_removed} low-confidence surface voxels (min_obs={min_obs})")
 
     # --- Step E: Run Marching Cubes ---
     print(f"  Marching Cubes...")
+    t2 = time.time()
     vertices, triangles, vertex_colors = run_marching_cubes(fused_grid, N, color_grid=fused_colors)
+    t3 = time.time()
     print(f"  Result: {len(vertices)} vertices, {len(triangles)} triangles")
+    print(f"  Marching Cubes: {t3 - t2:.2f}s")
 
     if len(triangles) == 0:
         print(f"  No mesh generated, skipping.")
         continue
 
-    # Scale to world coordinates
-    scaled_vertices = []
-    for vx, vy, vz in vertices:
-        wx = vx * voxel_size + grid_min[0]
-        wy = vy * voxel_size + grid_min[1]
-        wz = vz * voxel_size + grid_min[2]
-        scaled_vertices.append((wx, wy, wz))
+    # --- Step E2: Remove flying fragments ---
+    vertices, triangles, vertex_colors = remove_small_components(
+        vertices, triangles, vertex_colors, min_ratio=0.05
+    )
+    print(f"  After cleanup: {len(vertices)} vertices, {len(triangles)} triangles")
+
+    # Scale to world coordinates (vectorized)
+    verts_arr = np.array(vertices) * voxel_size + grid_min
+    scaled_vertices = [tuple(v) for v in verts_arr]
 
     # --- Step F: Export ---
+    t4 = time.time()
     ply_path = os.path.join(output_dir, f"object_{label_id:03d}.ply")
     export_ply_binary(scaled_vertices, triangles, ply_path, vertex_colors=vertex_colors)
+    t5 = time.time()
+    print(f"  PLY export: {t5 - t4:.2f}s")
     print(f"  Saved: {ply_path}")
 
 print(f"\n{'='*60}")
