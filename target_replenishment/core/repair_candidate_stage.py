@@ -37,6 +37,7 @@ from target_replenishment.core.repair_diagnostics import (
     _tensor_to_hwc_uint8,
     _json_float,
 )
+from target_replenishment.core.image_alignment import align_image_to_render_bbox
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,17 @@ def analyze_aligned_repair_candidates(
         rgb = _tensor_to_hwc_uint8(render_result.get("rgb"))
         height, width = alpha.shape
 
-        target_mask = _target_mask_from_rgb(view.get("rgb"), erode_px=target_mask_erode_px)
+        # Align the raw Zero123++ tile to the current-render bbox so the target
+        # mask lives in the same image-plane frame as the render. Without this,
+        # the Zero123 tile is in its own canonical pose/scale/resolution and any
+        # mask diff against the render mixes content from different frames.
+        target_rgb_raw = view.get("rgb")
+        target_rgb_aligned, align_dx, align_dy, align_scale = _prepare_aligned_target_rgb(
+            target_rgb_raw, rgb,
+        )
+        target_mask = _target_mask_from_rgb(
+            target_rgb_aligned, erode_px=target_mask_erode_px,
+        )
         if target_mask.shape != (height, width):
             target_mask = cv2.resize(
                 target_mask.astype(np.uint8),
@@ -218,6 +229,16 @@ def analyze_aligned_repair_candidates(
             "azimuth_offset_deg": _json_float(cam_data.get("azimuth_offset_deg")),
             "elevation_offset_deg": _json_float(cam_data.get("elevation_offset_deg")),
             "image_size_hw": [int(height), int(width)],
+            "alignment": {
+                "dx_px": float(align_dx),
+                "dy_px": float(align_dy),
+                "scale": float(align_scale),
+                "raw_size_hw": (
+                    [int(target_rgb_raw.shape[0]), int(target_rgb_raw.shape[1])]
+                    if target_rgb_raw is not None and hasattr(target_rgb_raw, "shape")
+                    else None
+                ),
+            },
             "target_area_px": int(target_area),
             "render_area_px": int(render_area),
             "target_render_iou": float(target_render_iou),
@@ -239,6 +260,7 @@ def analyze_aligned_repair_candidates(
                 prefix,
                 rgb=rgb,
                 alpha=alpha,
+                target_rgb=target_rgb_aligned,
                 target_mask=target_mask,
                 render_mask=render_mask,
                 outside_mask=outside_mask,
@@ -279,6 +301,41 @@ def analyze_aligned_repair_candidates(
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers (private)
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _prepare_aligned_target_rgb(target_rgb, render_rgb_uint8: np.ndarray):
+    """Align Zero123++ tile to the current-render bbox.
+
+    Zero123 tiles arrive in their own canonical frame (and often a different
+    resolution, e.g. 320x320), so a raw mask diff against a 512x512 render is
+    incoherent. We resize the tile to the render resolution and bbox-align it,
+    rejecting wildly out-of-range scale corrections (e.g. when the render is
+    empty pre-seeding).
+
+    Returns ``(aligned_rgb_uint8, dx, dy, scale)`` with the original (resized)
+    image returned unchanged when alignment fails or is implausible.
+    """
+    if target_rgb is None:
+        return render_rgb_uint8.copy(), 0.0, 0.0, 1.0
+    arr = np.asarray(target_rgb)
+    if arr.ndim != 3 or arr.shape[-1] != 3:
+        return render_rgb_uint8.copy(), 0.0, 0.0, 1.0
+    target_u8 = arr if arr.dtype == np.uint8 else (
+        np.clip(arr.astype(np.float32), 0.0, 1.0) * 255.0
+    ).astype(np.uint8)
+    rh, rw = render_rgb_uint8.shape[:2]
+    if target_u8.shape[:2] != (rh, rw):
+        target_u8 = cv2.resize(target_u8, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    try:
+        aligned, dx, dy, scale = align_image_to_render_bbox(
+            target_u8, render_rgb_uint8,
+            bg_color=(255, 255, 255), return_diag=True,
+        )
+    except Exception:
+        return target_u8, 0.0, 0.0, 1.0
+    if not (0.25 <= float(scale) <= 4.0):
+        return target_u8, 0.0, 0.0, 1.0
+    return aligned, float(dx), float(dy), float(scale)
 
 
 def _dilate_mask(mask: np.ndarray, radius_px: int) -> np.ndarray:
@@ -410,6 +467,7 @@ def _save_debug_images(
     prefix: Path,
     rgb: np.ndarray,
     alpha: np.ndarray,
+    target_rgb: np.ndarray,
     target_mask: np.ndarray,
     render_mask: np.ndarray,
     outside_mask: np.ndarray,
@@ -421,6 +479,16 @@ def _save_debug_images(
         str(prefix.with_name(prefix.name + "_render.png")),
         cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
     )
+    if target_rgb is not None and getattr(target_rgb, "ndim", 0) == 3:
+        target_rgb_u8 = target_rgb if target_rgb.dtype == np.uint8 else (
+            np.clip(target_rgb.astype(np.float32), 0.0, 1.0) * 255.0
+        ).astype(np.uint8)
+        if target_rgb_u8.shape[:2] != rgb.shape[:2]:
+            target_rgb_u8 = cv2.resize(target_rgb_u8, (rgb.shape[1], rgb.shape[0]))
+        cv2.imwrite(
+            str(prefix.with_name(prefix.name + "_target_rgb_aligned.png")),
+            cv2.cvtColor(target_rgb_u8, cv2.COLOR_RGB2BGR),
+        )
     cv2.imwrite(
         str(prefix.with_name(prefix.name + "_alpha.png")),
         (np.clip(alpha, 0.0, 1.0) * 255.0).astype(np.uint8),
