@@ -86,6 +86,13 @@ def run_replenishment(
     repair_diagnostics: bool = False,
     repair_diagnostics_only: bool = False,
     repair_diag_alpha_threshold: float = 0.03,
+    repair_filter_supervision: bool = True,
+    repair_filter_min_trust: float = 0.45,
+    repair_filter_max_outside_alpha: float = 0.20,
+    repair_filter_max_missing_ratio: float = 0.55,
+    repair_filter_min_target_iou: float = 0.30,
+    repair_filter_min_views: int = 2,
+    repair_filter_allow_inspect_prior: bool = True,
     azimuth_sign: int = -1,
     elevation_sign: int = 1,
 ):
@@ -354,7 +361,9 @@ def run_replenishment(
             logger.warning(f"No views to use for object {obj_id}. Skipping.")
             continue
 
+        raw_supervision_count = len(supervision_views)
         repair_diag_result = {}
+        repair_filter_result = {}
         if repair_diagnostics or repair_diagnostics_only:
             logger.info("Running read-only repair diagnostics before seeding/fine-tune...")
             repair_diag_result = analyze_repair_candidates(
@@ -385,6 +394,45 @@ def run_replenishment(
                     json.dump(results[obj_id], f, indent=2)
                 logger.info("Object %d diagnostic-only complete; skipping seeding and optimization.", int(obj_id))
                 continue
+
+            if repair_filter_supervision:
+                supervision_views, repair_filter_result = _filter_supervision_by_repair_diagnostics(
+                    supervision_views,
+                    repair_diag_result,
+                    min_trust=float(repair_filter_min_trust),
+                    max_outside_alpha_ratio=float(repair_filter_max_outside_alpha),
+                    max_missing_ratio=float(repair_filter_max_missing_ratio),
+                    min_target_render_iou=float(repair_filter_min_target_iou),
+                    min_kept_views=int(repair_filter_min_views),
+                    allow_inspect_prior=bool(repair_filter_allow_inspect_prior),
+                )
+                with open(obj_dir / "repair_filter.json", "w", encoding="utf-8") as f:
+                    json.dump(repair_filter_result, f, indent=2)
+                logger.info(
+                    "Repair diagnostic filter kept %d/%d supervision views: %s",
+                    len(supervision_views),
+                    raw_supervision_count,
+                    repair_filter_result.get('kept_view_indices', []),
+                )
+                if not supervision_views:
+                    results[obj_id] = {
+                        'diagnostic_only': False,
+                        'skipped_reason': 'repair_filter_rejected_all_supervision_views',
+                        'n_gap_bins': len(coverage.gap_azimuths),
+                        'n_generated_views': len(novel_views),
+                        'n_aligned_views': len(aligned_cameras),
+                        'n_supervision_views_raw': int(raw_supervision_count),
+                        'n_supervision_views': 0,
+                        'repair_diagnostics': repair_diag_result,
+                        'repair_filter': repair_filter_result,
+                    }
+                    with open(obj_dir / "replenishment_summary.json", "w", encoding="utf-8") as f:
+                        json.dump(results[obj_id], f, indent=2)
+                    logger.warning(
+                        "Object %d skipped because repair diagnostics rejected every supervision view.",
+                        int(obj_id),
+                    )
+                    continue
 
         # Real-view preservation cameras from training data to avoid degrading seen sides.
         preservation_cameras = []
@@ -640,6 +688,29 @@ def run_replenishment(
             save_path=str(obj_dir / "model"),
             reference_model_path=model_path,
         )
+
+        if not opt_result.get('loss_history'):
+            results[obj_id] = {
+                'diagnostic_only': False,
+                'skipped_reason': 'optimizer_produced_no_training_steps',
+                'n_gap_bins': len(coverage.gap_azimuths),
+                'n_generated_views': len(novel_views),
+                'n_aligned_views': len(aligned_cameras),
+                'n_supervision_views_raw': int(raw_supervision_count),
+                'n_supervision_views': len(supervision_views),
+                'n_seeded_anchors': int(n_seeded),
+                'repair_diagnostics': repair_diag_result,
+                'repair_filter': repair_filter_result,
+                'optimizer_result': opt_result,
+            }
+            with open(obj_dir / "replenishment_summary.json", "w", encoding="utf-8") as f:
+                json.dump(results[obj_id], f, indent=2)
+            logger.warning(
+                "Object %d skipped final export because optimizer produced no training steps.",
+                int(obj_id),
+            )
+            continue
+
         model_was_mutated = True
 
         final_seed_gate_stats = {}
@@ -747,7 +818,9 @@ def run_replenishment(
             'seeded_opacity_lifts': seeded_opacity_lifts,
             'seed_visual_hull_stats': seed_visual_hull_stats,
         }
-        with open(obj_dir / "model" / "replenishment.json", "w", encoding="utf-8") as f:
+        model_dir = obj_dir / "model"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        with open(model_dir / "replenishment.json", "w", encoding="utf-8") as f:
             json.dump(rep_payload, f, indent=2)
         final_rep_payload = rep_payload
 
@@ -769,6 +842,7 @@ def run_replenishment(
             'n_gap_bins': len(coverage.gap_azimuths),
             'n_generated_views': len(novel_views),
             'n_aligned_views': len(aligned_cameras),
+            'n_supervision_views_raw': int(raw_supervision_count),
             'n_supervision_views': len(supervision_views),
             'n_seeded_anchors': int(n_seeded),
             'final_loss': opt_result['final_loss'],
@@ -813,6 +887,7 @@ def run_replenishment(
             'seed_opacity_accept_threshold': float(seed_opacity_accept_threshold),
             'seed_visual_hull_stats': seed_visual_hull_stats,
             'repair_diagnostics': repair_diag_result,
+            'repair_filter': repair_filter_result,
             'comparison': compare_summary,
         }
 
@@ -867,6 +942,121 @@ def run_replenishment(
         json.dump(results, f, indent=2)
 
     return results
+
+
+def _filter_supervision_by_repair_diagnostics(
+    supervision_views: list,
+    repair_diag_result: dict,
+    min_trust: float = 0.45,
+    max_outside_alpha_ratio: float = 0.20,
+    max_missing_ratio: float = 0.55,
+    min_target_render_iou: float = 0.30,
+    min_kept_views: int = 2,
+    allow_inspect_prior: bool = True,
+):
+    """Keep only candidate views that passed read-only repair diagnostics.
+
+    The filter is intentionally conservative: views flagged as floaters or
+    rejected priors are not allowed to drive seeding/optimization. Kept views
+    are reweighted by their trust score so marginal priors contribute less.
+    """
+    view_scores = repair_diag_result.get('view_scores', []) if repair_diag_result else []
+    scores_by_index = {
+        int(score.get('view_index')): score
+        for score in view_scores
+        if score.get('view_index') is not None
+    }
+
+    kept_views = []
+    kept_entries = []
+    rejected_entries = []
+
+    for idx, view in enumerate(supervision_views):
+        score = scores_by_index.get(idx)
+        if score is None:
+            rejected_entries.append({
+                'view_index': int(idx),
+                'reason': 'missing_repair_diagnostic_score',
+            })
+            continue
+
+        recommendation = str(score.get('recommendation', ''))
+        trust_score = float(score.get('trust_score', 0.0))
+        outside_alpha_ratio = float(score.get('outside_alpha_ratio', 1.0))
+        missing_ratio = float(score.get('missing_ratio', 1.0))
+        target_render_iou = float(score.get('target_render_iou', 0.0))
+
+        metric_ok = (
+            trust_score >= float(min_trust)
+            and outside_alpha_ratio <= float(max_outside_alpha_ratio)
+            and missing_ratio <= float(max_missing_ratio)
+            and target_render_iou >= float(min_target_render_iou)
+        )
+        keep = recommendation == 'usable_prior' and metric_ok
+        if allow_inspect_prior and recommendation == 'inspect_prior':
+            keep = metric_ok
+
+        entry = {
+            'view_index': int(idx),
+            'azimuth_offset_deg': score.get('azimuth_offset_deg'),
+            'elevation_offset_deg': score.get('elevation_offset_deg'),
+            'recommendation': recommendation,
+            'trust_score': trust_score,
+            'outside_alpha_ratio': outside_alpha_ratio,
+            'missing_ratio': missing_ratio,
+            'target_render_iou': target_render_iou,
+        }
+
+        if keep:
+            filtered_view = dict(view)
+            original_weight = float(filtered_view.get('weight', 1.0))
+            filtered_view['weight'] = original_weight * max(trust_score, 1e-3)
+            filtered_view['repair_diagnostic'] = entry
+            entry['original_weight'] = original_weight
+            entry['filtered_weight'] = float(filtered_view['weight'])
+            kept_views.append(filtered_view)
+            kept_entries.append(entry)
+        else:
+            if recommendation in {'inspect_floaters', 'reject_prior'}:
+                reason = recommendation
+            elif trust_score < float(min_trust):
+                reason = 'below_min_trust'
+            elif outside_alpha_ratio > float(max_outside_alpha_ratio):
+                reason = 'above_max_outside_alpha'
+            elif missing_ratio > float(max_missing_ratio):
+                reason = 'above_max_missing_ratio'
+            elif target_render_iou < float(min_target_render_iou):
+                reason = 'below_min_target_render_iou'
+            else:
+                reason = 'not_allowed_by_filter'
+            entry['reason'] = reason
+            rejected_entries.append(entry)
+
+    min_kept_views = max(0, int(min_kept_views))
+    if len(kept_views) < min_kept_views:
+        for entry in kept_entries:
+            rejected = dict(entry)
+            rejected['reason'] = 'below_min_filtered_view_count'
+            rejected_entries.append(rejected)
+        kept_views = []
+        kept_entries = []
+
+    filter_result = {
+        'enabled': True,
+        'raw_view_count': int(len(supervision_views)),
+        'kept_view_count': int(len(kept_views)),
+        'rejected_view_count': int(len(rejected_entries)),
+        'min_trust': float(min_trust),
+        'max_outside_alpha_ratio': float(max_outside_alpha_ratio),
+        'max_missing_ratio': float(max_missing_ratio),
+        'min_target_render_iou': float(min_target_render_iou),
+        'min_kept_views': int(min_kept_views),
+        'allow_inspect_prior': bool(allow_inspect_prior),
+        'kept_view_indices': [int(entry['view_index']) for entry in kept_entries],
+        'kept_views': kept_entries,
+        'rejected_views': rejected_entries,
+    }
+    return kept_views, filter_result
 
 
 def _save_image(img: np.ndarray, path: Path):
@@ -1260,6 +1450,20 @@ def main():
                         help="Run repair diagnostics and skip seeding/fine-tune/model mutation")
     parser.add_argument("--repair_diag_alpha_threshold", type=float, default=0.03,
                         help="Rendered alpha threshold used by repair diagnostics")
+    parser.add_argument("--no_repair_filter_supervision", action="store_true",
+                        help="Do not use repair diagnostics to filter Zero123++ supervision views")
+    parser.add_argument("--repair_filter_min_trust", type=float, default=0.45,
+                        help="Minimum diagnostic trust score for inspect_prior views to drive optimization")
+    parser.add_argument("--repair_filter_max_outside_alpha", type=float, default=0.20,
+                        help="Maximum outside-alpha ratio for inspect_prior views to drive optimization")
+    parser.add_argument("--repair_filter_max_missing_ratio", type=float, default=0.55,
+                        help="Maximum target-mask missing ratio allowed for views to drive optimization")
+    parser.add_argument("--repair_filter_min_target_iou", type=float, default=0.30,
+                        help="Minimum target/render IoU allowed for views to drive optimization")
+    parser.add_argument("--repair_filter_min_views", type=int, default=2,
+                        help="Minimum number of accepted diagnostic views required before mutating the model")
+    parser.add_argument("--no_repair_filter_inspect_prior", action="store_true",
+                        help="Only allow usable_prior views through the repair diagnostic filter")
     parser.add_argument("--azimuth_sign", type=int, choices=[-1, 1], default=-1,
                         help="Azimuth rotation sign for novel cameras. Default -1 matches Zero123++ v1.2 convention.")
     parser.add_argument("--elevation_sign", type=int, choices=[-1, 1], default=1,
@@ -1318,6 +1522,13 @@ def main():
         repair_diagnostics=args.repair_diagnostics,
         repair_diagnostics_only=args.repair_diagnostics_only,
         repair_diag_alpha_threshold=args.repair_diag_alpha_threshold,
+        repair_filter_supervision=not args.no_repair_filter_supervision,
+        repair_filter_min_trust=args.repair_filter_min_trust,
+        repair_filter_max_outside_alpha=args.repair_filter_max_outside_alpha,
+        repair_filter_max_missing_ratio=args.repair_filter_max_missing_ratio,
+        repair_filter_min_target_iou=args.repair_filter_min_target_iou,
+        repair_filter_min_views=args.repair_filter_min_views,
+        repair_filter_allow_inspect_prior=not args.no_repair_filter_inspect_prior,
         azimuth_sign=args.azimuth_sign,
         elevation_sign=args.elevation_sign,
     )
