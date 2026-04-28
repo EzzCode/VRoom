@@ -173,6 +173,9 @@ def generate_novel_views(
     alpha_mask: np.ndarray = None,
     num_inference_steps: int = 75,
     seed: int = 42,
+    input_alpha_threshold: float = 0.30,
+    input_crop_margin_frac: float = 0.08,
+    input_fill_ratio: float = 0.78,
 ) -> list:
     """Generate 6 novel views from a single object image using Zero123++.
 
@@ -183,6 +186,9 @@ def generate_novel_views(
                     Used to composite on white background.
         num_inference_steps: Diffusion steps (default 75 for quality).
         seed: Random seed.
+        input_alpha_threshold: Alpha threshold used to build the foreground mask.
+        input_crop_margin_frac: Crop margin around the foreground bbox.
+        input_fill_ratio: Fraction of the canvas occupied by the centered object.
 
     Returns:
         List of 6 dicts:
@@ -191,7 +197,13 @@ def generate_novel_views(
     """
     import torch
 
-    prepared = _prepare_input(input_image, alpha_mask)
+    prepared = _prepare_input(
+        input_image,
+        alpha_mask,
+        alpha_threshold=float(input_alpha_threshold),
+        crop_margin_frac=float(input_crop_margin_frac),
+        fill_ratio=float(input_fill_ratio),
+    )
     input_pil = Image.fromarray(prepared)
 
     logger.info(f"Running Zero123++ inference ({num_inference_steps} steps)...")
@@ -219,6 +231,9 @@ def _prepare_input(
     image: np.ndarray,
     alpha: np.ndarray = None,
     target_size: int = 320,
+    alpha_threshold: float = 0.30,
+    crop_margin_frac: float = 0.08,
+    fill_ratio: float = 0.78,
 ) -> np.ndarray:
     """Composite on white bg and resize.
 
@@ -237,7 +252,11 @@ def _prepare_input(
         # Higher threshold (was 0.05) to drop semi-transparent shells that
         # leave grey halos around the object — Zero123++ interprets them as
         # near-background colour and bakes the grey into its outputs.
-        fg_mask = _largest_component_mask(alpha_2d > 0.30, min_pixels=64)
+        alpha_threshold = float(np.clip(alpha_threshold, 0.01, 0.99))
+        crop_margin_frac = float(np.clip(crop_margin_frac, 0.0, 0.50))
+        fill_ratio = float(np.clip(fill_ratio, 0.10, 0.95))
+
+        fg_mask = _largest_component_mask(alpha_2d > alpha_threshold, min_pixels=64)
         # Hard-binarize alpha INSIDE the kept fg mask so semi-transparent
         # edges become opaque (any non-zero alpha → 1.0). This makes the
         # composite look like a clean cutout, not a soft alpha matte.
@@ -252,7 +271,7 @@ def _prepare_input(
             ys, xs = np.where(fg_mask)
             y0, y1 = ys.min(), ys.max() + 1
             x0, x1 = xs.min(), xs.max() + 1
-            margin = int(round(0.08 * max(H, W)))
+            margin = int(round(crop_margin_frac * max(H, W)))
             y0 = max(0, y0 - margin)
             y1 = min(H, y1 + margin)
             x0 = max(0, x0 - margin)
@@ -265,7 +284,7 @@ def _prepare_input(
                 crop_rgb,
                 crop_mask,
                 canvas_size=canvas_size,
-                fill_ratio=0.78,
+                fill_ratio=fill_ratio,
             )
     else:
         composited = image.copy()
@@ -275,7 +294,10 @@ def _prepare_input(
     pil = PILImage.fromarray(composited)
     resized = pil.resize((target_size, target_size), PILImage.LANCZOS)
 
-    logger.info(f"Input prepared: {W}x{H} → {target_size}x{target_size}")
+    logger.info(
+        "Input prepared: %dx%d -> %dx%d (alpha_thresh=%.2f, margin=%.3f, fill=%.2f)",
+        W, H, target_size, target_size, alpha_threshold, crop_margin_frac, fill_ratio,
+    )
     return np.array(resized)
 
 
