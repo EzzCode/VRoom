@@ -73,6 +73,7 @@ REQUIRED_SAM_MANIFEST_FIELDS = {"model_name", "model_version", "input_space", "m
 VALID_TRACKING_STATES = {"normal", "tracking", "tracking_ok", "ok"}
 MAX_POSITION_JUMP_METERS = 1.5
 MAX_ROTATION_JUMP_DEGREES = 75.0
+MAX_VELOCITY_MPS = 3.0  # m/s – fast walking speed; filters teleportation, not walking
 
 
 @dataclass(frozen=True)
@@ -262,7 +263,7 @@ def load_metric_bundle(bundle_root: str | Path) -> MetricBundle:
     warnings: list[str] = []
     rejected: list[str] = []
     valid: list[str] = []
-    previous_pose: FramePoseRecord | None = None
+    previous_sequential_pose: FramePoseRecord | None = None
     previous_dt: int | None = None
 
     for frame_id in frame_ids:
@@ -290,26 +291,34 @@ def load_metric_bundle(bundle_root: str | Path) -> MetricBundle:
         reject_reason = None
         if tracking_state not in VALID_TRACKING_STATES:
             reject_reason = f"tracking_state={tracking_state}"
-        elif previous_pose is not None:
-            dt = poses_records[frame_id].timestamp_ns - previous_pose.timestamp_ns
+        elif previous_sequential_pose is not None:
+            # Compare against the *sequential* predecessor (not last valid)
+            # to avoid cascading rejections when the user walks around the object.
+            dt = poses_records[frame_id].timestamp_ns - previous_sequential_pose.timestamp_ns
             if dt <= 0:
                 raise ValueError(f"Non-monotonic timestamps detected at frame_id={frame_id}.")
-            position_jump = float(np.linalg.norm(
-                poses_records[frame_id].camera_to_world[:3, 3] - previous_pose.camera_to_world[:3, 3]
+            dt_seconds = dt / 1e9
+            position_delta = float(np.linalg.norm(
+                poses_records[frame_id].camera_to_world[:3, 3] - previous_sequential_pose.camera_to_world[:3, 3]
             ))
+            velocity = position_delta / max(dt_seconds, 1e-6)
             rotation_jump = _rotation_angle_degrees(
-                previous_pose.camera_to_world[:3, :3],
+                previous_sequential_pose.camera_to_world[:3, :3],
                 poses_records[frame_id].camera_to_world[:3, :3],
             )
             if previous_dt is not None and dt > previous_dt * 5:
                 warnings.append(f"Large timestamp gap before frame_id={frame_id}: {dt} ns")
-            if position_jump > MAX_POSITION_JUMP_METERS:
-                reject_reason = f"pose_jump_m={position_jump:.3f}"
+            if velocity > MAX_VELOCITY_MPS:
+                reject_reason = f"velocity={velocity:.1f}m/s (delta={position_delta:.3f}m, dt={dt_seconds:.3f}s)"
             elif rotation_jump > MAX_ROTATION_JUMP_DEGREES:
                 reject_reason = f"pose_jump_deg={rotation_jump:.3f}"
             previous_dt = dt
         else:
             previous_dt = None
+
+        # Always advance the sequential anchor so that the next frame is
+        # compared against its immediate predecessor regardless of rejection.
+        previous_sequential_pose = poses_records[frame_id]
 
         if reject_reason is not None:
             warnings.append(f"Rejecting frame_id={frame_id}: {reject_reason}")
@@ -317,7 +326,6 @@ def load_metric_bundle(bundle_root: str | Path) -> MetricBundle:
             continue
 
         valid.append(frame_id)
-        previous_pose = poses_records[frame_id]
 
     if not valid:
         raise ValueError("No valid frames remain after metric bundle validation.")
