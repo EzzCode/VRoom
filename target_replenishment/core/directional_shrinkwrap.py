@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from scipy.ndimage import binary_closing, binary_fill_holes, gaussian_filter, label
+from scipy.ndimage import binary_closing, binary_fill_holes, binary_opening, gaussian_filter, label
 from scipy.spatial import cKDTree
 
 
@@ -152,8 +152,8 @@ def _fill_small_holes(mask: np.ndarray, max_hole_cells: int) -> np.ndarray:
 def _build_wall_mask(
     occupancy: np.ndarray,
     close_iters: int,
-    max_hole_area_frac: float = 0.01,
-    max_hole_cells: int = 256,
+    max_hole_area_frac: float = 0.003,
+    max_hole_cells: int = 64,
 ) -> np.ndarray:
     """Close tiny silhouette cracks while preserving broad couch-seat voids."""
     wall = occupancy.copy()
@@ -235,20 +235,42 @@ def _camera_support(
     return float((dirs @ normal > 0.0).mean())
 
 
-def _filled_depth_map(side: SideScanResult, smooth_iters: int) -> tuple[np.ndarray, np.ndarray]:
+def _filled_depth_map(
+    side: SideScanResult,
+    smooth_iters: int,
+    max_fill_cells: float = 1.5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Local-fill mode: occupied cells + cells within ``max_fill_cells`` of
+    an occupied cell. Prevents bridging wide concave gaps.
+    """
     depth = side.outer_depth.copy()
     depth_filled = depth.copy()
-    mask = side.occupancy_filled & np.isfinite(depth_filled)
-    if side.occupancy_filled.sum() > side.occupancy.sum():
-        occ_idx = np.argwhere(side.occupancy)
-        if occ_idx.size:
-            tree = cKDTree(occ_idx.astype(np.float32))
-            fill_idx = np.argwhere(side.occupancy_filled & ~side.occupancy)
-            if fill_idx.size:
-                _, nn = tree.query(fill_idx.astype(np.float32), k=1)
-                src = occ_idx[nn]
-                depth_filled[fill_idx[:, 0], fill_idx[:, 1]] = depth[src[:, 0], src[:, 1]]
-        mask = side.occupancy_filled & np.isfinite(depth_filled)
+    occ_idx = np.argwhere(side.occupancy)
+    if occ_idx.size == 0:
+        empty_mask = np.zeros_like(side.occupancy, dtype=bool)
+        return depth_filled, empty_mask
+
+    fill_mask = side.occupancy_filled & ~side.occupancy
+    if fill_mask.any():
+        tree = cKDTree(occ_idx.astype(np.float32))
+        fill_idx = np.argwhere(fill_mask)
+        dists, nn = tree.query(fill_idx.astype(np.float32), k=1)
+        within = dists <= float(max_fill_cells)
+        if within.any():
+            src = occ_idx[nn[within]]
+            tgt = fill_idx[within]
+            depth_filled[tgt[:, 0], tgt[:, 1]] = depth[src[:, 0], src[:, 1]]
+        # Cells beyond the local-fill radius are dropped so the mask stops
+        # at small cracks and never bridges large concave gaps.
+        if (~within).any():
+            far = fill_idx[~within]
+            close_mask = side.occupancy_filled.copy()
+            close_mask[far[:, 0], far[:, 1]] = False
+            mask = close_mask & np.isfinite(depth_filled)
+        else:
+            mask = side.occupancy_filled & np.isfinite(depth_filled)
+    else:
+        mask = side.occupancy & np.isfinite(depth_filled)
 
     if smooth_iters > 0 and mask.any():
         sigma = max(0.4, float(smooth_iters) * 0.75)
@@ -260,6 +282,211 @@ def _filled_depth_map(side: SideScanResult, smooth_iters: int) -> tuple[np.ndarr
         depth_filled[mask] = smooth[mask]
 
     return depth_filled, mask
+
+
+def _smooth_depth_on_mask(
+    depth_filled: np.ndarray,
+    mask: np.ndarray,
+    smooth_iters: int,
+) -> np.ndarray:
+    if smooth_iters <= 0 or not mask.any():
+        return depth_filled
+    sigma = max(0.4, float(smooth_iters) * 0.75)
+    weights = mask.astype(np.float32)
+    values = np.where(mask, depth_filled, 0.0).astype(np.float32)
+    smooth_values = gaussian_filter(values, sigma=sigma, mode="nearest")
+    smooth_weights = gaussian_filter(weights, sigma=sigma, mode="nearest")
+    smooth = smooth_values / np.maximum(smooth_weights, 1e-6)
+    out = depth_filled.copy()
+    out[mask] = smooth[mask]
+    return out
+
+
+def _silhouette_mask(occupancy: np.ndarray) -> np.ndarray:
+    """Row+column convex closure of a 2D occupancy grid.
+
+    For each row, mark every cell between the leftmost and rightmost True;
+    same per column. Their AND is a non-strict convex hull of the silhouette
+    that fills missing-back-side gaps without bridging spurious holes that
+    are open on at least one axis.
+    """
+    if not occupancy.any():
+        return occupancy.copy()
+    nu, nv = occupancy.shape
+    row_fill = np.zeros_like(occupancy)
+    col_fill = np.zeros_like(occupancy)
+    rows_any = occupancy.any(axis=1)
+    cols_any = occupancy.any(axis=0)
+    if rows_any.any():
+        for i in np.where(rows_any)[0]:
+            cols = np.where(occupancy[i])[0]
+            row_fill[i, cols.min():cols.max() + 1] = True
+    if cols_any.any():
+        for j in np.where(cols_any)[0]:
+            rows = np.where(occupancy[:, j])[0]
+            col_fill[rows.min():rows.max() + 1, j] = True
+    return row_fill & col_fill
+
+
+def _silhouette_depth_map(
+    side: SideScanResult,
+    smooth_iters: int,
+    far_percentile: float = 90.0,
+    seam_blend_cells: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Silhouette-fill mode: extend mask to row/col convex closure of the
+    side's occupancy. Cells inside the silhouette but without survivors get
+    a single far-extent depth (``far_percentile`` of the occupied depths).
+    Used to seed missing back/front faces with no survivors of their own.
+    """
+    depth = side.outer_depth.copy()
+    if not side.occupancy.any():
+        empty = np.zeros_like(side.occupancy, dtype=bool)
+        return depth, empty
+
+    mask_full = _silhouette_mask(side.occupancy)
+    far_depth = float(np.percentile(depth[side.occupancy], far_percentile))
+
+    depth_filled = depth.copy()
+    fill_only = mask_full & ~side.occupancy
+    if fill_only.any():
+        fill_idx = np.argwhere(fill_only)
+        occ_idx = np.argwhere(side.occupancy)
+        if occ_idx.size:
+            tree = cKDTree(occ_idx.astype(np.float32))
+            d_grid, nn = tree.query(fill_idx.astype(np.float32), k=1)
+            src = occ_idx[nn]
+            near = d_grid <= float(seam_blend_cells)
+            if near.any():
+                depth_filled[fill_idx[near, 0], fill_idx[near, 1]] = depth[src[near, 0], src[near, 1]]
+            if (~near).any():
+                far_idx = fill_idx[~near]
+                depth_filled[far_idx[:, 0], far_idx[:, 1]] = far_depth
+        else:
+            depth_filled[fill_only] = far_depth
+
+    if smooth_iters > 0 and mask_full.any():
+        sigma = max(0.4, float(smooth_iters) * 0.75)
+        weights = mask_full.astype(np.float32)
+        values = np.where(mask_full, depth_filled, 0.0).astype(np.float32)
+        sv = gaussian_filter(values, sigma=sigma, mode="nearest")
+        sw = gaussian_filter(weights, sigma=sigma, mode="nearest")
+        smooth = sv / np.maximum(sw, 1e-6)
+        depth_filled[mask_full] = smooth[mask_full]
+
+    return depth_filled, mask_full
+
+
+def _remove_small_mask_components(mask: np.ndarray, min_cells: int) -> np.ndarray:
+    if not mask.any() or int(min_cells) <= 1:
+        return mask
+    comp, n_comp = label(mask)
+    if n_comp <= 1:
+        return mask
+    sizes = np.bincount(comp.reshape(-1), minlength=n_comp + 1)
+    keep_ids = np.where(sizes >= int(min_cells))[0]
+    keep_ids = keep_ids[keep_ids != 0]
+    if keep_ids.size == 0:
+        keep_ids = np.array([int(np.argmax(sizes[1:]) + 1)], dtype=np.int64)
+    return np.isin(comp, keep_ids)
+
+
+def _cleanup_seed_mask_edges(
+    mask: np.ndarray,
+    min_component_cells: int,
+    opening_iters: int,
+) -> np.ndarray:
+    if not mask.any():
+        return mask
+    cleaned = mask.copy()
+    if opening_iters > 0:
+        struct = np.ones((3, 3), dtype=bool)
+        cleaned = binary_opening(cleaned, structure=struct, iterations=int(opening_iters))
+        if not cleaned.any():
+            cleaned = mask.copy()
+    cleaned = _remove_small_mask_components(cleaned, int(min_component_cells))
+    return cleaned
+
+
+def _align_vertical_side_to_base_line(
+    side: SideScanResult,
+    center: np.ndarray,
+    depth_filled: np.ndarray,
+    seed_mask: np.ndarray,
+    scene_up_unit: np.ndarray,
+    base_signed: float,
+    max_extend_cells: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extend a vertical side sheet down to a shared object-base line.
+
+    This is deliberately different from floor filling: it only grows the
+    front/back/side wall masks along their vertical tangent axis, so it creates
+    vertical couch-side surface instead of a horizontal slab under the couch.
+    """
+    if not seed_mask.any():
+        return depth_filled, seed_mask
+
+    n_up = float(np.dot(side.normal, scene_up_unit))
+    if abs(n_up) > 0.35:
+        return depth_filled, seed_mask
+
+    tu_up = float(np.dot(side.tangent_u, scene_up_unit))
+    tv_up = float(np.dot(side.tangent_v, scene_up_unit))
+    if max(abs(tu_up), abs(tv_up)) < 0.35:
+        return depth_filled, seed_mask
+
+    vertical_axis = 0 if abs(tu_up) >= abs(tv_up) else 1
+    vertical_up = tu_up if vertical_axis == 0 else tv_up
+    other_up = tv_up if vertical_axis == 0 else tu_up
+    if abs(vertical_up) < 1e-6:
+        return depth_filled, seed_mask
+
+    nu, nv = seed_mask.shape
+    out_mask = seed_mask.copy()
+    out_depth = depth_filled.copy()
+    center_h = float(np.dot(center, scene_up_unit))
+    max_cells = max(0, int(round(float(max_extend_cells))))
+    if max_cells == 0:
+        return out_depth, out_mask
+
+    if vertical_axis == 0:
+        for j in np.where(seed_mask.any(axis=0))[0]:
+            rows = np.where(seed_mask[:, j])[0]
+            if rows.size == 0:
+                continue
+            v_coord = side.grid_origin_uv[1] + (float(j) + 0.5) * side.cell_size
+            u_base = (float(base_signed) - center_h - v_coord * other_up) / vertical_up
+            base_i = int(np.floor((u_base - side.grid_origin_uv[0]) / side.cell_size))
+            base_i = int(np.clip(base_i, 0, nu - 1))
+            edge_i = int(rows.min() if vertical_up > 0.0 else rows.max())
+            if abs(base_i - edge_i) > max_cells:
+                base_i = edge_i - max_cells if base_i < edge_i else edge_i + max_cells
+                base_i = int(np.clip(base_i, 0, nu - 1))
+            lo, hi = sorted((base_i, edge_i))
+            if lo == hi:
+                continue
+            out_mask[lo:hi + 1, j] = True
+            out_depth[lo:hi + 1, j] = depth_filled[edge_i, j]
+    else:
+        for i in np.where(seed_mask.any(axis=1))[0]:
+            cols = np.where(seed_mask[i, :])[0]
+            if cols.size == 0:
+                continue
+            u_coord = side.grid_origin_uv[0] + (float(i) + 0.5) * side.cell_size
+            v_base = (float(base_signed) - center_h - u_coord * other_up) / vertical_up
+            base_j = int(np.floor((v_base - side.grid_origin_uv[1]) / side.cell_size))
+            base_j = int(np.clip(base_j, 0, nv - 1))
+            edge_j = int(cols.min() if vertical_up > 0.0 else cols.max())
+            if abs(base_j - edge_j) > max_cells:
+                base_j = edge_j - max_cells if base_j < edge_j else edge_j + max_cells
+                base_j = int(np.clip(base_j, 0, nv - 1))
+            lo, hi = sorted((base_j, edge_j))
+            if lo == hi:
+                continue
+            out_mask[i, lo:hi + 1] = True
+            out_depth[i, lo:hi + 1] = depth_filled[i, edge_j]
+
+    return out_depth, out_mask
 
 
 def _candidate_seeds_for_side(
@@ -302,7 +529,7 @@ def build_directional_seeds(
     cam_centers: Optional[np.ndarray] = None,
     cell_size_factor: float = 1.0,
     depth_percentile: float = 95.0,
-    cap_offset_factor: float = 0.35,
+    cap_offset_factor: float = 0.0,
     morphological_close_iters: int = 1,
     depth_smooth_iters: int = 2,
     samples_per_cell: int = 3,
@@ -310,6 +537,24 @@ def build_directional_seeds(
     min_projected_area_frac: float = 0.10,
     min_uncovered_frac: float = 0.12,
     existing_coverage_alpha: float = 0.6,
+    max_fill_cells: float = 1.5,
+    scene_xyz: Optional[np.ndarray] = None,
+    scene_up: Optional[np.ndarray] = None,
+    floor_clearance_factor: float = 0.0,
+    floor_percentile: float = 1.5,
+    extend_to_floor: bool = False,
+    align_side_bottoms: bool = True,
+    side_base_percentile: float = 2.0,
+    side_bottom_max_extend_factor: float = 8.0,
+    seed_bottom_cap: bool = False,
+    mask_min_component_cells: int = 9,
+    mask_edge_open_iters: int = 1,
+    seam_blend_cells: float = 2.0,
+    bottom_alignment_threshold: float = 0.5,
+    silhouette_camera_support_max: float = 0.25,
+    silhouette_far_percentile: float = 90.0,
+    extend_to_walls: bool = True,
+    wall_search_factor: float = 8.0,
 ) -> DirectionalShrinkwrapResult:
     """Build cap seed_xyz on dynamically selected missing sides.
 
@@ -354,7 +599,27 @@ def build_directional_seeds(
         )
 
     cell_size = max(float(cell_size_factor * r_med), 1e-5)
-    cap_offset = max(float(cap_offset_factor * r_med), 1e-6)
+    cap_offset = max(float(cap_offset_factor * r_med), 0.0)
+
+    # ---- Scene/object base references -------------------------------------
+    # The room floor is only used as a lower safety clamp or for explicitly
+    # requested legged-object floor filling. The default extension target is
+    # the object's own lower silhouette line, so front/back/sides land on one
+    # clean base without creating a horizontal floor slab.
+    floor_signed: Optional[float] = None
+    object_base_signed: Optional[float] = None
+    scene_up_unit: Optional[np.ndarray] = None
+    if scene_xyz is not None and scene_up is not None:
+        scene_xyz_arr = np.asarray(scene_xyz, dtype=np.float32)
+        up_arr = np.asarray(scene_up, dtype=np.float32).reshape(3)
+        up_norm = float(np.linalg.norm(up_arr))
+        if scene_xyz_arr.shape[0] >= 16 and up_norm > 1e-6:
+            scene_up_unit = up_arr / up_norm
+            heights = scene_xyz_arr @ scene_up_unit
+            floor_signed = float(np.percentile(heights, float(floor_percentile)))
+            object_heights = survivor_xyz @ scene_up_unit
+            object_base_signed = float(np.percentile(object_heights, float(side_base_percentile)))
+    floor_clearance = float(floor_clearance_factor) * r_med
 
     center, axes, eigvals, used_fallback = _pca_frame(survivor_xyz)
 
@@ -394,9 +659,116 @@ def build_directional_seeds(
     for s in sides:
         s.projected_area_frac = float(s.projected_area_cells) / float(max_area)
 
+    # Identify the bottom-pointing side (normal most aligned with -scene_up).
+    # Its outer-depth field is what gets extended down to the floor.
+    bottom_side_id: Optional[int] = None
+    if scene_up_unit is not None:
+        # Larger negative dot = more downward.
+        align = [(s.side_id, float(np.dot(s.normal, scene_up_unit))) for s in sides]
+        sid, dotv = min(align, key=lambda kv: kv[1])
+        if dotv < -float(bottom_alignment_threshold):
+            bottom_side_id = sid
+
     side_candidates: dict[int, np.ndarray] = {}
     for s in sides:
-        depth_filled, seed_mask = _filled_depth_map(s, smooth_iters=depth_smooth_iters)
+        # Use silhouette mode on hidden faces (no/low camera support): they
+        # rarely have survivor coverage and need the row/col closure to
+        # synthesize a back/under cap. Use local-fill mode on visible faces
+        # to preserve concave grooves on the front/cushions.
+        use_silhouette = float(s.camera_support) <= float(silhouette_camera_support_max)
+        if use_silhouette:
+            depth_filled, seed_mask = _silhouette_depth_map(
+                s, smooth_iters=depth_smooth_iters,
+                far_percentile=silhouette_far_percentile,
+                seam_blend_cells=seam_blend_cells,
+            )
+        else:
+            depth_filled, seed_mask = _filled_depth_map(
+                s, smooth_iters=depth_smooth_iters, max_fill_cells=max_fill_cells,
+            )
+
+        # Wall extension (room-aware): for hidden sides, find the nearest
+        # non-target anchor along +normal from the survivors' outer depth
+        # and treat that as a wall stop. Push hull-only depths up to the
+        # wall (or, if none found, leave them at far_percentile).
+        if (
+            extend_to_walls
+            and use_silhouette
+            and scene_xyz is not None
+            and seed_mask.any()
+            and s.occupancy.any()
+        ):
+            scene_arr = np.asarray(scene_xyz, dtype=np.float32)
+            if scene_arr.shape[0] > 0:
+                rel = scene_arr - center.reshape(1, 3)
+                d_along = rel @ s.normal
+                far_extent = float(np.max(s.outer_depth[s.occupancy])) if s.occupancy.any() else 0.0
+                search_max = far_extent + float(wall_search_factor) * cell_size
+                near = (d_along > far_extent + 0.25 * cell_size) & (d_along < search_max)
+                if near.any():
+                    wall_depth = float(np.percentile(d_along[near], 5.0)) - 0.5 * cell_size
+                    fill_only = seed_mask & ~s.occupancy
+                    if fill_only.any():
+                        depth_filled = depth_filled.copy()
+                        depth_filled[fill_only] = np.minimum(
+                            depth_filled[fill_only], wall_depth
+                        )
+
+        if (
+            align_side_bottoms
+            and object_base_signed is not None
+            and scene_up_unit is not None
+            and seed_mask.any()
+        ):
+            depth_filled, seed_mask = _align_vertical_side_to_base_line(
+                s,
+                center,
+                depth_filled,
+                seed_mask,
+                scene_up_unit,
+                object_base_signed,
+                max_extend_cells=float(side_bottom_max_extend_factor) * cell_size / max(cell_size, 1e-8),
+            )
+
+        # Floor extension: for the down-pointing side, push every occupied
+        # column's cap depth out to the floor plane (along this side's
+        # normal) when the survivor outer depth doesn't already reach it.
+        # This grounds couch legs/base instead of sealing them mid-air.
+        if (
+            extend_to_floor
+            and bottom_side_id is not None
+            and s.side_id == bottom_side_id
+            and floor_signed is not None
+            and scene_up_unit is not None
+        ):
+            n_dot_up = float(np.dot(s.normal, scene_up_unit))
+            if n_dot_up < -1e-3:
+                # depth d along +normal where (center + d*n) @ up == floor_signed
+                floor_depth = (floor_signed - float(np.dot(center, scene_up_unit))) / n_dot_up
+                # clearance: stop just short of the floor by clearance distance.
+                # Moving 'clearance' along +up corresponds to (-clearance/n_dot_up) along +normal.
+                if floor_clearance > 0.0:
+                    floor_depth -= floor_clearance / abs(n_dot_up)
+                if seed_mask.any():
+                    extend_mask = seed_mask & (depth_filled < floor_depth)
+                    if extend_mask.any():
+                        depth_filled = depth_filled.copy()
+                        depth_filled[extend_mask] = floor_depth
+
+        if seed_mask.any():
+            cleaned_mask = _cleanup_seed_mask_edges(
+                seed_mask,
+                min_component_cells=int(mask_min_component_cells),
+                opening_iters=int(mask_edge_open_iters),
+            )
+            if not np.array_equal(cleaned_mask, seed_mask):
+                seed_mask = cleaned_mask
+                depth_filled = np.where(seed_mask, depth_filled, -np.inf).astype(np.float32)
+            depth_filled = _smooth_depth_on_mask(
+                depth_filled,
+                seed_mask,
+                smooth_iters=max(1, int(depth_smooth_iters)),
+            )
         s.n_candidate_cells = int(seed_mask.sum())
         if s.n_candidate_cells > 0:
             # Coverage is measured in projected sheet cells, not at the final
@@ -428,6 +800,7 @@ def build_directional_seeds(
         s for s in sides
         if ((s.camera_support < min_camera_support) or (s.uncovered_frac >= min_uncovered_frac))
         and (s.projected_area_frac >= min_projected_area_frac)
+        and (seed_bottom_cap or bottom_side_id is None or s.side_id != bottom_side_id)
     ]
     eligible.sort(key=lambda s: s.selection_score, reverse=True)
     selected = [s.side_id for s in eligible]
@@ -474,6 +847,19 @@ def build_directional_seeds(
         seed_tangent_v = seed_tangent_v[keep]
         # Recount per side approximately by re-thresholding (best-effort).
         # We won't re-attribute to sides; n_seeds above is pre-subtraction.
+
+    # Floor clamp: drop any seed that would land below the room floor.
+    if (
+        floor_signed is not None
+        and scene_up_unit is not None
+        and seed_xyz.shape[0] > 0
+    ):
+        seed_heights = seed_xyz @ scene_up_unit
+        keep_floor = seed_heights >= (floor_signed + floor_clearance)
+        if not keep_floor.all():
+            seed_xyz = seed_xyz[keep_floor]
+            seed_tangent_u = seed_tangent_u[keep_floor]
+            seed_tangent_v = seed_tangent_v[keep_floor]
 
     return DirectionalShrinkwrapResult(
         seed_xyz=seed_xyz.astype(np.float32),

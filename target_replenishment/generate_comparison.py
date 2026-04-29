@@ -64,8 +64,20 @@ def _load_intrinsics_from_cameras_json(model_path: Path):
     return k, width, height, cams
 
 
+def _snap_up_to_dominant_axis(up_vector: np.ndarray) -> np.ndarray:
+    up = np.asarray(up_vector, dtype=np.float32)
+    norm = float(np.linalg.norm(up))
+    if not np.isfinite(norm) or norm < 1e-8:
+        return np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    up = up / norm
+    axes = np.eye(3, dtype=np.float32)
+    dots = axes @ up
+    idx = int(np.argmax(np.abs(dots)))
+    return (axes[idx] * (1.0 if dots[idx] >= 0.0 else -1.0)).astype(np.float32)
+
+
 def _build_orbit_cameras(center, radius, k, width, height, n_views, cam_data):
-    up = diag.estimate_scene_up_from_cameras(cam_data)
+    up = _snap_up_to_dominant_axis(diag.estimate_scene_up_from_cameras(cam_data))
     cam_centers = diag.camera_centers_from_cameras_json(cam_data)
     base = diag.orbit_base_direction_from_cameras(cam_centers, center, up)
     side = np.cross(up, base)

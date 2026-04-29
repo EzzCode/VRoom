@@ -128,6 +128,15 @@ def _normalize(v: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     return (v / norm).astype(np.float32)
 
 
+def _snap_up_to_dominant_axis(up_vector: np.ndarray) -> np.ndarray:
+    up = _normalize(up_vector, np.array([0.0, 0.0, 1.0], dtype=np.float32))
+    axes = np.eye(3, dtype=np.float32)
+    dots = axes @ up
+    idx = int(np.argmax(np.abs(dots)))
+    snapped = axes[idx] * (1.0 if dots[idx] >= 0.0 else -1.0)
+    return snapped.astype(np.float32)
+
+
 def camera_centers_from_cameras_json(cam_data: list) -> np.ndarray:
     """Return world-space camera centers from ObjectGS/Colmap cameras.json.
 
@@ -199,10 +208,10 @@ def build_orbit_camera(
     ``cam_centers`` provided; falls back to extent-based radius. Up = +Z.
     """
     center = object_xyz.mean(axis=0).astype(np.float32)
-    up = _normalize(
+    up = _snap_up_to_dominant_axis(_normalize(
         np.array([0.0, 0.0, 1.0], dtype=np.float32) if up_vector is None else up_vector,
         np.array([0.0, 0.0, 1.0], dtype=np.float32),
-    )
+    ))
     if cam_centers is not None and len(cam_centers) > 0:
         dists = np.linalg.norm(cam_centers - center.reshape(1, 3), axis=1)
         avg_dist = float(np.median(dists))
@@ -236,10 +245,10 @@ def build_orbit_cameras(
     cams = []
     n_views = max(1, int(n_views))
     center = object_xyz.mean(axis=0).astype(np.float32)
-    up = _normalize(
+    up = _snap_up_to_dominant_axis(_normalize(
         np.array([0.0, 0.0, 1.0], dtype=np.float32) if up_vector is None else up_vector,
         np.array([0.0, 0.0, 1.0], dtype=np.float32),
-    )
+    ))
     base = orbit_base_direction_from_cameras(cam_centers, center, up)
     for idx in range(n_views):
         azimuth = start_azimuth_deg + 360.0 * idx / n_views

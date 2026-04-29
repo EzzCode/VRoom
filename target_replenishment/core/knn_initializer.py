@@ -514,15 +514,25 @@ def find_3d_floater_anchors(
     min_component_size: int = 12,
     knn_k: int = 8,
 ) -> np.ndarray:
-    """Return target-anchor global indices that form small disconnected 3D
-    components after seeding. Used as a final Stage E floater pass.
+    """Return SEED anchors that form 3D components disconnected from any
+    original target anchor.
+
+    Builds the connectivity graph on the full target set (originals + seeds)
+    so the dense back-side silhouette shell stays connected to the originals
+    via the wrap-around seeds at the top/bottom. Only returns seed-range
+    indices: original anchors are never deleted by this pass.
     """
     labels_np = gaussians.label_ids.detach().squeeze(-1).cpu().numpy()
+    n_orig = int(getattr(gaussians, "n_original_anchors", labels_np.size) or labels_np.size)
+    n_orig = max(0, min(n_orig, labels_np.size))
     target_global = np.where(labels_np == int(object_id))[0].astype(np.int64)
     if target_global.size < max(min_component_size + 1, 8):
         return np.zeros(0, dtype=np.int64)
-    xyz = gaussians._anchor.detach().cpu().numpy()[target_global]
+    is_orig_local = target_global < n_orig
+    if not is_orig_local.any() or is_orig_local.all():
+        return np.zeros(0, dtype=np.int64)
 
+    xyz = gaussians._anchor.detach().cpu().numpy()[target_global]
     k = int(min(knn_k, xyz.shape[0]))
     tree = cKDTree(xyz)
     dists, _ = tree.query(xyz, k=k)
@@ -536,7 +546,8 @@ def find_3d_floater_anchors(
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import connected_components
     if pairs.size == 0:
-        return target_global  # no edges → all floaters; let caller decide
+        # No edges anywhere; leave alone (don't nuke everything).
+        return np.zeros(0, dtype=np.int64)
     rows = np.concatenate([pairs[:, 0], pairs[:, 1]])
     cols = np.concatenate([pairs[:, 1], pairs[:, 0]])
     data = np.ones(rows.size, dtype=np.uint8)
@@ -545,11 +556,17 @@ def find_3d_floater_anchors(
     if n_comp <= 1:
         return np.zeros(0, dtype=np.int64)
 
+    # Components that contain at least one original anchor are "trusted".
+    trusted = np.zeros(n_comp, dtype=bool)
+    trusted[comp_labels[is_orig_local]] = True
+    # Component sizes (used to spare large back/under shells that are
+    # disconnected from originals because their silhouette-fill seeds are
+    # placed beyond the survivor surface).
     sizes = np.bincount(comp_labels, minlength=n_comp)
-    largest = int(np.argmax(sizes))
-    drop_local = np.where(
-        (comp_labels != largest) & (sizes[comp_labels] < int(min_component_size))
-    )[0]
+    large_enough = sizes >= int(min_component_size)
+    keep_component = trusted | large_enough
+    is_seed_local = ~is_orig_local
+    drop_local = np.where(is_seed_local & ~keep_component[comp_labels])[0]
     return target_global[drop_local].astype(np.int64)
 
 

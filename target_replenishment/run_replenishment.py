@@ -319,6 +319,12 @@ def run_object(
             "skipped": True,
         }
 
+    # Full-scene anchors (excluding the current target object) — used by
+    # Stage B for room-aware floor grounding so the shrinkwrap doesn't seal
+    # legs above the floor or stretch them below it.
+    all_xyz = get_anchor_positions(gaussians)
+    scene_xyz = all_xyz[label_ids_after_prune != int(object_id)]
+
     # ── Stage B ────────────────────────────────────────────────────────────
     ds = build_directional_seeds(
         survivor_xyz=survivor_xyz,
@@ -335,6 +341,18 @@ def run_object(
         min_projected_area_frac=args.directional_min_area_frac,
         min_uncovered_frac=args.directional_min_uncovered_frac,
         existing_coverage_alpha=args.existing_coverage_alpha,
+        scene_xyz=scene_xyz,
+        scene_up=scene_up,
+        floor_clearance_factor=args.floor_clearance_factor,
+        floor_percentile=args.floor_percentile,
+        extend_to_floor=args.extend_to_floor,
+        align_side_bottoms=args.align_side_bottoms,
+        side_base_percentile=args.side_base_percentile,
+        side_bottom_max_extend_factor=args.side_bottom_max_extend_factor,
+        seed_bottom_cap=args.seed_bottom_cap,
+        mask_min_component_cells=args.mask_min_component_cells,
+        mask_edge_open_iters=args.mask_edge_open_iters,
+        seam_blend_cells=args.seam_blend_cells,
     )
     save_side_scan_pngs(ds, obj_out_dir / "side_scans")
     seed_xyz_for_init = ds.seed_xyz
@@ -417,6 +435,43 @@ def run_object(
     # Task 3: aggressive floater elimination after the new shell is in place.
     post_seed_render_prune = {"n_pruned": 0}
     post_seed_3d_prune = {"n_pruned": 0}
+    post_seed_proximity_prune = {"n_pruned": 0}
+
+    # Survivor-proximity prune: any seed > k * r_med from the nearest existing
+    # target anchor is a floater (the shell should HUG existing geometry).
+    # The reference set is *all* current target anchors (originals + seeds),
+    # so a synthesized back-shell seed surrounded by other back-shell seeds
+    # is preserved even if no survivor is nearby. This still kills isolated
+    # blobs that drift off into empty space.
+    if knn.n_seeded > 0 and args.post_seed_proximity_prune:
+        from scipy.spatial import cKDTree as _cKDTree
+        n_orig_now = int(getattr(gaussians, "n_original_anchors", 0) or 0)
+        labels_now = get_label_ids(gaussians)
+        all_xyz_now = get_anchor_positions(gaussians)
+        target_now = np.where(labels_now == int(object_id))[0]
+        seed_now = target_now[target_now >= n_orig_now]
+        if seed_now.size > 0 and target_now.size > seed_now.size:
+            ref_xyz = all_xyz_now[target_now]
+            tree = _cKDTree(ref_xyz)
+            seed_xyz_now = all_xyz_now[seed_now]
+            # k=2 so we skip the seed's own self-match (distance 0).
+            d_nn, _ = tree.query(seed_xyz_now, k=2)
+            nearest_other = d_nn[:, 1]
+            r_thr = float(args.post_seed_proximity_factor * surf.r_med)
+            far = nearest_other > r_thr
+            if far.any():
+                drop_idx = seed_now[far].astype(np.int64)
+                rfa_p = prune_anchor_indices(gaussians, drop_idx)
+                post_seed_proximity_prune = {
+                    "n_candidates": int(drop_idx.size),
+                    "r_threshold": r_thr,
+                    **rfa_p,
+                }
+                logger.info(
+                    "[obj %s] post-seed proximity prune: %d isolated seeds (>%.4f from nearest target anchor), deleted %d anchors",
+                    object_id, int(drop_idx.size), r_thr, rfa_p["n_pruned"],
+                )
+
     if knn.n_seeded > 0 and auto_compare_cams and args.post_seed_render_prune:
         rfp = find_render_space_floaters(
             gaussians=gaussians,
@@ -428,11 +483,15 @@ def run_object(
             min_blob_area_px=args.render_prune_min_blob_area_px,
             vote_threshold=args.post_seed_render_vote_threshold,
         )
-        rfa = prune_anchor_indices(gaussians, rfp.prune_indices)
-        post_seed_render_prune = {**rfp.to_dict(), **rfa}
+        # Never delete original anchors during the post-seed pass.
+        n_orig_now = int(getattr(gaussians, "n_original_anchors", 0) or 0)
+        seed_only_idx = rfp.prune_indices[rfp.prune_indices >= n_orig_now]
+        rfa = prune_anchor_indices(gaussians, seed_only_idx)
+        post_seed_render_prune = {**rfp.to_dict(), **rfa,
+                                  "n_seed_only": int(seed_only_idx.size)}
         logger.info(
-            "[obj %s] post-seed render prune: %d candidates, deleted %d anchors",
-            object_id, rfp.n_candidate_anchors, rfa["n_pruned"],
+            "[obj %s] post-seed render prune: %d candidates (%d seed-only), deleted %d anchors",
+            object_id, rfp.n_candidate_anchors, int(seed_only_idx.size), rfa["n_pruned"],
         )
     if knn.n_seeded > 0 and args.post_seed_3d_prune:
         floaters_3d = find_3d_floater_anchors(
@@ -499,6 +558,7 @@ def run_object(
         "stage_c_knn_init": knn.to_dict(),
         "stage_d_post_seed_render_prune": post_seed_render_prune,
         "stage_d_post_seed_3d_prune": post_seed_3d_prune,
+        "stage_d_post_seed_proximity_prune": post_seed_proximity_prune,
         "seed_render_color_rgb": seed_color_rgb.tolist() if seed_color_rgb is not None else None,
         "diff_mean_before_after": diff_mean,
         "auto_compare": {
@@ -545,11 +605,11 @@ def main():
                     help="Tangent-plane cell edge = factor * r_med.")
     ap.add_argument("--directional_depth_percentile", type=float, default=95.0,
                     help="Percentile (0-100) of survivor depth used as cap surface.")
-    ap.add_argument("--directional_cap_offset_factor", type=float, default=0.35,
-                    help="Cap is placed (factor * r_med) outside outer_depth.")
-    ap.add_argument("--directional_close_iters", type=int, default=2,
+    ap.add_argument("--directional_cap_offset_factor", type=float, default=0.0,
+                    help="Cap is placed (factor * r_med) outside outer_depth. 0 glues seeds onto the surface.")
+    ap.add_argument("--directional_close_iters", type=int, default=1,
                     help="Morphological close iterations on per-side support mask.")
-    ap.add_argument("--directional_depth_smooth_iters", type=int, default=5,
+    ap.add_argument("--directional_depth_smooth_iters", type=int, default=2,
                     help="Smooth per-side outer-depth sheets before seeding.")
     ap.add_argument("--directional_samples_per_cell", type=int, default=3,
                     help="Sub-cell samples per tangent cell axis. 3 means 9 seeds/cell.")
@@ -559,6 +619,33 @@ def main():
                     help="Side requires >= this fraction of largest projected area.")
     ap.add_argument("--directional_min_uncovered_frac", type=float, default=0.12,
                     help="Also seed camera-supported sides with this much uncovered shrinkwrap sheet.")
+    # Room-aware floor grounding (uses full-scene anchors + estimated up vector).
+    # Off by default: most furniture (sofas, beds) sits flush on the floor with
+    # no air-gap to fill, so floor extension just synthesizes a phantom slab
+    # below the couch base. Enable for objects with legs (chairs, tables).
+    ap.add_argument("--extend_to_floor", action="store_true", default=False,
+                    help="Extend the down-pointing side cap to the room floor when "
+                         "survivor depth doesn't reach. Use only for legged objects.")
+    ap.add_argument("--no_extend_to_floor", dest="extend_to_floor", action="store_false")
+    ap.add_argument("--floor_percentile", type=float, default=1.5,
+                    help="Percentile of (scene_xyz @ scene_up) used as floor signed-height.")
+    ap.add_argument("--floor_clearance_factor", type=float, default=0.0,
+                    help="Stop seeds (factor * r_med) above the floor (0 = touch the floor).")
+    ap.add_argument("--align_side_bottoms", action="store_true", default=True,
+                    help="Extend vertical side/front/back sheets to a shared object-base line.")
+    ap.add_argument("--no_align_side_bottoms", dest="align_side_bottoms", action="store_false")
+    ap.add_argument("--side_base_percentile", type=float, default=2.0,
+                    help="Percentile of target survivor height used as the shared bottom line.")
+    ap.add_argument("--side_bottom_max_extend_factor", type=float, default=8.0,
+                    help="Maximum side-wall bottom extension in directional grid cells.")
+    ap.add_argument("--seed_bottom_cap", action="store_true", default=False,
+                    help="Also seed the down-facing cap. Off by default to avoid under-object slabs.")
+    ap.add_argument("--mask_min_component_cells", type=int, default=9,
+                    help="Drop smaller disconnected 2D seed-mask components before seeding.")
+    ap.add_argument("--mask_edge_open_iters", type=int, default=1,
+                    help="3x3 opening iterations to trim ragged 2D seed-mask borders.")
+    ap.add_argument("--seam_blend_cells", type=float, default=2.0,
+                    help="Grid-cell radius near original occupancy where silhouette depth follows the real surface.")
 
     # Stage C
     ap.add_argument("--knn_k_init", type=int, default=4)
@@ -597,6 +684,13 @@ def main():
                     help="Components smaller than this are pruned as floaters.")
     ap.add_argument("--post_seed_3d_knn_k", type=int, default=8,
                     help="kNN used to estimate connectivity radius.")
+    ap.add_argument("--post_seed_proximity_prune", action="store_true", default=True,
+                    help="Drop seeds farther than (factor * r_med) from any survivor anchor. "
+                         "Kills shell fragments that drift off the surface.")
+    ap.add_argument("--no_post_seed_proximity_prune",
+                    dest="post_seed_proximity_prune", action="store_false")
+    ap.add_argument("--post_seed_proximity_factor", type=float, default=2.0,
+                    help="Threshold = factor * surf.r_med.")
 
     # Diagnostics
     ap.add_argument("--diag_azimuth_deg", type=float, default=180.0,
