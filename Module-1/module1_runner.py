@@ -85,7 +85,6 @@ def main():
     parser.add_argument("--ema", type=float, default=0.70)
     parser.add_argument("--reid_threshold", type=float, default=0.50)
     parser.add_argument("--disable_motion_comp", action="store_true", help="Disable global camera-motion compensation in tracker")
-    parser.add_argument("--disable_consensus", action="store_true", help="Disable in-clip temporal consensus in tracker")
     parser.add_argument("--consensus_window", type=int, default=8, help="Temporal window length for tracker consensus")
     parser.add_argument("--consensus_tie_margin", type=float, default=0.05, help="IoU vote margin for appearance tie-break")
 
@@ -167,8 +166,6 @@ def main():
         ]
         if args.disable_motion_comp:
             tracking_cmd.append("--disable_motion_comp")
-        if args.disable_consensus:
-            tracking_cmd.append("--disable_consensus")
         run_step("Object Tracking", tracking_cmd, dry_run=args.dry_run)
 
     # ── Stage 4: 3D Voting ──

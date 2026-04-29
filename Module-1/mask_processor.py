@@ -1,19 +1,19 @@
-"""Module-1 mask generation with SAM3 text prompting and deterministic cleanup.
+"""Mask post-processing pipeline for SAM3 output.
 
-This module is responsible for producing per-frame binary instance masks that
-are consumed by the vanilla tracker. It intentionally keeps a stable output
-contract and uses rule-based postprocessing to improve temporal robustness.
-
-Output contract:
-- `masks/masks_%05d.npz`: compressed bool tensor with shape `(N, H, W)`.
-- `visible_masks/vis_%05d.png`: visualization overlay for inspection.
+Receives raw boolean masks from sam_inference.SAM3TextSegmenter and applies
+a sequence of deterministic, rule-based spatial filters to produce clean
+per-frame instance masks for the downstream tracker.
 
 Processing pipeline:
-1. SAM3 semantic segmentation from text prompts.
-2. Background and border-touch filtering.
-3. Overlap-based merge for containment cases.
-4. Proximity and color-consistency merge.
-5. Optional connected-component split.
+    1. Background / border-touch filtering
+    2. Overlap-based containment merge
+    3. Proximity + color-consistency merge
+    4. Connected-component split
+    5. Final min-area gate
+
+Output contract:
+    masks/masks_%05d.npz  — compressed bool tensor (N, H, W)
+    visible_masks/vis_%05d.png — debug visualization overlay
 """
 
 import sys
@@ -21,18 +21,25 @@ import os
 import argparse
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
 from sam_inference import SAM3TextSegmenter
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
+
+# ── Geometry helpers ─────────────────────────────────────────────────────────
+
 def _mask_to_box(mask: np.ndarray) -> Optional[List[int]]:
-	"""Return [x1, y1, x2, y2] for a boolean mask, or None if empty."""
+	"""Return [x1, y1, x2, y2] bounding box for a boolean mask, or None if empty."""
 	ys, xs = np.where(mask)
 	if xs.size == 0:
 		return None
@@ -56,12 +63,19 @@ def _mean_hsv(frame_hsv: np.ndarray, mask: np.ndarray) -> np.ndarray:
 	return px.mean(axis=0).astype(np.float32)
 
 
+# ── Spatial filters ──────────────────────────────────────────────────────────
+
 def filter_background_masks(
 	masks: List[np.ndarray],
 	max_area_ratio: float = 0.50,
 	border_touch_threshold: float = 0.35,
 ) -> List[np.ndarray]:
-	"""Drop likely background masks using area and border-touch heuristics."""
+	"""Drop likely-background masks using area and border-touch heuristics.
+
+	A mask is rejected if it covers more than ``max_area_ratio`` of the image
+	or if its perimeter pixels touch more than ``border_touch_threshold`` of
+	the image border.
+	"""
 	if not masks:
 		return []
 
@@ -90,7 +104,11 @@ def filter_background_masks(
 
 
 def merge_overlapping_masks(masks: List[np.ndarray], thresh: float = 0.78) -> List[np.ndarray]:
-	"""Merge masks when one is strongly contained in another."""
+	"""Merge masks when one is strongly contained in another.
+
+	If the intersection of two masks divided by the smaller mask's area
+	exceeds ``thresh``, they are merged into a single union mask.
+	"""
 	if not masks:
 		return []
 
@@ -134,7 +152,12 @@ def merge_by_proximity(
 	gap_px: int = 20,
 	color_thresh: float = 0.32,
 ) -> List[np.ndarray]:
-	"""Merge nearby masks if mean HSV distance is below threshold."""
+	"""Merge nearby masks if mean HSV color distance is below threshold.
+
+	Two masks are candidates for merging when their bounding boxes are
+	within ``gap_px`` pixels and their mean HSV colors differ by less
+	than ``color_thresh`` (normalized by the HSV space diagonal).
+	"""
 	if len(masks) <= 1:
 		return masks
 
@@ -200,6 +223,8 @@ def split_disconnected(masks: List[np.ndarray], min_component_area: int = 1) -> 
 	return out
 
 
+# ── Postprocess entry point ──────────────────────────────────────────────────
+
 def postprocess_masks(
 	raw_masks: List[np.ndarray],
 	frame_bgr: np.ndarray,
@@ -211,21 +236,21 @@ def postprocess_masks(
 	proximity_color_thresh: float = 0.32,
 	split_components: bool = True,
 ) -> Tuple[List[np.ndarray], Dict[str, int]]:
-	"""Clean up raw SAM3 masks using rule-based spatial processing.
+	"""Apply the full spatial post-processing pipeline to raw SAM3 masks.
 
 	Args:
 		raw_masks: Unprocessed boolean masks from SAM3.
 		frame_bgr: Input frame in BGR format.
 		min_mask_area: Minimum kept component area in pixels.
-		max_area_ratio: Maximum allowed mask area ratio.
+		max_area_ratio: Maximum allowed mask area as fraction of image.
 		border_touch_threshold: Maximum allowed border-touch ratio.
 		merge_thresh: Containment threshold for overlap merging.
 		proximity_gap: Max pixel gap for proximity merge.
-		proximity_color_thresh: Max normalized HSV distance for merge.
+		proximity_color_thresh: Max normalized HSV distance for proximity merge.
 		split_components: Whether to split disconnected components.
 
 	Returns:
-		Tuple of `(final_masks, debug_stats)` where masks are boolean arrays.
+		Tuple of ``(final_masks, debug_stats)`` where masks are boolean arrays.
 	"""
 	masks = filter_background_masks(raw_masks, max_area_ratio=max_area_ratio, border_touch_threshold=border_touch_threshold)
 	masks = merge_overlapping_masks(masks, thresh=merge_thresh)
@@ -237,8 +262,10 @@ def postprocess_masks(
 	return masks, {"raw_mask_count": len(raw_masks), "final_mask_count": len(masks)}
 
 
+# ── Visualization helpers ────────────────────────────────────────────────────
+
 def generate_colors(n: int) -> List[Tuple[int, int, int]]:
-	"""Generate stable visually distinct BGR colors."""
+	"""Generate ``n`` visually distinct BGR colors via HSV spacing."""
 	colors: List[Tuple[int, int, int]] = []
 	for i in range(n):
 		hue = int(180 * i / max(n, 1))
@@ -265,8 +292,10 @@ def save_frame_masks(path: Path, masks: List[np.ndarray]):
 	np.savez_compressed(str(path), masks=stacked)
 
 
+# ── CLI pipeline ─────────────────────────────────────────────────────────────
+
 def run_pipeline(args):
-	"""Run segmentation pipeline over all frames in input_dir."""
+	"""Run segmentation + postprocessing over all frames in input_dir."""
 	input_dir = Path(args.input_dir)
 	output_dir = Path(args.output_dir)
 	mask_dir = output_dir / "masks"
@@ -346,8 +375,8 @@ if __name__ == "__main__":
 	parser.add_argument("--max_area_ratio", type=float, default=0.50, help="Drop masks larger than this image area ratio")
 	parser.add_argument("--border_touch_threshold", type=float, default=0.35, help="Drop masks with high border-touch ratio")
 	parser.add_argument("--merge_thresh", type=float, default=0.78, help="Containment threshold for overlap merge")
-	parser.add_argument("--proximity_gap", type=int, default=20, help="Pixel gap threshold for proximity merge") 
-	parser.add_argument("--proximity_color_thresh", type=float, default=0.32, help="HSV distance threshold for proximity merge") 
+	parser.add_argument("--proximity_gap", type=int, default=20, help="Pixel gap threshold for proximity merge")
+	parser.add_argument("--proximity_color_thresh", type=float, default=0.32, help="HSV distance threshold for proximity merge")
 	parser.add_argument("--no_split_disconnected", action="store_true", help="Disable splitting disconnected components")
 
 	run_pipeline(parser.parse_args())

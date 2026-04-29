@@ -2,7 +2,8 @@
 VRoom Multi-Modal Tracking Pipeline
 
 Loads pre-computed masks from mask_processor.py and performs Kalman + Hungarian
-tracking to generate ID-consistent masks for downstream reconstruction.
+tracking with temporal consensus refinement to generate ID-consistent masks
+for downstream 3D voting.
 
 Usage:
 	python object_tracker.py --input_dir data/images --mask_dir data/sam_output/masks --output_dir Tracked
@@ -18,7 +19,7 @@ import logging
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import List, Sequence
 
 import cv2
 import numpy as np
@@ -27,6 +28,9 @@ from scipy.optimize import linear_sum_assignment
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
+
+
+# ── Mask I/O ─────────────────────────────────────────────────────────────────
 
 
 def load_frame_masks(npz_path: Path) -> List[np.ndarray]:
@@ -39,6 +43,8 @@ def load_frame_masks(npz_path: Path) -> List[np.ndarray]:
 		return []
 	return [arr[i].astype(bool) for i in range(arr.shape[0])]
 
+
+# ── Geometry helpers ─────────────────────────────────────────────────────────
 
 def mask_centroid(mask):
 	"""Return centroid (x, y) of a boolean mask."""
@@ -98,6 +104,8 @@ def extract_lbp_hist(gray_u8, mask):
 	return hist
 
 
+# ── Kalman filter ────────────────────────────────────────────────────────────
+
 def create_kalman_filter(cx, cy):
 	"""Create a constant-velocity Kalman filter for 2D centroid motion."""
 	kf = cv2.KalmanFilter(4, 2)
@@ -109,6 +117,8 @@ def create_kalman_filter(cx, cy):
 	kf.statePost = np.array([[cx], [cy], [0.0], [0.0]], dtype=np.float32)
 	return kf
 
+
+# ── Camera motion compensation ───────────────────────────────────────────────
 
 def identity_affine() -> np.ndarray:
 	"""Return 2x3 identity affine matrix."""
@@ -201,6 +211,8 @@ def apply_affine_to_bbox(bbox, affine, frame_shape=None):
 
 	return [float(wx1), float(wy1), float(wx2), float(wy2)]
 
+
+# ── Temporal consensus matching ──────────────────────────────────────────────
 
 def compute_iou_vote(track_id, det_mask, frame_history, window_size):
 	"""Average IoU vote for a candidate detection against track history."""
@@ -372,6 +384,9 @@ def extract_features(mask, frame_hsv, frame_gray):
 	return hist, lbp_hist, centroid
 
 
+
+# ── Cost matrix ──────────────────────────────────────────────────────────────
+
 def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
 	"""Compute IoU between two binary masks."""
 	inter = np.logical_and(a, b).sum()
@@ -408,6 +423,8 @@ def compute_cost_matrix(tracks, active_ids, new_feats, alpha, beta, gamma, delta
 			cost[i, j] = alpha * dist_iou + beta * dist_color + gamma * dist_texture + delta * (0.6 * dist_centroid + 0.4 * dist_bbox)
 	return cost
 
+
+# ── Track lifecycle ──────────────────────────────────────────────────────────
 
 def init_tracks(tracks, next_id, masks, frame_hsv, frame_gray):
 	"""Initialize tracker state from first-frame detections."""
@@ -450,71 +467,6 @@ def predict_tracks(tracks, frame_shape):
 		trk["predicted_bbox"] = [x1, y1, x2, y2]
 
 
-def match_and_update(tracks, next_id, cost_matrix, active_ids, new_feats, match_threshold, ema=0.7, graveyard=None, reid_threshold=0.50):
-	"""Run Hungarian assignment, update matched tracks, and spawn/re-ID unmatched detections."""
-	if graveyard is None:
-		graveyard = {}
-
-	row_ind, col_ind = linear_sum_assignment(cost_matrix)
-	current_output = {}
-	assigned_new = set()
-
-	for r, c in zip(row_ind, col_ind):
-		if cost_matrix[r, c] < match_threshold:
-			tid = active_ids[r]
-			tracks[tid]["hist"] = ema * new_feats[c]["hist"] + (1 - ema) * tracks[tid]["hist"]
-			tracks[tid]["lbp"] = ema * new_feats[c]["lbp"] + (1 - ema) * tracks[tid]["lbp"]
-			tracks[tid]["mask"] = new_feats[c]["mask"]
-			tracks[tid]["centroid"] = new_feats[c]["centroid"]
-			tracks[tid]["bbox"] = new_feats[c]["bbox"]
-			tracks[tid]["bbox_wh"] = (max(1.0, new_feats[c]["bbox"][2] - new_feats[c]["bbox"][0]), max(1.0, new_feats[c]["bbox"][3] - new_feats[c]["bbox"][1]))
-			if tracks[tid].get("kalman") is None:
-				tracks[tid]["kalman"] = create_kalman_filter(*new_feats[c]["centroid"])
-			measurement = np.array([[new_feats[c]["centroid"][0]], [new_feats[c]["centroid"][1]]], dtype=np.float32)
-			tracks[tid]["kalman"].correct(measurement)
-			tracks[tid]["lost"] = 0
-			current_output[tid] = new_feats[c]["mask"]
-			assigned_new.add(c)
-		else:
-			tracks[active_ids[r]]["lost"] += 1
-
-	for r in set(range(len(active_ids))) - set(row_ind):
-		tracks[active_ids[r]]["lost"] += 1
-
-	for c in set(range(len(new_feats))) - assigned_new:
-		best_gid, best_cost = None, reid_threshold
-		for gid, gdata in graveyard.items():
-			dist_color = cv2.compareHist(gdata["hist"], new_feats[c]["hist"], cv2.HISTCMP_BHATTACHARYYA)
-			dist_texture = cv2.compareHist(gdata["lbp"], new_feats[c]["lbp"], cv2.HISTCMP_BHATTACHARYYA)
-			dist_bbox = 1.0 - box_iou_xyxy(gdata.get("bbox", [0, 0, 0, 0]), new_feats[c]["bbox"])
-			cost = 0.45 * dist_color + 0.35 * dist_texture + 0.20 * dist_bbox
-			if cost < best_cost:
-				best_gid, best_cost = gid, cost
-
-		feat_entry = {
-			"mask": new_feats[c]["mask"],
-			"hist": new_feats[c]["hist"],
-			"lbp": new_feats[c]["lbp"],
-			"centroid": new_feats[c]["centroid"],
-			"bbox": new_feats[c]["bbox"],
-			"bbox_wh": (max(1.0, new_feats[c]["bbox"][2] - new_feats[c]["bbox"][0]), max(1.0, new_feats[c]["bbox"][3] - new_feats[c]["bbox"][1])),
-			"kalman": create_kalman_filter(*new_feats[c]["centroid"]),
-			"predicted_centroid": new_feats[c]["centroid"],
-			"predicted_bbox": new_feats[c]["bbox"],
-			"lost": 0,
-		}
-		if best_gid:
-			tracks[best_gid] = feat_entry
-			current_output[best_gid] = new_feats[c]["mask"]
-			del graveyard[best_gid]
-		else:
-			tracks[next_id] = feat_entry
-			current_output[next_id] = new_feats[c]["mask"]
-			next_id += 1
-
-	return current_output, next_id
-
-
 def prune_lost_tracks(tracks, graveyard, patience):
 	"""Move expired tracks to graveyard and keep active tracks only."""
 	alive, dead = {}, {}
@@ -526,6 +478,9 @@ def prune_lost_tracks(tracks, graveyard, patience):
 	graveyard.update(dead)
 	return alive
 
+
+
+# ── Per-frame pipeline ───────────────────────────────────────────────────────
 
 def track_frame(
 	state,
@@ -540,11 +495,10 @@ def track_frame(
 	ema,
 	reid_threshold,
 	enable_motion_comp=True,
-	enable_consensus=True,
 	consensus_window=8,
 	consensus_tie_margin=0.05,
 ):
-	"""Process one frame through predict, compensate, associate, update, and prune."""
+	"""Process one frame: predict → compensate → associate → update → prune."""
 	h, w = frame_bgr.shape[:2]
 	img_diag = np.sqrt(h ** 2 + w ** 2)
 	tracks = state["tracks"]
@@ -590,23 +544,20 @@ def track_frame(
 
 	active_ids = list(tracks.keys())
 	cost = compute_cost_matrix(tracks, active_ids, new_feats, alpha, beta, gamma, delta, img_diag)
-	if enable_consensus:
-		output, next_id = match_with_consensus(
-			tracks,
-			next_id,
-			cost,
-			active_ids,
-			new_feats,
-			match_threshold,
-			ema=ema,
-			graveyard=state["graveyard"],
-			reid_threshold=reid_threshold,
-			frame_history=state.get("frame_history", []),
-			consensus_window=consensus_window,
-			tie_margin=consensus_tie_margin,
-		)
-	else:
-		output, next_id = match_and_update(tracks, next_id, cost, active_ids, new_feats, match_threshold, ema=ema, graveyard=state["graveyard"], reid_threshold=reid_threshold)
+	output, next_id = match_with_consensus(
+		tracks,
+		next_id,
+		cost,
+		active_ids,
+		new_feats,
+		match_threshold,
+		ema=ema,
+		graveyard=state["graveyard"],
+		reid_threshold=reid_threshold,
+		frame_history=state.get("frame_history", []),
+		consensus_window=consensus_window,
+		tie_margin=consensus_tie_margin,
+	)
 
 	state["tracks"] = prune_lost_tracks(tracks, state["graveyard"], patience)
 	state["next_id"] = next_id
@@ -615,6 +566,8 @@ def track_frame(
 	update_frame_history(state, state["tracks"], consensus_window)
 	return output
 
+
+# ── Visualization ────────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=8192)
 def get_id_color(obj_id):
@@ -638,6 +591,8 @@ def draw_tracked_overlay(image, tracked_objects, alpha=0.5):
 			cv2.putText(blended, str(obj_id), (cx - 10, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 	return blended
 
+
+# ── CLI pipeline ─────────────────────────────────────────────────────────────
 
 def run_pipeline(args):
 	"""Run tracker over all images and aligned NPZ masks."""
@@ -686,7 +641,6 @@ def run_pipeline(args):
 			args.ema,
 			args.reid_threshold,
 			enable_motion_comp=not args.disable_motion_comp,
-			enable_consensus=not args.disable_consensus,
 			consensus_window=args.consensus_window,
 			consensus_tie_margin=args.consensus_tie_margin,
 		)
@@ -724,7 +678,6 @@ if __name__ == "__main__":
 	parser.add_argument("--ema", type=float, default=0.7, help="EMA weight for feature smoothing")
 	parser.add_argument("--reid_threshold", type=float, default=0.5, help="Max appearance distance for graveyard re-ID")
 	parser.add_argument("--disable_motion_comp", action="store_true", help="Disable global camera-motion compensation")
-	parser.add_argument("--disable_consensus", action="store_true", help="Disable in-clip consensus refinement")
 	parser.add_argument("--consensus_window", type=int, default=8, help="Temporal window length for consensus voting")
 	parser.add_argument("--consensus_tie_margin", type=float, default=0.05, help="IoU vote margin to trigger appearance tie-break")
 	run_pipeline(parser.parse_args())

@@ -10,6 +10,7 @@ Usage:
     python voter/vote.py --data_path data --algorithm majority
 """
 
+import json
 import struct
 import numpy as np
 import cv2
@@ -385,6 +386,8 @@ def label_to_color(lbl):
 ##### Pipeline #################################################################
 
 def run_voting(args):
+    """Execute the full voting pipeline: load COLMAP, collect votes, resolve,
+    merge aliases, prune outliers, and write labeled PLY outputs."""
     data = args.data_path
     mask_dir = os.path.join(data, args.mask_dir)
 
@@ -448,7 +451,6 @@ def run_voting(args):
             min_covisibility=args.alias_min_covisibility,
         )
         if merge_map:
-            import json
             map_path = os.path.join(data, args.output_dir, "alias_merge_map.json")
             os.makedirs(os.path.dirname(map_path), exist_ok=True)
             with open(map_path, "w") as f:
