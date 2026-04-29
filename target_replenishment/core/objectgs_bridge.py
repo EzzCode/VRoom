@@ -178,6 +178,16 @@ def load_gaussians(model_path: str, iteration: int = -1) -> tuple:
                 else:
                     lifts = lifts.reshape(lifts.shape[0], -1)
                 gaussians.replenishment_seed_opacity_lift = lifts
+            if 'seeded_fixed_opacities' in rep_data:
+                gaussians.replenishment_seed_fixed_opacity = torch.tensor(
+                    rep_data['seeded_fixed_opacities'], dtype=torch.float32, device="cuda"
+                ).reshape(-1, 1)
+            if 'seeded_color_rgb' in rep_data:
+                gaussians.replenishment_seed_color_rgb = torch.tensor(
+                    rep_data['seeded_color_rgb'], dtype=torch.float32, device="cuda"
+                ).reshape(-1, 3)
+            if 'seeded_scaling_boost' in rep_data:
+                gaussians.replenishment_seed_scaling_boost = float(rep_data['seeded_scaling_boost'])
             logger.info("Loaded replenishment metadata from %s", rep_path)
             break
         except Exception as exc:

@@ -1,11 +1,10 @@
-"""
-VRoom Target Replenishment — Era3D Novel View Pipeline
+"""VRoom Target Replenishment core — Deterministic Shrinkwrap pipeline.
 
 Modules:
-    objectgs_bridge      — Interface to ObjectGS (model loading, rendering)
-    perspective_graph    — Training camera graph and view selection
-    coverage_analyzer    — Coverage gap detection for unseen hemispheres
-    novel_view_generator — Era3D multi-view generation
-    view_alignment       — Coordinate frame alignment (Era3D → Scaffold-GS)
-    optimizer            — Fine-tuning with frozen MLPs
+    objectgs_bridge        — Interface to ObjectGS (model loading, rendering)
+    surface_extraction     — Stage A: topological dense-surface filter
+    directional_shrinkwrap — Stage B: 6-sided projected shrinkwrap walls
+    knn_initializer        — Stage C: normal-aware seed init
+    render_floater_pruning — Stage A/E: render-space disconnected blob prune
+    diagnostics            — Before/after renders + AABB overlays
 """

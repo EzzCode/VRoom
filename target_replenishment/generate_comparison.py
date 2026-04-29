@@ -37,7 +37,7 @@ from target_replenishment.core.objectgs_bridge import (  # noqa: E402
     load_gaussians,
     render_view,
 )
-from target_replenishment.render_360 import look_at  # noqa: E402
+from target_replenishment.core import diagnostics as diag  # noqa: E402
 
 
 def _ensure_model_side_files(model_before: Path, model_after: Path):
@@ -61,11 +61,15 @@ def _load_intrinsics_from_cameras_json(model_path: Path):
         [[c0["fx"], 0, width / 2.0], [0, c0["fy"], height / 2.0], [0, 0, 1]],
         dtype=np.float32,
     )
-    return k, width, height
+    return k, width, height, cams
 
 
-def _build_orbit_cameras(center, radius, k, width, height, n_views):
-    up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+def _build_orbit_cameras(center, radius, k, width, height, n_views, cam_data):
+    up = diag.estimate_scene_up_from_cameras(cam_data)
+    cam_centers = diag.camera_centers_from_cameras_json(cam_data)
+    base = diag.orbit_base_direction_from_cameras(cam_centers, center, up)
+    side = np.cross(up, base)
+    side = side / max(np.linalg.norm(side), 1e-8)
 
     # Keep camera outside object with safer framing than the old tight orbit.
     dist = max(radius * 2.5, 0.5)
@@ -75,25 +79,20 @@ def _build_orbit_cameras(center, radius, k, width, height, n_views):
     fy = (height / 2.0) / np.tan(fov / 2.0)
     k_safe = np.array([[fx, 0.0, width / 2.0], [0.0, fy, height / 2.0], [0.0, 0.0, 1.0]], dtype=np.float32)
 
-    z_offset = np.clip(radius * 0.2, 0.05, 0.3 * dist)
+    up_offset = np.clip(radius * 0.2, 0.05, 0.3 * dist)
 
     cameras = []
     for i in range(n_views):
         angle = 2.0 * np.pi * i / n_views
-        cam_pos = center + np.array(
-            [
-                np.cos(angle) * dist,
-                np.sin(angle) * dist,
-                z_offset,
-            ],
-            dtype=np.float32,
-        )
-        r, t = look_at(cam_pos.astype(np.float32), center.astype(np.float32), up)
+        radial = np.cos(angle) * base + np.sin(angle) * side
+        cam_pos = center + radial.astype(np.float32) * dist + up * up_offset
+        r, t = diag._look_at(cam_pos.astype(np.float32), center.astype(np.float32), up)
         cameras.append(
             {
                 "index": i,
                 "azimuth_deg": float(np.degrees(angle)),
                 "cam_pos": cam_pos,
+                "up": up,
                 "R": r,
                 "T": t,
                 "K": k_safe.copy(),
@@ -110,11 +109,13 @@ def _save_camera_metadata(path: Path, object_id: int, center, radius, cameras):
         "object_center": np.asarray(center, dtype=np.float32).tolist(),
         "object_radius": float(radius),
         "n_views": len(cameras),
+        "scene_up": np.asarray(cameras[0]["up"], dtype=np.float32).tolist() if cameras else None,
         "cameras": [
             {
                 "index": c["index"],
                 "azimuth_deg": c["azimuth_deg"],
                 "cam_pos": np.asarray(c["cam_pos"], dtype=np.float32).tolist(),
+                "up": np.asarray(c["up"], dtype=np.float32).tolist(),
                 "R": np.asarray(c["R"], dtype=np.float32).tolist(),
                 "T": np.asarray(c["T"], dtype=np.float32).tolist(),
                 "K": np.asarray(c["K"], dtype=np.float32).tolist(),
@@ -218,15 +219,15 @@ def main():
             )
         print(f"Loaded camera metadata from {metadata_path}")
     else:
-        k, width, height = _load_intrinsics_from_cameras_json(model_before)
+        k, width, height, cam_data = _load_intrinsics_from_cameras_json(model_before)
         labels = g_before.label_ids.squeeze(-1).cpu().numpy()
         xyz = get_anchor_positions(g_before)
         obj_xyz = xyz[labels == args.object_id]
         if len(obj_xyz) == 0:
             raise ValueError(f"Object ID {args.object_id} not found in before model labels")
-        center = obj_xyz.mean(axis=0)
-        radius = np.linalg.norm(obj_xyz - center, axis=1).max()
-        cameras = _build_orbit_cameras(center, radius, k, width, height, args.n_views)
+        center = np.median(obj_xyz, axis=0)
+        radius = float(np.percentile(np.linalg.norm(obj_xyz - center.reshape(1, 3), axis=1), 90.0))
+        cameras = _build_orbit_cameras(center, radius, k, width, height, args.n_views, cam_data)
         _save_camera_metadata(metadata_path, args.object_id, center, radius, cameras)
         print(f"Saved camera metadata to {metadata_path}")
 

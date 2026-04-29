@@ -15,7 +15,7 @@ sys.path.append(str(objectgs_path))
 from target_replenishment.core.objectgs_bridge import (
     load_gaussians, get_anchor_positions, create_virtual_camera, render_view
 )
-from target_replenishment.core.perspective_graph import build_perspective_graph
+from target_replenishment.core import diagnostics as diag
 
 def look_at(camera_pos, target_pos, up_vector):
     forward = target_pos - camera_pos
@@ -50,17 +50,8 @@ def generate_360_video(model_path, output_mp4, object_id=8, n_frames=90):
     with open(cameras_json, 'r') as f:
         cam_data = json.load(f)
     
-    # Estimate scene UP vector from cameras (usually Y down, so UP is -Y)
-    cam_centers = []
-    for c in cam_data:
-        R = np.array(c['rotation'])
-        T = np.array(c['position'])
-        C = -R.T @ T
-        cam_centers.append(C)
-    cam_centers = np.array(cam_centers)
-    
-    # Z is usually up in some datasets, or Y. Let's just use the world vertical
-    up_vector = np.array([0.0, 0.0, 1.0]) # Try Z-up first
+    cam_centers = diag.camera_centers_from_cameras_json(cam_data)
+    up_vector = diag.estimate_scene_up_from_cameras(cam_data)
     
     anchor_xyz = get_anchor_positions(gaussians)
     if object_id is not None:
@@ -76,6 +67,9 @@ def generate_360_video(model_path, output_mp4, object_id=8, n_frames=90):
     # Find average distance of cameras from the object
     dists = np.linalg.norm(cam_centers - center, axis=1)
     avg_dist = np.median(dists)
+    base = diag.orbit_base_direction_from_cameras(cam_centers, center, up_vector)
+    side = np.cross(up_vector, base)
+    side = side / max(np.linalg.norm(side), 1e-8)
     
     # Use the K from the first camera
     c0 = cam_data[0]
@@ -92,12 +86,8 @@ def generate_360_video(model_path, output_mp4, object_id=8, n_frames=90):
     for i in range(n_frames):
         angle = 2 * np.pi * i / n_frames
         
-        # Circle in XY plane
-        cam_pos = center + np.array([
-            np.cos(angle) * avg_dist * 0.5,
-            np.sin(angle) * avg_dist * 0.5,
-            avg_dist * 0.2  # slightly elevated
-        ])
+        radial = np.cos(angle) * base + np.sin(angle) * side
+        cam_pos = center + radial * avg_dist * 0.5 + up_vector * avg_dist * 0.2
         
         R, T = look_at(cam_pos, center, up_vector)
         
