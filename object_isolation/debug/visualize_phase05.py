@@ -247,7 +247,7 @@ def make_coverage_overlay(manifest: dict, scope_cameras: list, debug_dir: Path,
 def run_debug(model_path: str, object_id: int, output_root: str,
               iou_threshold: float = 0.20, fov_y_deg: float = 50.0,
               num_inference_steps: int = 25, safe_mode: bool = False,
-              seed: int = 0):
+              seed: int = 0, reuse_sv3d: bool = False):
     out_dir = Path(output_root) / f"obj_{object_id}"
     phase4_scores = out_dir / "phase4" / "scores.json"
     phase5_dir = out_dir / "phase5"
@@ -269,6 +269,7 @@ def run_debug(model_path: str, object_id: int, output_root: str,
         scores_json_path=phase4_scores, output_dir=phase5_dir,
         object_label_id=object_id, backend=backend,
         iou_threshold=iou_threshold, fov_y_deg=fov_y_deg, seed=seed,
+        reuse_sv3d=reuse_sv3d,
     )
 
     make_conditioning_panel(manifest, debug_dir)
@@ -301,13 +302,16 @@ def main():
     parser.add_argument("--safe_mode", action="store_true",
                         help="Reduce num_frames to 14 and resolution to 512 if VRAM-tight.")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--reuse_sv3d", action="store_true",
+                        help="Skip diffusion; reload sv3d_raw/*.png from a prior run.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
     run_debug(args.model_path, args.object_id, args.output_root,
               iou_threshold=args.iou_threshold, fov_y_deg=args.fov_y_deg,
               num_inference_steps=args.num_inference_steps,
-              safe_mode=args.safe_mode, seed=args.seed)
+              safe_mode=args.safe_mode, seed=args.seed,
+              reuse_sv3d=args.reuse_sv3d)
 
 
 if __name__ == "__main__":

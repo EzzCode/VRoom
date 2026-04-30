@@ -108,11 +108,86 @@ def _alpha_from_white_bg(rgb: np.ndarray, sat_thresh: int = 12,
     return fg.astype(bool)
 
 
+def _normalize_framing(rgb: np.ndarray, alpha: np.ndarray,
+                       target_size: int, fill_frac: float = 0.85,
+                       bg_value: int = 255):
+    """Tight-crop on alpha, square-pad to give ``fill_frac`` coverage, resize.
+
+    Mirrors `_prepare_conditioning` so ObjectGS reference renders use the same
+    framing convention as the SV3D conditioning input. Returns
+    (rgb_uint8 HxWx3 RGB, alpha_float HxW in [0,1]).
+    """
+    a01 = alpha.astype(np.float32)
+    if a01.max() > 1.5:
+        a01 = a01 / 255.0
+    a01 = np.clip(a01, 0.0, 1.0)
+    mask = a01 > 0.4
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        # Fall back: blank frame at target_size with white bg.
+        empty_rgb = np.full((target_size, target_size, 3), bg_value, np.uint8)
+        empty_a = np.zeros((target_size, target_size), np.float32)
+        return empty_rgb, empty_a
+
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    obj_w, obj_h = x1 - x0, y1 - y0
+    side = max(obj_w, obj_h)
+    pad = int(round(side * (1.0 - fill_frac) / (2.0 * fill_frac)))
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    half = side // 2 + pad
+    H, W = rgb.shape[:2]
+    sx0 = max(0, cx - half); sy0 = max(0, cy - half)
+    sx1 = min(W, cx + half); sy1 = min(H, cy + half)
+    crop_rgb = rgb[sy0:sy1, sx0:sx1]
+    crop_a = a01[sy0:sy1, sx0:sx1]
+
+    h, w = crop_rgb.shape[:2]
+    side2 = max(h, w)
+    pad_top = (side2 - h) // 2; pad_bot = side2 - h - pad_top
+    pad_left = (side2 - w) // 2; pad_right = side2 - w - pad_left
+    crop_rgb = cv2.copyMakeBorder(crop_rgb, pad_top, pad_bot, pad_left, pad_right,
+                                  cv2.BORDER_CONSTANT, value=(bg_value,) * 3)
+    crop_a = cv2.copyMakeBorder(crop_a, pad_top, pad_bot, pad_left, pad_right,
+                                cv2.BORDER_CONSTANT, value=0.0)
+
+    # Composite on white bg so RGB visually matches conditioning.
+    a3 = crop_a[..., None]
+    bg = np.full_like(crop_rgb, bg_value)
+    comp = (a3 * crop_rgb.astype(np.float32) + (1 - a3) * bg).astype(np.uint8)
+
+    comp = cv2.resize(comp, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    crop_a = cv2.resize(crop_a, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    return comp, crop_a
+
+
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
     a = a.astype(bool); b = b.astype(bool)
     inter = np.logical_and(a, b).sum()
     union = np.logical_or(a, b).sum()
     return float(inter / max(union, 1))
+
+
+def _load_sv3d_cache(out_raw: Path, cond_az: float, cond_el: float,
+                     expected_n: int) -> List[HallucinatedView]:
+    """Reload previously saved SV3D outputs as HallucinatedView list."""
+    files = sorted(Path(out_raw).glob("*.png"))
+    if not files:
+        raise FileNotFoundError(f"No cached SV3D outputs in {out_raw}")
+    if len(files) != expected_n:
+        logger.warning("Cached SV3D count=%d, expected %d", len(files), expected_n)
+    n = len(files)
+    views: List[HallucinatedView] = []
+    for i, p in enumerate(files):
+        bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        # Reproduce sv3d_p azimuth schedule: az_off = (i+1)*360/n.
+        az_off = ((i + 1) * 360.0 / n) % 360.0
+        az_abs = ((cond_az + az_off + 180.0) % 360.0) - 180.0
+        views.append(HallucinatedView(
+            rgb=rgb, azimuth_V_deg=float(az_abs),
+            elevation_V_deg=float(cond_el), is_conditioning=False,
+        ))
+    return views
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,7 +228,12 @@ def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
     alpha = out["alpha"].detach().cpu().numpy()
     if alpha.ndim == 3:
         alpha = alpha[0]
-    return rgb_u8, np.asarray(alpha)
+    alpha = np.asarray(alpha)
+
+    # Normalize framing to match SV3D conditioning convention (≈85% fill, square).
+    rgb_u8, alpha = _normalize_framing(rgb_u8, alpha, target_size=resolution,
+                                       fill_frac=0.85, bg_value=255)
+    return rgb_u8, alpha
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -195,6 +275,7 @@ def run_hallucination(
     fov_y_deg: float = 50.0,
     seed: int = 0,
     save_dropped: bool = True,
+    reuse_sv3d: bool = False,
 ) -> dict:
     """Run novel-view hallucination on the Phase-4 top-1 conditioning view."""
     output_dir = Path(output_dir)
@@ -216,8 +297,8 @@ def run_hallucination(
         raise RuntimeError("top1 cam not in scores.frames")
 
     rgba_path = Path(full["out_rgba_path"])
-    cond_az = float(top1["azimuth_V_deg"])
-    cond_el = float(top1.get("elevation_V_deg", 0.0))
+    cond_az = float(full.get("azimuth_V_deg", top1["azimuth_V_deg"]))
+    cond_el = float(full.get("elevation_V_deg", 0.0))
     if not math.isfinite(cond_el):
         cond_el = 0.0
     if not math.isfinite(cond_az):
@@ -235,14 +316,17 @@ def run_hallucination(
     cv2.imwrite(str(output_dir / "conditioning.png"),
                 cv2.cvtColor(cond_rgb, cv2.COLOR_RGB2BGR))
 
-    # Run prior.
-    views: List[HallucinatedView] = backend.hallucinate(
-        cond_rgb, cond_elevation_deg=cond_el, cond_azimuth_deg=cond_az, seed=seed,
-    )
-    logger.info("Backend produced %d views.", len(views))
-
-    # Free SV3D before heavy renders.
-    backend.unload()
+    # Run prior (or reuse cached outputs).
+    if reuse_sv3d:
+        views = _load_sv3d_cache(out_raw, cond_az, cond_el, backend.output_count)
+        logger.info("Reusing %d cached SV3D views from %s.", len(views), out_raw)
+    else:
+        views = backend.hallucinate(
+            cond_rgb, cond_elevation_deg=cond_el, cond_azimuth_deg=cond_az, seed=seed,
+        )
+        logger.info("Backend produced %d views.", len(views))
+        # Free SV3D before heavy renders.
+        backend.unload()
 
     # Render references + filter.
     frames: List[HallucinatedFrame] = []
