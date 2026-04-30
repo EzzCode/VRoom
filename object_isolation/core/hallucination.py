@@ -1,0 +1,345 @@
+"""
+Phase 5 — Diffusion-prior orchestration (novel-view hallucination).
+
+Workflow:
+    1. Load Phase 4 top-1 frame (best SV3D conditioning view).
+    2. Crop tight + pad onto neutral background → square conditioning image.
+    3. Instantiate the chosen DiffusionPriorBackend (SV3D-u by default).
+    4. Run backend → list of HallucinatedView at (azimuth_V, elevation_V).
+    5. For each output: map V→W camera, render ObjectGS at that pose to get
+       a reference silhouette M_objgs.
+    6. Extract M_sv3d from each output (white-bg subtraction).
+    7. Apply silhouette filter:
+           — If |M_objgs| < min_objgs_pixels  → KEEP (back-side hallucination,
+             nothing to compare against).
+           — Else require IoU(M_sv3d, M_objgs) ≥ iou_threshold.
+    8. Save accepted frames as RGBA + manifest `hallucination_index.json`.
+
+Outputs (per object):
+    obj_<id>/phase5/hallucinated/<NN>__az<DEG>.png        # RGBA
+    obj_<id>/phase5/objgs_refs/<NN>__az<DEG>.png          # RGB ref render
+    obj_<id>/phase5/sv3d_raw/<NN>__az<DEG>.png            # raw SV3D RGB
+    obj_<id>/phase5/hallucination_index.json
+"""
+from __future__ import annotations
+
+import json
+import logging
+import math
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import List, Optional
+
+import cv2
+import numpy as np
+
+from .coordinate_frames import LocalSV3D
+from .diffusion_priors.base import DiffusionPriorBackend, HallucinatedView
+from .scope import ObjectScope
+
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conditioning image prep
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _prepare_conditioning(rgba_path: Path, target_size: int = 576,
+                          fill_frac: float = 0.85,
+                          bg_value: int = 255) -> np.ndarray:
+    """Crop tight on alpha, pad to square, composite on neutral bg."""
+    rgba = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
+    if rgba is None or rgba.shape[2] != 4:
+        raise ValueError(f"Bad RGBA: {rgba_path}")
+    bgr = rgba[..., :3]
+    a = rgba[..., 3]
+    ys, xs = np.where(a > 127)
+    if len(xs) == 0:
+        raise ValueError(f"Empty alpha in {rgba_path}")
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    obj_w, obj_h = x1 - x0, y1 - y0
+    side = max(obj_w, obj_h)
+    pad = int(round(side * (1.0 - fill_frac) / (2.0 * fill_frac)))
+    # square crop centered on object
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    half = side // 2 + pad
+    sx0 = max(0, cx - half); sy0 = max(0, cy - half)
+    sx1 = min(rgba.shape[1], cx + half); sy1 = min(rgba.shape[0], cy + half)
+    crop_bgr = bgr[sy0:sy1, sx0:sx1]
+    crop_a = a[sy0:sy1, sx0:sx1].astype(np.float32) / 255.0
+
+    # square pad
+    h, w = crop_bgr.shape[:2]
+    side2 = max(h, w)
+    pad_top = (side2 - h) // 2; pad_bot = side2 - h - pad_top
+    pad_left = (side2 - w) // 2; pad_right = side2 - w - pad_left
+    crop_bgr = cv2.copyMakeBorder(crop_bgr, pad_top, pad_bot, pad_left, pad_right,
+                                  cv2.BORDER_CONSTANT, value=(bg_value,)*3)
+    crop_a = cv2.copyMakeBorder(crop_a, pad_top, pad_bot, pad_left, pad_right,
+                                cv2.BORDER_CONSTANT, value=0.0)
+
+    # composite on bg
+    bg = np.full_like(crop_bgr, bg_value)
+    a3 = crop_a[..., None]
+    comp = (a3 * crop_bgr + (1 - a3) * bg).astype(np.uint8)
+
+    # resize to target
+    comp = cv2.resize(comp, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(comp, cv2.COLOR_BGR2RGB)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# White-background mask extraction
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _alpha_from_white_bg(rgb: np.ndarray, sat_thresh: int = 12,
+                         val_thresh: int = 245) -> np.ndarray:
+    """Estimate fg mask from a render on (near-)white background."""
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    sat = hsv[..., 1]
+    val = hsv[..., 2]
+    fg = (sat > sat_thresh) | (val < val_thresh)
+    fg = fg.astype(np.uint8)
+    # cleanup
+    fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN,
+                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE,
+                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    return fg.astype(bool)
+
+
+def _iou(a: np.ndarray, b: np.ndarray) -> float:
+    a = a.astype(bool); b = b.astype(bool)
+    inter = np.logical_and(a, b).sum()
+    union = np.logical_or(a, b).sum()
+    return float(inter / max(union, 1))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Render ObjectGS at a hallucinated V-pose
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
+                      object_label_id: int,
+                      az_V_deg: float, el_V_deg: float,
+                      resolution: int = 576,
+                      fov_y_deg: float = 50.0):
+    """Render ObjectGS at a V-frame pose; returns (rgb uint8 HxWx3, alpha float HxW).
+
+    Distance from object centroid is local_sv3d.world_local.radius
+    (baked into the SV3D virtual orbit at construction time)."""
+    import torch
+    from target_replenishment.core.objectgs_bridge import (
+        render_view, create_virtual_camera,
+    )
+
+    R_w2c, T_w2c, _C_W = local_sv3d.sv3d_view_to_world_camera(
+        az_V_deg, el_V_deg,
+    )
+
+    # Build K from desired FOV.
+    fov_y = math.radians(fov_y_deg)
+    fy = 0.5 * resolution / math.tan(0.5 * fov_y)
+    fx = fy
+    cx = cy = resolution / 2.0
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+
+    cam = create_virtual_camera(R_w2c, T_w2c, K, resolution, resolution)
+
+    bg = torch.ones(3, dtype=torch.float32, device="cuda")  # white bg
+    out = render_view(gaussians, cam, pipe_config, bg, object_label_id=object_label_id)
+    rgb_t = out["rgb"].detach().clamp(0, 1).cpu().numpy().transpose(1, 2, 0)
+    rgb_u8 = (rgb_t * 255.0 + 0.5).astype(np.uint8)
+    alpha = out["alpha"].detach().cpu().numpy()
+    if alpha.ndim == 3:
+        alpha = alpha[0]
+    return rgb_u8, np.asarray(alpha)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manifest dataclass
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class HallucinatedFrame:
+    index: int
+    azimuth_V_deg: float
+    elevation_V_deg: float
+    is_conditioning: bool
+    iou_with_objgs: float
+    n_pixels_sv3d: int
+    n_pixels_objgs: int
+    accepted: bool
+    reject_reason: str
+    out_rgba_path: str
+    sv3d_raw_path: str
+    objgs_ref_path: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main entry
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_hallucination(
+    scope: ObjectScope,
+    local_sv3d,
+    gaussians,
+    pipe_config,
+    *,
+    scores_json_path: Path,
+    output_dir: Path,
+    object_label_id: int,
+    backend: Optional[DiffusionPriorBackend] = None,
+    iou_threshold: float = 0.20,
+    min_objgs_pixels: int = 600,
+    fov_y_deg: float = 50.0,
+    seed: int = 0,
+    save_dropped: bool = True,
+) -> dict:
+    """Run novel-view hallucination on the Phase-4 top-1 conditioning view."""
+    output_dir = Path(output_dir)
+    out_halluc = output_dir / "hallucinated"
+    out_raw = output_dir / "sv3d_raw"
+    out_ref = output_dir / "objgs_refs"
+    for d in (out_halluc, out_raw, out_ref):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Load Phase-4 scores → pick top-1 conditioning frame.
+    with open(scores_json_path) as f:
+        scores = json.load(f)
+    if not scores["top_k"]:
+        raise RuntimeError("No frames in scores.json; rerun Phase 4.")
+    top1 = scores["top_k"][0]
+    # Find full record for paths.
+    full = next((fr for fr in scores["frames"] if fr["cam_index"] == top1["cam_index"]), None)
+    if full is None:
+        raise RuntimeError("top1 cam not in scores.frames")
+
+    rgba_path = Path(full["out_rgba_path"])
+    cond_az = float(top1["azimuth_V_deg"])
+    cond_el = float(top1.get("elevation_V_deg", 0.0))
+    if not math.isfinite(cond_el):
+        cond_el = 0.0
+    if not math.isfinite(cond_az):
+        cond_az = 0.0
+
+    logger.info("Conditioning: cam=%d az_V=%.1f el_V=%.1f score=%.3f from %s",
+                top1["cam_index"], cond_az, cond_el, top1["score"], rgba_path.name)
+
+    # Backend.
+    if backend is None:
+        from .diffusion_priors.sv3d import SV3DBackend
+        backend = SV3DBackend()
+
+    cond_rgb = _prepare_conditioning(rgba_path, target_size=backend.native_resolution)
+    cv2.imwrite(str(output_dir / "conditioning.png"),
+                cv2.cvtColor(cond_rgb, cv2.COLOR_RGB2BGR))
+
+    # Run prior.
+    views: List[HallucinatedView] = backend.hallucinate(
+        cond_rgb, cond_elevation_deg=cond_el, cond_azimuth_deg=cond_az, seed=seed,
+    )
+    logger.info("Backend produced %d views.", len(views))
+
+    # Free SV3D before heavy renders.
+    backend.unload()
+
+    # Render references + filter.
+    frames: List[HallucinatedFrame] = []
+    res = views[0].rgb.shape[0]
+    n_kept = 0
+    for i, v in enumerate(views):
+        # Reference render at the same V-pose (white bg).
+        ref_rgb, ref_alpha = _render_reference(
+            scope, local_sv3d, gaussians, pipe_config,
+            object_label_id=object_label_id,
+            az_V_deg=v.azimuth_V_deg, el_V_deg=v.elevation_V_deg,
+            resolution=res, fov_y_deg=fov_y_deg,
+        )
+        m_objgs = ref_alpha > 0.4
+        m_sv3d = _alpha_from_white_bg(v.rgb)
+
+        # Resize masks to common shape (should match res anyway).
+        if m_objgs.shape != m_sv3d.shape:
+            m_objgs = cv2.resize(m_objgs.astype(np.uint8),
+                                 (m_sv3d.shape[1], m_sv3d.shape[0]),
+                                 interpolation=cv2.INTER_NEAREST).astype(bool)
+        iou = _iou(m_sv3d, m_objgs)
+        n_objgs = int(m_objgs.sum())
+        n_sv3d = int(m_sv3d.sum())
+
+        # Accept logic.
+        accepted = True
+        reason = ""
+        if n_sv3d < 200:
+            accepted = False
+            reason = "sv3d_empty"
+        elif n_objgs < min_objgs_pixels:
+            accepted = True
+            reason = "back_side_no_ref"
+        elif iou < iou_threshold:
+            accepted = False
+            reason = f"iou_low_{iou:.2f}"
+
+        if not accepted and not save_dropped:
+            continue
+        if accepted:
+            n_kept += 1
+
+        # Filenames.
+        az_tag = int(round(v.azimuth_V_deg))
+        stem = f"{i:02d}__az{az_tag:+04d}"
+        sv3d_path = out_raw / f"{stem}.png"
+        ref_path = out_ref / f"{stem}.png"
+        rgba_path_out = out_halluc / f"{stem}.png"
+
+        cv2.imwrite(str(sv3d_path), cv2.cvtColor(v.rgb, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(ref_path), cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2BGR))
+        # RGBA: SV3D RGB + computed alpha
+        rgba_out = np.dstack([cv2.cvtColor(v.rgb, cv2.COLOR_RGB2BGR),
+                              (m_sv3d * 255).astype(np.uint8)])
+        cv2.imwrite(str(rgba_path_out), rgba_out)
+
+        frames.append(HallucinatedFrame(
+            index=i,
+            azimuth_V_deg=float(v.azimuth_V_deg),
+            elevation_V_deg=float(v.elevation_V_deg),
+            is_conditioning=bool(v.is_conditioning),
+            iou_with_objgs=float(iou),
+            n_pixels_sv3d=n_sv3d,
+            n_pixels_objgs=n_objgs,
+            accepted=accepted,
+            reject_reason=reason,
+            out_rgba_path=str(rgba_path_out),
+            sv3d_raw_path=str(sv3d_path),
+            objgs_ref_path=str(ref_path),
+        ))
+
+    # Manifest.
+    manifest = {
+        "backend": backend.name,
+        "object_label_id": object_label_id,
+        "conditioning": {
+            "cam_index": top1["cam_index"],
+            "img_name": top1["img_name"],
+            "azimuth_V_deg": cond_az,
+            "elevation_V_deg": cond_el,
+            "score": top1["score"],
+            "image_path": str(output_dir / "conditioning.png"),
+        },
+        "params": {
+            "iou_threshold": iou_threshold,
+            "min_objgs_pixels": min_objgs_pixels,
+            "fov_y_deg": fov_y_deg,
+            "resolution": res,
+            "seed": seed,
+        },
+        "n_views": len(views),
+        "n_kept": n_kept,
+        "frames": [asdict(fr) for fr in frames],
+    }
+    with open(output_dir / "hallucination_index.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+    logger.info("Phase 5: kept %d / %d views (manifest: %s)",
+                n_kept, len(views), output_dir / "hallucination_index.json")
+    return manifest
