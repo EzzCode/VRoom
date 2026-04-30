@@ -1,32 +1,32 @@
 """
-VRoom Target Replenishment — Deterministic Shrinkwrap Runner.
+VRoom Target Replenishment — Era3D Novel View Pipeline
 
-Per-object pipeline:
-    A. Surface extraction + render-space + AABB floater pruning.
-    B. Directional 6-sided projected height-field cap seeding.
-    C. KNN normal-aware direct-drive seed init (originals frozen).
-    D. Post-seed render-space + 3D component floater elimination.
-    E. Save before/after diagnostics + per-object summary.
+Replaces the PAInpainter multi-candidate inpainting pipeline with a direct
+novel-view generation approach using Era3D:
 
-CLI:
-    python target_replenishment/run_replenishment.py \
-        --model_path <ObjectGS run dir> \
-        --object_id 9 \
-        --output_dir replenished_output
+  1. Analyze coverage gaps to find unseen object hemispheres
+  2. Render best visible view of isolated object
+  3. Generate 6 novel views via Era3D (~10 sec)
+  4. Align views to Scaffold-GS world coordinate frame
+  5. Fine-tune 2DGS model with frozen MLPs (~2 min)
+
+Usage:
+    python target_replenishment/run_replenishment.py \\
+        --model_path outputs/scene_01 \\
+        --object_ids 8 \\
+        --up_axis z
 """
-from __future__ import annotations
 
-import argparse
-import json
-import logging
 import sys
-from pathlib import Path
-
-import cv2
+import json
+import shutil
+import logging
+import argparse
 import numpy as np
 import torch
+import cv2
+from pathlib import Path
 
-# Path bootstrap
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -42,8 +42,11 @@ def run_replenishment(
     up_axis: str = 'auto',
     finetune_iterations: int = 1200,
     finetune_lr_scale: float = 1.0,
-    hallucination_weight: float = 0.08,
+    hallucination_weight: float = 0.5,
     novel_rgb_weight: float = 1.0,
+    input_alpha_threshold: float = 0.30,
+    input_crop_margin_frac: float = 0.08,
+    input_fill_ratio: float = 0.78,
     target_mask_erode_px: int = 0,
     freeze_feat_when_rgb_off: bool = True,
     conservative_seed_render: bool = True,
@@ -51,6 +54,12 @@ def run_replenishment(
     visual_hull_min_views: int = 2,
     surface_shell_seed_filter: bool = True,
     surface_shell_min_norm: float = 0.65,
+    cleanup_preseed_floaters: bool = True,
+    floater_density_quantile: float = 0.65,
+    floater_min_keep_ratio: float = 0.35,
+    floater_knn_k: int = 8,
+    floater_connectivity_knn: int = 6,
+    cleanup_diagnostics: bool = True,
     seed_opacity_gate_init: float = 0.02,
     seed_opacity_gate_lr_scale: float = 50.0,
     seed_opacity_gate_reg_weight: float = 0.005,
@@ -63,7 +72,7 @@ def run_replenishment(
     auto_compare: bool = True,
     comparison_views: int = 8,
     offset_scale_frac: float = 0.5,
-    seeded_scale_max_frac: float = 0.06,
+    seeded_scale_max_frac: float = 0.10,
     bounds_expand_frac: float = 0.05,
     originals_lr_scale: float = 0.05,
     originals_max_scale_delta: float = 0.05,
@@ -79,6 +88,9 @@ def run_replenishment(
     cage_padding_frac: float = 0.02,
     hole_weight_max: float = 2.5,
     seeded_anisotropy_max: float = 3.0,
+    target_align_scale_mode: str = "cover",
+    anchor_silhouette_radius_scale: float = 0.18,
+    seeded_pos_scale_delta_mult: float = 1.0,
     train_mlp_opacity: bool = False,
     mlp_opacity_lr_scale: float = 0.001,
     mlp_opacity_reg_weight: float = 1.0,
@@ -120,7 +132,7 @@ def run_replenishment(
         comparison_views: Number of orbit views for auto comparison.
     """
     from target_replenishment.core.objectgs_bridge import (
-        load_gaussians, get_anchor_positions,
+        load_gaussians, get_anchor_positions, create_virtual_camera, render_view,
     )
     from target_replenishment.core.perspective_graph import build_perspective_graph, get_top_k_views_for_object
     from target_replenishment.core.coverage_analyzer import analyze_coverage
@@ -129,7 +141,10 @@ def run_replenishment(
     )
     from target_replenishment.core.view_alignment import compute_novel_cameras
     from target_replenishment.core.optimizer import optimize_with_novel_views
-    from target_replenishment.core.anchor_seeding import seed_backside_anchors
+    from target_replenishment.core.anchor_seeding import (
+        seed_backside_anchors,
+        prune_object_floaters_dense_surface,
+    )
     from target_replenishment.core.repair_diagnostics import analyze_repair_candidates
     from target_replenishment.core.repair_candidate_stage import analyze_aligned_repair_candidates
 
@@ -173,19 +188,24 @@ def run_replenishment(
     zero123_pipeline = load_zero123pp(device="cuda")
 
     # ── Step 4: Process each object ──
-    labels = gaussians.label_ids.squeeze(-1).cpu().numpy()
-    process_ids = target_object_ids if target_object_ids is not None else np.unique(labels).tolist()
+    labels_init = gaussians.label_ids.squeeze(-1).cpu().numpy()
+    process_ids = target_object_ids if target_object_ids is not None else np.unique(labels_init).tolist()
 
     results = {}
     final_rep_payload = None
     model_was_mutated = False
+    logger.info(f"Processing object IDs: {process_ids}")
     for obj_id in process_ids:
         logger.info(f"\n{'='*60}")
         logger.info(f"OBJECT {obj_id}")
         logger.info(f"{'='*60}")
 
-        obj_mask = (labels == obj_id)
-        object_anchors = anchor_xyz_global[obj_mask]
+        labels_now = gaussians.label_ids.squeeze(-1).cpu().numpy()
+        anchor_xyz_now = get_anchor_positions(gaussians)
+        obj_mask = (labels_now == obj_id)
+        object_anchors = anchor_xyz_now[obj_mask]
+        object_anchors_pre_cleanup = np.asarray(object_anchors, dtype=np.float32).copy()
+        pre_cleanup_render_diag = {}
 
         if len(object_anchors) < 10:
             logger.warning(f"Object {obj_id} has too few anchors ({len(object_anchors)}). Skipping.")
@@ -193,6 +213,103 @@ def run_replenishment(
 
         obj_dir = out / f"obj_{obj_id}"
         obj_dir.mkdir(parents=True, exist_ok=True)
+
+        floater_cleanup_stats = {
+            'enabled': bool(cleanup_preseed_floaters),
+            'object_id': int(obj_id),
+            'n_before': int(len(object_anchors)),
+            'n_after': int(len(object_anchors)),
+            'n_pruned': 0,
+        }
+        cleanup_diag_summary = {}
+
+        if cleanup_diagnostics and len(object_anchors) >= 10:
+            coverage_pre_cleanup = analyze_coverage(
+                object_anchors, graph.cameras,
+                up_axis=up_axis,
+            )
+            best_cam_pre = coverage_pre_cleanup.best_input_cam
+            pre_render = render_object_for_input(
+                gaussians,
+                pipe_config,
+                object_center=coverage_pre_cleanup.object_center,
+                object_radius=coverage_pre_cleanup.object_radius,
+                input_cam_position=best_cam_pre['position'],
+                up_vector=coverage_pre_cleanup.up_vector,
+                object_id=obj_id,
+                render_size=512,
+                reference_K=best_cam_pre.get('K'),
+                reference_width=best_cam_pre.get('width'),
+                reference_height=best_cam_pre.get('height'),
+            )
+            pre_cleanup_render_diag = {
+                'camera': {
+                    'id': best_cam_pre.get('id', -1),
+                    'R': pre_render['camera_R'],
+                    'T': pre_render['camera_T'],
+                    'K': pre_render['camera_K'],
+                    'width': int(pre_render['rgb'].shape[1]),
+                    'height': int(pre_render['rgb'].shape[0]),
+                },
+                'rgb_before': pre_render['rgb'],
+                'alpha_before': pre_render['alpha'],
+            }
+
+        if cleanup_preseed_floaters:
+            floater_cleanup_stats = prune_object_floaters_dense_surface(
+                gaussians=gaussians,
+                object_id=int(obj_id),
+                density_quantile=float(floater_density_quantile),
+                min_keep_ratio=float(floater_min_keep_ratio),
+                knn_k=int(floater_knn_k),
+                connectivity_knn=int(floater_connectivity_knn),
+            )
+            if int(floater_cleanup_stats.get('n_pruned', 0)) > 0:
+                labels_now = gaussians.label_ids.squeeze(-1).cpu().numpy()
+                anchor_xyz_now = get_anchor_positions(gaussians)
+                obj_mask = (labels_now == obj_id)
+                object_anchors = anchor_xyz_now[obj_mask]
+                logger.info(
+                    "Object %d: using cleaned dense-surface anchors for coverage/seeding (%d kept).",
+                    int(obj_id),
+                    int(len(object_anchors)),
+                )
+
+        if cleanup_diagnostics and pre_cleanup_render_diag:
+            cam_diag = pre_cleanup_render_diag['camera']
+            cam_obj = create_virtual_camera(
+                cam_diag['R'],
+                cam_diag['T'],
+                cam_diag['K'],
+                int(cam_diag['width']),
+                int(cam_diag['height']),
+            )
+            bg_white = torch.ones(3, dtype=torch.float32, device="cuda")
+            render_after_diag = render_view(
+                gaussians,
+                cam_obj,
+                pipe_config,
+                bg_white,
+                object_label_id=int(obj_id),
+            )
+            rgb_after_diag = (render_after_diag['rgb'].permute(1, 2, 0).detach().cpu().numpy() * 255.0).astype(np.uint8)
+            alpha_after_diag = render_after_diag['alpha'].squeeze(0).detach().cpu().numpy().astype(np.float32)
+            pre_cleanup_render_diag['rgb_after'] = rgb_after_diag
+            pre_cleanup_render_diag['alpha_after'] = alpha_after_diag
+
+        if len(object_anchors) < 10:
+            logger.warning(
+                "Object %d has too few anchors (%d) after pre-seed cleanup. Skipping.",
+                int(obj_id),
+                int(len(object_anchors)),
+            )
+            results[obj_id] = {
+                'skipped_reason': 'too_few_anchors_after_preseed_cleanup',
+                'floater_cleanup_stats': floater_cleanup_stats,
+            }
+            with open(obj_dir / "replenishment_summary.json", "w", encoding="utf-8") as f:
+                json.dump(results[obj_id], f, indent=2)
+            continue
 
         # ── Step 4a: Coverage analysis ──
         logger.info("Analyzing coverage gaps...")
@@ -222,6 +339,32 @@ def run_replenishment(
 
         rgb_np = input_render['rgb']
         alpha_np = input_render['alpha']
+
+        if cleanup_diagnostics:
+            cleanup_diag_camera = pre_cleanup_render_diag.get('camera')
+            if cleanup_diag_camera is None:
+                cleanup_diag_camera = {
+                    'id': best_cam.get('id', -1),
+                    'R': input_render['camera_R'],
+                    'T': input_render['camera_T'],
+                    'K': input_render['camera_K'],
+                    'width': int(rgb_np.shape[1]),
+                    'height': int(rgb_np.shape[0]),
+                }
+            cleanup_diag_summary = _save_cleanup_diagnostics(
+                obj_dir=obj_dir,
+                object_id=int(obj_id),
+                camera_dict=cleanup_diag_camera,
+                anchors_before=object_anchors_pre_cleanup,
+                anchors_after=np.asarray(object_anchors, dtype=np.float32),
+                cleanup_stats=floater_cleanup_stats,
+                base_rgb=pre_cleanup_render_diag.get('rgb_after', rgb_np),
+                base_alpha=pre_cleanup_render_diag.get('alpha_after', alpha_np),
+                render_rgb_before=pre_cleanup_render_diag.get('rgb_before'),
+                render_alpha_before=pre_cleanup_render_diag.get('alpha_before'),
+                render_rgb_after=pre_cleanup_render_diag.get('rgb_after', rgb_np),
+                render_alpha_after=pre_cleanup_render_diag.get('alpha_after', alpha_np),
+            )
 
         _save_image(rgb_np, obj_dir / "input_view.png")
         _save_image((alpha_np * 255).astype(np.uint8), obj_dir / "input_alpha.png")
@@ -261,6 +404,9 @@ def run_replenishment(
             alpha_mask=alpha_np,
             num_inference_steps=diffusion_steps,
             seed=seed,
+            input_alpha_threshold=float(input_alpha_threshold),
+            input_crop_margin_frac=float(input_crop_margin_frac),
+            input_fill_ratio=float(input_fill_ratio),
         )
 
         # Save generated views
@@ -535,6 +681,11 @@ def run_replenishment(
             'visual_hull_min_views': int(visual_hull_min_views),
             'surface_shell_seed_filter': bool(surface_shell_seed_filter),
             'surface_shell_min_norm': float(surface_shell_min_norm),
+            'cleanup_preseed_floaters': bool(cleanup_preseed_floaters),
+            'floater_density_quantile': float(floater_density_quantile),
+            'floater_min_keep_ratio': float(floater_min_keep_ratio),
+            'floater_knn_k': int(floater_knn_k),
+            'floater_connectivity_knn': int(floater_connectivity_knn),
         }
         visual_hull_constraints = []
         if visual_hull_seed_filter:
@@ -542,6 +693,7 @@ def run_replenishment(
                 supervision_views,
                 object_anchors,
                 erode_px=max(0, int(target_mask_erode_px)),
+                align_scale_mode=str(target_align_scale_mode),
             )
             logger.info(
                 "Prepared %d visual-hull seed constraints for object %d.",
@@ -551,6 +703,11 @@ def run_replenishment(
         seed_call_cfg = dict(seed_cfg)
         seed_call_cfg.pop('visual_hull_seed_filter', None)
         seed_call_cfg.pop('surface_shell_seed_filter', None)
+        seed_call_cfg.pop('cleanup_preseed_floaters', None)
+        seed_call_cfg.pop('floater_density_quantile', None)
+        seed_call_cfg.pop('floater_min_keep_ratio', None)
+        seed_call_cfg.pop('floater_knn_k', None)
+        seed_call_cfg.pop('floater_connectivity_knn', None)
         seed_call_cfg['visual_hull_constraints'] = visual_hull_constraints
         seed_call_cfg['visual_hull_min_views'] = int(visual_hull_min_views)
         seed_call_cfg['surface_shell_filter'] = bool(surface_shell_seed_filter)
@@ -623,27 +780,15 @@ def run_replenishment(
         )
 
         if n_seeded > 0:
-            gate_init = float(np.clip(seed_opacity_gate_init, 1e-5, 0.95))
-            if finetune_iterations <= 0 or seed_opacity_gate_init <= 0.0:
-                gaussians.replenishment_seed_opacity_gate = torch.zeros(
-                    n_seeded, 1, dtype=torch.float32, device="cuda"
-                )
-                if hasattr(gaussians, 'replenishment_seed_opacity_logit'):
-                    delattr(gaussians, 'replenishment_seed_opacity_logit')
-                logger.info("Seed opacity gate: fixed at 0.0000 for seed-only render")
-            else:
-                gate_logit = float(np.log(gate_init / (1.0 - gate_init)))
-                gaussians.replenishment_seed_opacity_logit = torch.nn.Parameter(
-                    torch.full((n_seeded, 1), gate_logit, dtype=torch.float32, device="cuda")
-                )
-                if hasattr(gaussians, 'replenishment_seed_opacity_gate'):
-                    delattr(gaussians, 'replenishment_seed_opacity_gate')
-                logger.info(
-                    "Seed opacity gate: trainable init=%.4f, lr_scale=%.1f, reg=%.4f",
-                    gate_init,
-                    float(seed_opacity_gate_lr_scale),
-                    float(seed_opacity_gate_reg_weight),
-                )
+            # Direct-drive mode: seeded anchors are real geometry during optimization.
+            # Conservative seeded render already prevents feature leakage, so keep
+            # seed gates fixed at 1.0 and rely on objective post-opt pruning.
+            gaussians.replenishment_seed_opacity_gate = torch.ones(
+                n_seeded, 1, dtype=torch.float32, device="cuda"
+            )
+            if hasattr(gaussians, 'replenishment_seed_opacity_logit'):
+                delattr(gaussians, 'replenishment_seed_opacity_logit')
+            logger.info("Seed opacity gate: fixed at 1.0000 (direct-drive mode)")
 
             if finetune_iterations <= 0 or seed_opacity_lift_init <= 0.0:
                 if hasattr(gaussians, 'replenishment_seed_opacity_lift'):
@@ -712,6 +857,10 @@ def run_replenishment(
             seed_opacity_gate_reg_weight=float(seed_opacity_gate_reg_weight),
             seed_opacity_lift_lr_scale=float(seed_opacity_lift_lr_scale),
             seed_opacity_lift_reg_weight=float(seed_opacity_lift_reg_weight),
+            enable_post_seed_pruning=True,
+            seed_prune_opacity_threshold=0.01,
+            seed_prune_distance_mult=1.5,
+            seed_prune_eval_views=4,
             aabb_min=aabb_min,
             aabb_max=aabb_max,
             cage_padding_frac=float(cage_padding_frac),
@@ -719,13 +868,16 @@ def run_replenishment(
             silhouette_iou_thresh=float(silhouette_iou_thresh),
             hole_weight_max=float(hole_weight_max),
             seeded_anisotropy_max=float(seeded_anisotropy_max),
+            target_align_scale_mode=str(target_align_scale_mode),
+            anchor_silhouette_radius_scale=float(anchor_silhouette_radius_scale),
+            seeded_pos_scale_delta_mult=float(seeded_pos_scale_delta_mult),
             train_mlp_opacity=bool(train_mlp_opacity),
             mlp_opacity_lr_scale=float(mlp_opacity_lr_scale),
             mlp_opacity_reg_weight=float(mlp_opacity_reg_weight),
             train_mlp_cov=True,
             mlp_cov_lr_scale=0.005,
             preservation_cameras=preservation_cameras,
-            preservation_weight=4.0,
+            preservation_weight=1.0,
             save_path=str(obj_dir / "model"),
             reference_model_path=model_path,
         )
@@ -734,6 +886,7 @@ def run_replenishment(
             results[obj_id] = {
                 'diagnostic_only': False,
                 'skipped_reason': 'optimizer_produced_no_training_steps',
+                'floater_cleanup_stats': floater_cleanup_stats,
                 'n_gap_bins': len(coverage.gap_azimuths),
                 'n_generated_views': len(novel_views),
                 'n_aligned_views': len(aligned_cameras),
@@ -743,6 +896,7 @@ def run_replenishment(
                 'repair_diagnostics': repair_diag_result,
                 'aligned_repair_candidates': aligned_repair_result,
                 'repair_filter': repair_filter_result,
+                'cleanup_diag_summary': cleanup_diag_summary,
                 'optimizer_result': opt_result,
             }
             with open(obj_dir / "replenishment_summary.json", "w", encoding="utf-8") as f:
@@ -759,25 +913,23 @@ def run_replenishment(
         final_seed_lift_stats = {}
         final_seed_gates_tensor = None
         final_seed_lifts_tensor = None
-        if n_seeded > 0:
+        n_seeded_after_opt = int(n_seeded)
+        if hasattr(gaussians, 'replenishment_seed_opacity_gate'):
+            n_seeded_after_opt = int(gaussians.replenishment_seed_opacity_gate.shape[0])
+        elif hasattr(gaussians, 'replenishment_seed_opacity_logit'):
+            n_seeded_after_opt = int(gaussians.replenishment_seed_opacity_logit.shape[0])
+
+        if n_seeded_after_opt > 0:
             with torch.no_grad():
                 if hasattr(gaussians, 'replenishment_seed_opacity_logit'):
                     raw_gates = torch.sigmoid(gaussians.replenishment_seed_opacity_logit.detach())
                 elif hasattr(gaussians, 'replenishment_seed_opacity_gate'):
                     raw_gates = gaussians.replenishment_seed_opacity_gate.detach()
                 else:
-                    raw_gates = torch.ones(n_seeded, 1, dtype=torch.float32, device="cuda")
+                    raw_gates = torch.ones(n_seeded_after_opt, 1, dtype=torch.float32, device="cuda")
 
-                raw_gates = raw_gates.reshape(n_seeded, 1).clamp(0.0, 1.0)
-                accept_thresh = float(seed_opacity_accept_threshold)
-                if accept_thresh > 0.0:
-                    final_seed_gates_tensor = torch.where(
-                        raw_gates >= accept_thresh,
-                        raw_gates,
-                        torch.zeros_like(raw_gates),
-                    )
-                else:
-                    final_seed_gates_tensor = raw_gates.clone()
+                raw_gates = raw_gates.reshape(n_seeded_after_opt, 1).clamp(0.0, 1.0)
+                final_seed_gates_tensor = raw_gates.clone()
 
                 # Use fixed accepted gates for final renders and saved model metadata.
                 gaussians.replenishment_seed_opacity_gate = final_seed_gates_tensor
@@ -786,9 +938,9 @@ def run_replenishment(
 
                 if hasattr(gaussians, 'replenishment_seed_opacity_lift'):
                     raw_lifts = gaussians.replenishment_seed_opacity_lift.detach().clamp(min=0.0, max=2.0)
-                    raw_lifts = raw_lifts.reshape(n_seeded, -1)
+                    raw_lifts = raw_lifts.reshape(n_seeded_after_opt, -1)
                     final_seed_lifts_tensor = torch.where(
-                        final_seed_gates_tensor.reshape(n_seeded, 1) > 0.0,
+                        final_seed_gates_tensor.reshape(n_seeded_after_opt, 1) > 0.0,
                         raw_lifts,
                         torch.zeros_like(raw_lifts),
                     )
@@ -803,25 +955,25 @@ def run_replenishment(
 
                 accepted_count = int((final_seed_gates_tensor > 0.0).sum().item())
                 final_seed_gate_stats = {
-                    'accept_threshold': float(accept_thresh),
+                    'mode': 'post_pruning',
+                    'accept_threshold': None,
                     'accepted_count': accepted_count,
-                    'total_count': int(n_seeded),
+                    'total_count': int(n_seeded_after_opt),
                     'min': float(final_seed_gates_tensor.min().item()),
                     'median': float(final_seed_gates_tensor.median().item()),
                     'mean': float(final_seed_gates_tensor.mean().item()),
                     'max': float(final_seed_gates_tensor.max().item()),
                 }
                 logger.info(
-                    "Seed opacity final acceptance: %d/%d gates kept at threshold %.3f (max=%.4f)",
+                    "Seed opacity final acceptance: %d/%d gates kept after post-pruning (max=%.4f)",
                     accepted_count,
-                    int(n_seeded),
-                    float(accept_thresh),
+                    int(n_seeded_after_opt),
                     final_seed_gate_stats['max'],
                 )
 
         seeded_opacity_gates = []
         seeded_opacity_lifts = []
-        if n_seeded > 0:
+        if n_seeded_after_opt > 0:
             with torch.no_grad():
                 if final_seed_gates_tensor is not None:
                     gate_tensor = final_seed_gates_tensor
@@ -830,25 +982,27 @@ def run_replenishment(
                 elif hasattr(gaussians, 'replenishment_seed_opacity_gate'):
                     gate_tensor = gaussians.replenishment_seed_opacity_gate.detach()
                 else:
-                    gate_tensor = torch.ones(n_seeded, 1, dtype=torch.float32, device="cuda")
+                    gate_tensor = torch.ones(n_seeded_after_opt, 1, dtype=torch.float32, device="cuda")
                 seeded_opacity_gates = [float(v) for v in gate_tensor.reshape(-1).cpu().tolist()]
                 if final_seed_lifts_tensor is not None:
                     lift_tensor = final_seed_lifts_tensor
                 elif hasattr(gaussians, 'replenishment_seed_opacity_lift'):
                     lift_tensor = gaussians.replenishment_seed_opacity_lift.detach()
                 else:
-                    lift_tensor = torch.zeros(n_seeded, int(gaussians.n_offsets), dtype=torch.float32, device="cuda")
+                    lift_tensor = torch.zeros(n_seeded_after_opt, int(gaussians.n_offsets), dtype=torch.float32, device="cuda")
                 seeded_opacity_lifts = [
                     [float(v) for v in row]
-                    for row in lift_tensor.reshape(n_seeded, -1).cpu().tolist()
+                    for row in lift_tensor.reshape(n_seeded_after_opt, -1).cpu().tolist()
                 ]
 
         rep_payload = {
             'object_id': int(obj_id),
             'n_original_anchors': int(n_original_anchors),
             'override_view_dir': [float(v) for v in view_dir.tolist()],
-            'seeded_anchors': int(n_seeded),
+            'seeded_anchors': int(n_seeded_after_opt),
             'seed_settings': seed_cfg,
+            'floater_cleanup_stats': floater_cleanup_stats,
+            'cleanup_diag_summary': cleanup_diag_summary,
             'seed_opacity_gate_init': float(seed_opacity_gate_init),
             'seed_opacity_gate_lr_scale': float(seed_opacity_gate_lr_scale),
             'seed_opacity_gate_reg_weight': float(seed_opacity_gate_reg_weight),
@@ -886,7 +1040,9 @@ def run_replenishment(
             'n_aligned_views': len(aligned_cameras),
             'n_supervision_views_raw': int(raw_supervision_count),
             'n_supervision_views': len(supervision_views),
-            'n_seeded_anchors': int(n_seeded),
+            'n_seeded_anchors': int(n_seeded_after_opt),
+            'floater_cleanup_stats': floater_cleanup_stats,
+            'cleanup_diag_summary': cleanup_diag_summary,
             'final_loss': opt_result['final_loss'],
             'view_usage_counts': opt_result.get('view_usage_counts', []),
             'param_delta_norms': opt_result.get('param_delta_norms', {}),
@@ -895,6 +1051,7 @@ def run_replenishment(
             'seeded_offset_stats': opt_result.get('seeded_offset_stats', {}),
             'seed_opacity_gate_stats': opt_result.get('seed_opacity_gate_stats', {}),
             'seed_opacity_lift_stats': opt_result.get('seed_opacity_lift_stats', {}),
+            'seed_prune_stats': opt_result.get('seed_prune_stats', {}),
             'final_seed_opacity_gate_stats': final_seed_gate_stats,
             'final_seed_opacity_lift_stats': final_seed_lift_stats,
             'supervision_diagnostics': opt_result.get('supervision_diagnostics', []),
@@ -1137,16 +1294,267 @@ def _save_coverage_plot(coverage, path: Path):
     cv2.imwrite(str(path), img)
 
 
-# ───────────────────────────────────────────────────────────────────────────
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model_path", required=True, help="ObjectGS run dir.")
-    ap.add_argument("--output_dir", default="replenished_output")
-    ap.add_argument("--iteration", type=int, default=-1)
-    ap.add_argument("--object_id", type=int, default=None,
-                    help="Single object id; if omitted, runs all label ids > 0.")
-    ap.add_argument("--all_objects", action="store_true")
-    ap.add_argument("--seed", type=int, default=42)
+def _estimate_anchor_radius(anchors: np.ndarray) -> float:
+    anchors = np.asarray(anchors, dtype=np.float32)
+    if anchors.ndim != 2 or anchors.shape[0] < 4:
+        return 1.0
+    center = anchors.mean(axis=0)
+    dist = np.linalg.norm(anchors - center, axis=1)
+    return float(max(np.quantile(dist, 0.98), 1e-3))
+
+
+def _project_anchors_to_pixels(camera_dict: dict, anchors: np.ndarray):
+    anchors = np.asarray(anchors, dtype=np.float32)
+    if anchors.ndim != 2 or anchors.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.int32)
+
+    R = np.asarray(camera_dict['R'], dtype=np.float32)
+    T = np.asarray(camera_dict['T'], dtype=np.float32).reshape(1, 3)
+    K = np.asarray(camera_dict['K'], dtype=np.float32)
+    width = int(camera_dict['width'])
+    height = int(camera_dict['height'])
+
+    cam_pts = (R @ anchors.T).T + T
+    z = cam_pts[:, 2]
+    valid = z > 1e-4
+    if not np.any(valid):
+        return np.zeros((0, 2), dtype=np.int32)
+
+    u = K[0, 0] * cam_pts[:, 0] / (z + 1e-8) + K[0, 2]
+    v = K[1, 1] * cam_pts[:, 1] / (z + 1e-8) + K[1, 2]
+    valid = valid & np.isfinite(u) & np.isfinite(v)
+    valid = valid & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    if not np.any(valid):
+        return np.zeros((0, 2), dtype=np.int32)
+
+    uv = np.stack([u[valid], v[valid]], axis=1)
+    return np.round(uv).astype(np.int32)
+
+
+def _save_cleanup_diagnostics(
+    obj_dir: Path,
+    object_id: int,
+    camera_dict: dict,
+    anchors_before: np.ndarray,
+    anchors_after: np.ndarray,
+    cleanup_stats: dict,
+    base_rgb: np.ndarray = None,
+    base_alpha: np.ndarray = None,
+    render_rgb_before: np.ndarray = None,
+    render_alpha_before: np.ndarray = None,
+    render_rgb_after: np.ndarray = None,
+    render_alpha_after: np.ndarray = None,
+):
+    """Save visual pre/post cleanup diagnostics for manual tuning."""
+    from target_replenishment.core.objectgs_bridge import (
+        create_virtual_camera,
+        project_anchor_silhouette,
+    )
+
+    diag_dir = obj_dir / "cleanup_diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    width = int(camera_dict['width'])
+    height = int(camera_dict['height'])
+    cam = create_virtual_camera(
+        camera_dict['R'],
+        camera_dict['T'],
+        camera_dict['K'],
+        width,
+        height,
+    )
+
+    anchors_before = np.asarray(anchors_before, dtype=np.float32)
+    anchors_after = np.asarray(anchors_after, dtype=np.float32)
+
+    radius_before = _estimate_anchor_radius(anchors_before)
+    radius_after = _estimate_anchor_radius(anchors_after)
+
+    sil_before = project_anchor_silhouette(
+        cam,
+        anchors_before,
+        object_radius=radius_before,
+        height=height,
+        width=width,
+    )
+    sil_after = project_anchor_silhouette(
+        cam,
+        anchors_after,
+        object_radius=radius_after,
+        height=height,
+        width=width,
+    )
+
+    sil_before_u8 = (np.clip(sil_before, 0.0, 1.0) * 255.0).astype(np.uint8)
+    sil_after_u8 = (np.clip(sil_after, 0.0, 1.0) * 255.0).astype(np.uint8)
+    diff_u8 = cv2.absdiff(sil_after_u8, sil_before_u8)
+
+    cv2.imwrite(str(diag_dir / "silhouette_before.png"), sil_before_u8)
+    cv2.imwrite(str(diag_dir / "silhouette_after.png"), sil_after_u8)
+    cv2.imwrite(str(diag_dir / "silhouette_diff.png"), diff_u8)
+
+    if base_rgb is not None:
+        rgb_base = np.asarray(base_rgb).copy()
+        if rgb_base.ndim == 3 and rgb_base.shape[:2] != (height, width):
+            rgb_base = cv2.resize(rgb_base, (width, height), interpolation=cv2.INTER_AREA)
+        if rgb_base.ndim != 3 or rgb_base.shape[2] != 3:
+            rgb_base = np.ones((height, width, 3), dtype=np.uint8) * 245
+        else:
+            rgb_base = rgb_base.astype(np.uint8)
+    else:
+        rgb_base = np.ones((height, width, 3), dtype=np.uint8) * 245
+
+    if base_alpha is not None:
+        alpha_base = np.asarray(base_alpha, dtype=np.float32)
+        if alpha_base.shape[:2] != (height, width):
+            alpha_base = cv2.resize(alpha_base, (width, height), interpolation=cv2.INTER_AREA)
+        alpha_vis = (np.clip(alpha_base, 0.0, 1.0) * 255.0).astype(np.uint8)
+        cv2.imwrite(str(diag_dir / "input_alpha_for_overlay.png"), alpha_vis)
+    cv2.imwrite(str(diag_dir / "input_rgb_for_overlay.png"), cv2.cvtColor(rgb_base, cv2.COLOR_RGB2BGR))
+
+    before_bgr = cv2.cvtColor(sil_before_u8, cv2.COLOR_GRAY2BGR)
+    after_bgr = cv2.cvtColor(sil_after_u8, cv2.COLOR_GRAY2BGR)
+    diff_bgr = cv2.applyColorMap(np.clip(diff_u8 * 3, 0, 255).astype(np.uint8), cv2.COLORMAP_JET)
+    compare = np.hstack([before_bgr, after_bgr, diff_bgr])
+    cv2.putText(compare, "BEFORE", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (60, 60, 255), 2)
+    cv2.putText(compare, "AFTER", (width + 16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (40, 200, 40), 2)
+    cv2.putText(compare, "DIFF", (2 * width + 16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(
+        compare,
+        f"obj={int(object_id)} keep={int(anchors_after.shape[0])}/{int(anchors_before.shape[0])}",
+        (16, height - 12),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        1,
+    )
+    cv2.imwrite(str(diag_dir / "silhouette_compare.png"), compare)
+
+    def _draw_silhouette_contours(rgb: np.ndarray, mask_u8: np.ndarray, color, label: str):
+        out = rgb.copy()
+        mask = mask_u8 > 24
+        if mask.any():
+            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(out, contours, -1, color, 2)
+        cv2.putText(out, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+        return out
+
+    rgb_bgr = cv2.cvtColor(rgb_base, cv2.COLOR_RGB2BGR)
+    rgb_sil_before = _draw_silhouette_contours(rgb_bgr, sil_before_u8, (0, 140, 255), "before silhouette")
+    rgb_sil_after = _draw_silhouette_contours(rgb_bgr, sil_after_u8, (0, 220, 0), "after silhouette")
+    rgb_sil_both = rgb_bgr.copy()
+    rgb_sil_both = _draw_silhouette_contours(rgb_sil_both, sil_before_u8, (0, 140, 255), "orange=before green=after")
+    rgb_sil_both = _draw_silhouette_contours(rgb_sil_both, sil_after_u8, (0, 220, 0), "orange=before green=after")
+    cv2.imwrite(str(diag_dir / "rgb_silhouette_before_overlay.png"), rgb_sil_before)
+    cv2.imwrite(str(diag_dir / "rgb_silhouette_after_overlay.png"), rgb_sil_after)
+    cv2.imwrite(str(diag_dir / "rgb_silhouette_compare_overlay.png"), rgb_sil_both)
+
+    def _to_u8_alpha(alpha_arr: np.ndarray):
+        if alpha_arr is None:
+            return None
+        alpha_np = np.asarray(alpha_arr, dtype=np.float32)
+        if alpha_np.shape[:2] != (height, width):
+            alpha_np = cv2.resize(alpha_np, (width, height), interpolation=cv2.INTER_AREA)
+        alpha_np = np.clip(alpha_np, 0.0, 1.0)
+        return (alpha_np * 255.0).astype(np.uint8)
+
+    alpha_before_u8 = _to_u8_alpha(render_alpha_before)
+    alpha_after_u8 = _to_u8_alpha(render_alpha_after)
+    if alpha_before_u8 is not None:
+        cv2.imwrite(str(diag_dir / "render_alpha_before.png"), alpha_before_u8)
+    if alpha_after_u8 is not None:
+        cv2.imwrite(str(diag_dir / "render_alpha_after.png"), alpha_after_u8)
+
+    if render_rgb_after is not None:
+        rgb_after_base = np.asarray(render_rgb_after).astype(np.uint8)
+        if rgb_after_base.shape[:2] != (height, width):
+            rgb_after_base = cv2.resize(rgb_after_base, (width, height), interpolation=cv2.INTER_AREA)
+        rgb_after_base = cv2.cvtColor(rgb_after_base, cv2.COLOR_RGB2BGR)
+    else:
+        rgb_after_base = rgb_bgr.copy()
+
+    def _draw_alpha_contours(rgb_bgr_in: np.ndarray, alpha_u8: np.ndarray, color, label: str):
+        out = rgb_bgr_in.copy()
+        if alpha_u8 is None:
+            cv2.putText(out, label + " (missing)", (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.60, color, 2)
+            return out
+        mask = alpha_u8 > 10
+        if mask.any():
+            contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(out, contours, -1, color, 2)
+        cv2.putText(out, label, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.60, color, 2)
+        return out
+
+    rgb_render_before = _draw_alpha_contours(rgb_after_base, alpha_before_u8, (0, 140, 255), "render-alpha before")
+    rgb_render_after = _draw_alpha_contours(rgb_after_base, alpha_after_u8, (0, 220, 0), "render-alpha after")
+    rgb_render_compare = rgb_after_base.copy()
+    rgb_render_compare = _draw_alpha_contours(rgb_render_compare, alpha_before_u8, (0, 140, 255), "orange=before green=after")
+    rgb_render_compare = _draw_alpha_contours(rgb_render_compare, alpha_after_u8, (0, 220, 0), "orange=before green=after")
+    cv2.imwrite(str(diag_dir / "rgb_render_mask_before_overlay.png"), rgb_render_before)
+    cv2.imwrite(str(diag_dir / "rgb_render_mask_after_overlay.png"), rgb_render_after)
+    cv2.imwrite(str(diag_dir / "rgb_render_mask_compare_overlay.png"), rgb_render_compare)
+
+    if render_rgb_before is not None:
+        rgb_before_u8 = np.asarray(render_rgb_before).astype(np.uint8)
+        if rgb_before_u8.shape[:2] != (height, width):
+            rgb_before_u8 = cv2.resize(rgb_before_u8, (width, height), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(diag_dir / "render_rgb_before.png"), cv2.cvtColor(rgb_before_u8, cv2.COLOR_RGB2BGR))
+    if render_rgb_after is not None:
+        rgb_after_u8 = np.asarray(render_rgb_after).astype(np.uint8)
+        if rgb_after_u8.shape[:2] != (height, width):
+            rgb_after_u8 = cv2.resize(rgb_after_u8, (width, height), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(str(diag_dir / "render_rgb_after.png"), cv2.cvtColor(rgb_after_u8, cv2.COLOR_RGB2BGR))
+
+    points_overlay = rgb_bgr.copy()
+    uv_before = _project_anchors_to_pixels(camera_dict, anchors_before)
+    uv_after = _project_anchors_to_pixels(camera_dict, anchors_after)
+    for u, v in uv_before:
+        cv2.circle(points_overlay, (int(u), int(v)), 1, (0, 64, 255), -1)
+    for u, v in uv_after:
+        cv2.circle(points_overlay, (int(u), int(v)), 1, (30, 180, 30), -1)
+    cv2.putText(points_overlay, "pre=orange post=green", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (32, 32, 32), 3)
+    cv2.putText(points_overlay, "pre=orange post=green", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 1)
+    cv2.imwrite(str(diag_dir / "projected_points_overlay.png"), points_overlay)
+
+    summary = {
+        'enabled': True,
+        'object_id': int(object_id),
+        'camera_id': int(camera_dict.get('id', -1)),
+        'n_before': int(anchors_before.shape[0]),
+        'n_after': int(anchors_after.shape[0]),
+        'radius_before': float(radius_before),
+        'radius_after': float(radius_after),
+        'cleanup_stats': cleanup_stats,
+        'diag_dir': str(diag_dir),
+        'files': [
+            'input_rgb_for_overlay.png',
+            'input_alpha_for_overlay.png',
+            'render_rgb_before.png',
+            'render_rgb_after.png',
+            'render_alpha_before.png',
+            'render_alpha_after.png',
+            'silhouette_before.png',
+            'silhouette_after.png',
+            'silhouette_diff.png',
+            'silhouette_compare.png',
+            'rgb_silhouette_before_overlay.png',
+            'rgb_silhouette_after_overlay.png',
+            'rgb_silhouette_compare_overlay.png',
+            'rgb_render_mask_before_overlay.png',
+            'rgb_render_mask_after_overlay.png',
+            'rgb_render_mask_compare_overlay.png',
+            'projected_points_overlay.png',
+        ],
+    }
+    with open(diag_dir / "cleanup_diagnostics_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    return summary
+
+
+def _build_comparison_cameras(center, radius, orbit_radius, up_vector, input_cam_position, width, height, n_views):
+    from target_replenishment.render_360 import look_at
+
+    up = up_vector.astype(np.float32)
 
     # Keep comparison cameras outside the object and near training-view distance.
     dist = max(float(orbit_radius) * 0.9, float(radius) * 2.5, 0.5)
@@ -1217,7 +1625,12 @@ def _render_object_with_cameras(gaussians, pipe_config, cameras, object_id):
     return frames
 
 
-def _build_visual_hull_seed_constraints(supervision_views, object_anchors, erode_px: int = 0):
+def _build_visual_hull_seed_constraints(
+    supervision_views,
+    object_anchors,
+    erode_px: int = 0,
+    align_scale_mode: str = "cover",
+):
     """Build coarse foreground masks for pre-seed visual-hull carving.
 
     Zero123++ outputs are object-centered, while our novel cameras use scene
@@ -1270,7 +1683,12 @@ def _build_visual_hull_seed_constraints(supervision_views, object_anchors, erode
 
         target_img = np.ones((rgb.shape[0], rgb.shape[1], 3), dtype=np.uint8) * 255
         target_img[mask] = 0
-        aligned = align_image_to_render_bbox(target_img, ref, bg_color=(255, 255, 255))
+        aligned = align_image_to_render_bbox(
+            target_img,
+            ref,
+            bg_color=(255, 255, 255),
+            scale_mode=str(align_scale_mode),
+        )
         aligned_mask = aligned.mean(axis=2) < 250.0
         aligned_mask = _largest_component_mask_np(aligned_mask, min_pixels=64)
         if aligned_mask.shape[:2] != (height, width):
@@ -1400,17 +1818,25 @@ def main():
                         help="Output directory for results")
     parser.add_argument("--object_ids", type=int, nargs='+', default=None,
                         help="Specific object IDs to enhance")
+    parser.add_argument("--object_id", type=int, default=None,
+                        help="Single object ID alias for --object_ids")
     parser.add_argument("--up_axis", default="auto", choices=['x', 'y', 'z', 'auto', 'spread'],
                         help="World up axis (auto-detect from cameras)")
     parser.add_argument("--finetune_iters", type=int, default=1200,
                         help="Fine-tuning iterations per object")
     parser.add_argument("--lr_scale", type=float, default=1.0,
                         help="Learning rate scale for fine-tuning")
-    parser.add_argument("--hallucination_weight", type=float, default=0.15,
+    parser.add_argument("--hallucination_weight", type=float, default=0.5,
                         help="Loss weight for hallucinated views (0.0–1.0)")
     parser.add_argument("--novel_rgb_weight", type=float, default=1.0,
                         help="Extra multiplier on direct Zero123++ RGB L1/SSIM. "
                             "Use 0.0 for geometry/mask-only ablations.")
+    parser.add_argument("--input_alpha_threshold", type=float, default=0.30,
+                        help="Alpha threshold used to build the Zero123 input foreground")
+    parser.add_argument("--input_crop_margin_frac", type=float, default=0.08,
+                        help="Fractional crop margin around Zero123 input foreground bbox")
+    parser.add_argument("--input_fill_ratio", type=float, default=0.78,
+                        help="Target fill ratio when centering object on Zero123 input canvas")
     parser.add_argument("--target_mask_erode_px", type=int, default=0,
                         help="Erode generated target masks by this many pixels before "
                             "loss/filtering to ignore uncertain edges and drips.")
@@ -1441,6 +1867,18 @@ def main():
                         help="Disable outer-shell filtering of candidate seed positions")
     parser.add_argument("--surface_shell_min_norm", type=float, default=0.65,
                         help="Keep candidate seeds whose normalized AABB shell score is at least this value")
+    parser.add_argument("--no_cleanup_preseed_floaters", action="store_true",
+                        help="Disable permanent pre-seeding removal of sparse object floaters")
+    parser.add_argument("--floater_density_quantile", type=float, default=0.65,
+                        help="Dense-surface quantile for pre-seeding floater cleanup (lower = stricter)")
+    parser.add_argument("--floater_min_keep_ratio", type=float, default=0.35,
+                        help="Minimum fraction of object anchors kept during pre-seeding floater cleanup")
+    parser.add_argument("--floater_knn_k", type=int, default=8,
+                        help="k for kNN density in pre-seeding floater cleanup")
+    parser.add_argument("--floater_connectivity_knn", type=int, default=6,
+                        help="kNN graph degree for largest-component filtering in pre-seeding floater cleanup")
+    parser.add_argument("--no_cleanup_diagnostics", action="store_true",
+                        help="Disable per-object cleanup diagnostics folder with pre/post silhouettes")
     parser.add_argument("--seed_opacity_gate_init", type=float, default=0.02,
                         help="Initial opacity multiplier for newly seeded anchors; 0 disables seed-only visibility")
     parser.add_argument("--seed_opacity_gate_lr_scale", type=float, default=50.0,
@@ -1485,6 +1923,12 @@ def main():
                         help="Max ratio of largest/smallest gaussian scale axis "
                              "for seeded anchors. Caps radial spike artifacts "
                              "from single-view depth ambiguity. Set <=1 to disable.")
+    parser.add_argument("--target_align_scale_mode", choices=["cover", "contain"], default="cover",
+                        help="BBox alignment scale mode for generated targets: cover or contain")
+    parser.add_argument("--anchor_silhouette_radius_scale", type=float, default=0.18,
+                        help="Radius scale factor for projected anchor silhouette masks")
+    parser.add_argument("--seeded_pos_scale_delta_mult", type=float, default=1.0,
+                        help="Multiplier for seeded _scaling[:,0:3] clamp budget relative to seeded_max_scale_delta")
     parser.add_argument("--train_mlp_opacity", action="store_true",
                         help="Adapt ObjectGS mlp_opacity at a tiny LR for seeded backside OOD feature/view pairs")
     parser.add_argument("--mlp_opacity_lr_scale", type=float, default=0.001,
@@ -1533,16 +1977,23 @@ def main():
                         help="Elevation sign for novel cameras. Default +1 with camera-local-up consensus matches Zero123++ v1.2.")
     args = parser.parse_args()
 
+    target_ids = args.object_ids
+    if target_ids is None and args.object_id is not None:
+        target_ids = [int(args.object_id)]
+
     run_replenishment(
         model_path=args.model_path,
         output_dir=args.output_dir,
         iteration=args.iteration,
-        target_object_ids=args.object_ids,
+        target_object_ids=target_ids,
         up_axis=args.up_axis,
         finetune_iterations=args.finetune_iters,
         finetune_lr_scale=args.lr_scale,
         hallucination_weight=args.hallucination_weight,
         novel_rgb_weight=args.novel_rgb_weight,
+        input_alpha_threshold=args.input_alpha_threshold,
+        input_crop_margin_frac=args.input_crop_margin_frac,
+        input_fill_ratio=args.input_fill_ratio,
         target_mask_erode_px=args.target_mask_erode_px,
         freeze_feat_when_rgb_off=not args.no_freeze_feat_when_rgb_off,
         conservative_seed_render=not args.legacy_seed_render,
@@ -1550,6 +2001,12 @@ def main():
         visual_hull_min_views=args.visual_hull_min_views,
         surface_shell_seed_filter=not args.no_surface_shell_seed_filter,
         surface_shell_min_norm=args.surface_shell_min_norm,
+        cleanup_preseed_floaters=not args.no_cleanup_preseed_floaters,
+        floater_density_quantile=args.floater_density_quantile,
+        floater_min_keep_ratio=args.floater_min_keep_ratio,
+        floater_knn_k=args.floater_knn_k,
+        floater_connectivity_knn=args.floater_connectivity_knn,
+        cleanup_diagnostics=not args.no_cleanup_diagnostics,
         seed_opacity_gate_init=args.seed_opacity_gate_init,
         seed_opacity_gate_lr_scale=args.seed_opacity_gate_lr_scale,
         seed_opacity_gate_reg_weight=args.seed_opacity_gate_reg_weight,
@@ -1578,6 +2035,9 @@ def main():
         cage_padding_frac=args.cage_padding_frac,
         hole_weight_max=args.hole_weight_max,
         seeded_anisotropy_max=args.seeded_anisotropy_max,
+        target_align_scale_mode=args.target_align_scale_mode,
+        anchor_silhouette_radius_scale=args.anchor_silhouette_radius_scale,
+        seeded_pos_scale_delta_mult=args.seeded_pos_scale_delta_mult,
         train_mlp_opacity=args.train_mlp_opacity,
         mlp_opacity_lr_scale=args.mlp_opacity_lr_scale,
         mlp_opacity_reg_weight=args.mlp_opacity_reg_weight,

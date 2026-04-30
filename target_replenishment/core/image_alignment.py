@@ -27,15 +27,20 @@ def _largest_component_bbox(img: np.ndarray, bg_color, diff_thresh: float = 10.0
 
 
 def align_image_to_render_bbox(target_rgb: np.ndarray, rendered_rgb: np.ndarray,
-                                bg_color=(255, 255, 255), return_diag: bool = False):
+                                bg_color=(255, 255, 255), return_diag: bool = False,
+                                scale_mode: str = "cover"):
     """Warp target_rgb (Zero123 output) to match the 2D bounding box of rendered_rgb.
 
     Both images are assumed uint8 with a solid bg color. Bbox is taken from the
     largest connected non-bg component in each image to ignore floaters/drips.
 
-    If `return_diag=True`, returns (aligned_rgb, dx, dy, scale) where dx/dy are
-    the centre offsets (rendered − target, in pixels) and scale is the applied
-    isotropic scale.
+        If `return_diag=True`, returns (aligned_rgb, dx, dy, scale) where dx/dy are
+        the centre offsets (rendered − target, in pixels) and scale is the applied
+        isotropic scale.
+
+        scale_mode:
+            - "cover": scale by max(rw/tw, rh/th), so target covers render bbox.
+            - "contain": scale by min(rw/tw, rh/th), so target stays inside render bbox.
     """
     tgt_bbox = _largest_component_bbox(target_rgb, bg_color)
     rnd_bbox = _largest_component_bbox(rendered_rgb, bg_color)
@@ -51,9 +56,12 @@ def align_image_to_render_bbox(target_rgb: np.ndarray, rendered_rgb: np.ndarray,
     tw, th = max(1, tx2 - tx1), max(1, ty2 - ty1)
     rw, rh = max(1, rx2 - rx1), max(1, ry2 - ry1)
 
-    # Scale to match the bounding box dimensions
-    # We use the maximum scale factor to ensure the object covers the expected span
-    scale = max(rw / tw, rh / th)
+    sx = rw / tw
+    sy = rh / th
+    if str(scale_mode).lower() == "contain":
+        scale = min(sx, sy)
+    else:
+        scale = max(sx, sy)
 
     # Calculate center points
     tcx, tcy = tx1 + tw / 2.0, ty1 + th / 2.0

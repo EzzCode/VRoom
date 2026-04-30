@@ -178,16 +178,6 @@ def load_gaussians(model_path: str, iteration: int = -1) -> tuple:
                 else:
                     lifts = lifts.reshape(lifts.shape[0], -1)
                 gaussians.replenishment_seed_opacity_lift = lifts
-            if 'seeded_fixed_opacities' in rep_data:
-                gaussians.replenishment_seed_fixed_opacity = torch.tensor(
-                    rep_data['seeded_fixed_opacities'], dtype=torch.float32, device="cuda"
-                ).reshape(-1, 1)
-            if 'seeded_color_rgb' in rep_data:
-                gaussians.replenishment_seed_color_rgb = torch.tensor(
-                    rep_data['seeded_color_rgb'], dtype=torch.float32, device="cuda"
-                ).reshape(-1, 3)
-            if 'seeded_scaling_boost' in rep_data:
-                gaussians.replenishment_seed_scaling_boost = float(rep_data['seeded_scaling_boost'])
             logger.info("Loaded replenishment metadata from %s", rep_path)
             break
         except Exception as exc:
@@ -352,6 +342,7 @@ def project_anchor_silhouette(
     height: int = None,
     width: int = None,
     blur_size: int = 9,
+    radius_scale: float = 0.18,
 ) -> np.ndarray:
     """Project 3D anchors into a soft 2D silhouette mask.
 
@@ -406,7 +397,8 @@ def project_anchor_silhouette(
     object_radius = float(object_radius) if object_radius is not None else 1.0
 
     # Convert the object radius to a conservative projected footprint.
-    base_radius = np.clip((object_radius / np.median(depth)) * focal * 0.18, 2.0, 48.0)
+    radius_scale = float(np.clip(radius_scale, 0.02, 1.0))
+    base_radius = np.clip((object_radius / np.median(depth)) * focal * radius_scale, 2.0, 48.0)
     mask = np.zeros((h, w), dtype=np.float32)
 
     for (x, y), z in zip(pixels, depth):
