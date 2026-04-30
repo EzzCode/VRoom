@@ -59,10 +59,6 @@ def optimize_with_novel_views(
     seed_opacity_gate_reg_weight: float = 0.005,
     seed_opacity_lift_lr_scale: float = 10.0,
     seed_opacity_lift_reg_weight: float = 0.02,
-    enable_post_seed_pruning: bool = True,
-    seed_prune_opacity_threshold: float = 0.01,
-    seed_prune_distance_mult: float = 1.5,
-    seed_prune_eval_views: int = 4,
     aabb_min = None,
     aabb_max = None,
     cage_padding_frac: float = 0.05,
@@ -70,9 +66,6 @@ def optimize_with_novel_views(
     silhouette_iou_thresh: float = 0.2,
     hole_weight_max: float = 2.5,
     seeded_anisotropy_max: float = 3.0,
-    target_align_scale_mode: str = "cover",
-    anchor_silhouette_radius_scale: float = 0.18,
-    seeded_pos_scale_delta_mult: float = 1.0,
     train_mlp_opacity: bool = False,
     mlp_opacity_lr_scale: float = 0.001,
     mlp_opacity_reg_weight: float = 1.0,
@@ -200,7 +193,6 @@ def optimize_with_novel_views(
             aligned_uint8, dx, dy, ascale = align_image_to_render_bbox(
                 rgb_uint8, render_uint8,
                 bg_color=(255, 255, 255), return_diag=True,
-                scale_mode=str(target_align_scale_mode),
             )
             # Only accept the warp when it's a sane correction. If the model
             # render at the supervision pose has no meaningful foreground (e.g.
@@ -239,19 +231,6 @@ def optimize_with_novel_views(
                 gt_mask_np = gt_mask_eroded
         gt_object_mask = torch.from_numpy(gt_mask_np.astype(np.float32)).unsqueeze(0).cuda()
 
-        render_support_np = None
-        render_alpha = a_pkg.get('render_alphas')
-        if render_alpha is not None:
-            render_alpha_np = render_alpha.detach().float().cpu().numpy()
-            render_alpha_np = np.squeeze(render_alpha_np)
-            if render_alpha_np.ndim == 2:
-                render_support_np = render_alpha_np > 0.02
-        if render_support_np is None:
-            render_support_np = (render_rgb.permute(1, 2, 0).cpu().numpy().mean(axis=2) < 0.995)
-        render_support_np = _largest_component_mask(render_support_np, min_pixels=64)
-        allowed_alpha_np = np.logical_or(render_support_np, gt_mask_np)
-        allowed_alpha_mask = torch.from_numpy(allowed_alpha_np.astype(np.float32)).unsqueeze(0).cuda()
-
         silhouette_target = None
         if object_anchors is not None and len(object_anchors) > 0:
             silhouette_np = project_anchor_silhouette(
@@ -260,7 +239,6 @@ def optimize_with_novel_views(
                 object_radius=object_radius,
                 height=cam.image_height,
                 width=cam.image_width,
-                radius_scale=float(anchor_silhouette_radius_scale),
             )
             silhouette_target = torch.from_numpy(silhouette_np).unsqueeze(0).float().cuda()
 
@@ -314,7 +292,6 @@ def optimize_with_novel_views(
             'camera': cam,
             'gt_image': gt_image,
             'gt_object_mask': gt_object_mask,
-            'allowed_alpha_mask': allowed_alpha_mask,
             'gt_silhouette_mask': silhouette_target,
             'weight': float(view.get('weight', hallucination_weight)) * confidence,
         })
@@ -527,7 +504,6 @@ def optimize_with_novel_views(
 
         gt_image = sv['gt_image']
         gt_object_mask = sv['gt_object_mask']
-        allowed_alpha_mask = sv.get('allowed_alpha_mask', gt_object_mask)
         gt_silhouette_mask = sv.get('gt_silhouette_mask')
 
         # Hole-focused weighting: emphasize pixels where target says object exists
@@ -569,7 +545,7 @@ def optimize_with_novel_views(
             alpha = torch.clamp(render_alpha, 0.0, 1.0)
             if alpha.ndim == 2:
                 alpha = alpha.unsqueeze(0)
-            loss_outside_alpha = (alpha * (1.0 - allowed_alpha_mask)).mean()
+            loss_outside_alpha = (alpha * (1.0 - gt_object_mask)).mean()
 
         loss_preserve = torch.tensor(0.0, device="cuda")
         if preservation:
@@ -810,8 +786,8 @@ def optimize_with_novel_views(
                         min=-float(seeded_max_scale_delta),
                         max=float(seeded_max_scale_delta),
                     )
-                    # Offset-position dims [0:3]: configurable clamp budget.
-                    pos_budget = float(seeded_pos_scale_delta_mult) * float(seeded_max_scale_delta)
+                    # Offset-position dims [0:3]: looser clamp (2x).
+                    pos_budget = 2.0 * float(seeded_max_scale_delta)
                     full_cur[:, 0:3] = full_ref[:, 0:3] + torch.clamp(
                         full_cur[:, 0:3] - full_ref[:, 0:3],
                         min=-pos_budget,
@@ -940,7 +916,7 @@ def optimize_with_novel_views(
                     min=-float(seeded_max_scale_delta),
                     max=float(seeded_max_scale_delta),
                 )
-                pos_budget = float(seeded_pos_scale_delta_mult) * float(seeded_max_scale_delta)
+                pos_budget = 2.0 * float(seeded_max_scale_delta)
                 full_cur[:, 0:3] = full_ref[:, 0:3] + torch.clamp(
                     full_cur[:, 0:3] - full_ref[:, 0:3],
                     min=-pos_budget,
@@ -1000,35 +976,6 @@ def optimize_with_novel_views(
                 f"opacity_mlp_reg={loss_mlp_opacity_reg.item():.5f}, view_idx={sv_idx}"
             )
 
-    seed_prune_stats = {}
-    if (
-        enable_post_seed_pruning
-        and seeded_mask is not None
-        and seeded_mask.any()
-        and object_center is not None
-        and object_radius is not None
-    ):
-        seed_prune_stats = _prune_seeded_anchors_post_opt(
-            gaussians=gaussians,
-            supervision=supervision,
-            preservation=preservation,
-            seeded_mask=seeded_mask,
-            object_center=np.asarray(object_center, dtype=np.float32),
-            object_radius=float(object_radius),
-            scale_ceiling_log=scale_ceiling_val,
-            opacity_threshold=float(seed_prune_opacity_threshold),
-            distance_mult=float(seed_prune_distance_mult),
-            eval_views=int(max(1, seed_prune_eval_views)),
-        )
-        if seed_prune_stats.get('n_pruned', 0) > 0:
-            logger.info(
-                "Post-opt seed pruning removed %d anchors (opacity=%d, distance=%d, scale=%d)",
-                int(seed_prune_stats.get('n_pruned', 0)),
-                int(seed_prune_stats.get('n_pruned_opacity', 0)),
-                int(seed_prune_stats.get('n_pruned_distance', 0)),
-                int(seed_prune_stats.get('n_pruned_scale', 0)),
-            )
-
     gaussians.eval()
 
     if save_path:
@@ -1046,16 +993,7 @@ def optimize_with_novel_views(
         for name, start in initial_params.items():
             if hasattr(gaussians, name):
                 current = getattr(gaussians, name).detach()
-                if current.shape == start.shape:
-                    param_delta_norms[name] = float(torch.norm(current - start).item())
-                elif current.ndim == start.ndim and current.shape[1:] == start.shape[1:]:
-                    n_common = int(min(current.shape[0], start.shape[0]))
-                    if n_common > 0:
-                        param_delta_norms[name] = float(torch.norm(current[:n_common] - start[:n_common]).item())
-                    else:
-                        param_delta_norms[name] = 0.0
-                else:
-                    param_delta_norms[name] = 0.0
+                param_delta_norms[name] = float(torch.norm(current - start).item())
 
         def _axis_stats(tensor):
             if tensor is None or tensor.numel() == 0:
@@ -1072,7 +1010,7 @@ def optimize_with_novel_views(
                 })
             return stats
 
-        if seeded_mask is not None and seeded_mask.any() and int(seed_prune_stats.get('n_pruned', 0)) == 0:
+        if seeded_mask is not None and seeded_mask.any():
             if hasattr(gaussians, '_scaling') and '_scaling' in initial_params and gaussians._scaling.shape[-1] >= 6:
                 scale_cur = gaussians._scaling[seeded_mask].detach()
                 scale_start = initial_params['_scaling'][seeded_mask]
@@ -1128,11 +1066,7 @@ def optimize_with_novel_views(
     max_scale_log = None
     mean_scale_log = None
     if hasattr(gaussians, '_scaling'):
-        if (
-            seeded_mask is not None
-            and seeded_mask.any()
-            and seeded_mask.shape[0] == gaussians._scaling.shape[0]
-        ):
+        if seeded_mask is not None and seeded_mask.any():
             sc = gaussians._scaling[seeded_mask].detach()
         else:
             sc = gaussians._scaling.detach()
@@ -1208,200 +1142,7 @@ def optimize_with_novel_views(
         'novel_rgb_weight': float(novel_rgb_weight),
         'target_mask_erode_px': int(max(0, target_mask_erode_px)),
         'freeze_feat_when_rgb_off': bool(freeze_feat_when_rgb_off),
-        'seed_prune_stats': seed_prune_stats,
     }
-
-
-def _prune_seeded_anchors_post_opt(
-    gaussians,
-    supervision: list,
-    preservation: list,
-    seeded_mask,
-    object_center: 'np.ndarray',
-    object_radius: float,
-    scale_ceiling_log: float,
-    opacity_threshold: float,
-    distance_mult: float,
-    eval_views: int,
-):
-    """Prune weak/drifted seeded anchors using objective geometric criteria."""
-    import torch
-    import numpy as np
-
-    n_total = int(gaussians._anchor.shape[0])
-    seeded_idx = torch.nonzero(seeded_mask, as_tuple=False).squeeze(1)
-    n_seeded = int(seeded_idx.numel())
-    if n_seeded == 0:
-        return {
-            'enabled': True,
-            'n_seeded_before': 0,
-            'n_seeded_after': 0,
-            'n_pruned': 0,
-            'n_pruned_opacity': 0,
-            'n_pruned_distance': 0,
-            'n_pruned_scale': 0,
-        }
-
-    cameras = []
-    for sv in supervision:
-        cam = sv.get('camera')
-        if cam is not None:
-            cameras.append(cam)
-    for pv in preservation:
-        cam = pv.get('camera')
-        if cam is not None:
-            cameras.append(cam)
-    cameras = cameras[: max(1, int(eval_views))]
-
-    device = gaussians._anchor.device
-    center_t = torch.as_tensor(object_center, dtype=torch.float32, device=device).reshape(1, 3)
-
-    opacity_view_max = torch.full((n_seeded,), -1e9, dtype=torch.float32, device=device)
-    anchor_seed_rows = None
-    if hasattr(gaussians, 'n_original_anchors') and gaussians.n_original_anchors is not None:
-        anchor_seed_rows = seeded_idx - int(gaussians.n_original_anchors)
-
-    with torch.no_grad():
-        seed_anchor = gaussians.get_anchor[seeded_idx]
-        seed_feat = gaussians.get_anchor_feat[seeded_idx]
-
-        for cam in cameras:
-            ob_view = seed_anchor - cam.camera_center
-            ob_dist = ob_view.norm(dim=1, keepdim=True)
-            ob_view = ob_view / torch.clamp(ob_dist, min=1e-8)
-
-            if hasattr(gaussians, 'override_view_dir') and gaussians.override_view_dir is not None:
-                view_dir = gaussians.override_view_dir.to(device=ob_view.device, dtype=ob_view.dtype).reshape(1, 3)
-                ob_view = view_dir.expand_as(ob_view)
-
-            if int(getattr(gaussians, 'view_dim', 0)) > 0:
-                cat_local_view = torch.cat([seed_feat, ob_view], dim=1)
-            else:
-                cat_local_view = seed_feat
-
-            neural_opacity = gaussians.get_opacity_mlp(cat_local_view)
-
-            if hasattr(gaussians, 'replenishment_seed_opacity_lift') and anchor_seed_rows is not None:
-                lift = gaussians.replenishment_seed_opacity_lift
-                if lift is not None and lift.numel() > 0:
-                    valid = anchor_seed_rows < lift.shape[0]
-                    if valid.any():
-                        lift_rows = torch.zeros_like(neural_opacity)
-                        selected = lift[anchor_seed_rows[valid]].to(device=neural_opacity.device, dtype=neural_opacity.dtype)
-                        if selected.ndim == 1:
-                            selected = selected.unsqueeze(1)
-                        if selected.shape[1] == 1 and neural_opacity.shape[1] != 1:
-                            selected = selected.expand(-1, neural_opacity.shape[1])
-                        if selected.shape[1] != neural_opacity.shape[1]:
-                            selected = selected[:, : neural_opacity.shape[1]]
-                        valid_rows = torch.nonzero(valid, as_tuple=False).squeeze(1)
-                        lift_rows[valid_rows, : selected.shape[1]] = selected
-                        neural_opacity = neural_opacity + lift_rows
-
-            cam_anchor_opacity = neural_opacity.max(dim=1).values
-            opacity_view_max = torch.maximum(opacity_view_max, cam_anchor_opacity)
-
-        opacity_prune = opacity_view_max < float(opacity_threshold)
-
-        dist = torch.norm(seed_anchor - center_t, dim=1)
-        distance_prune = dist > (float(distance_mult) * float(object_radius))
-
-        scale_prune = torch.zeros_like(opacity_prune)
-        if scale_ceiling_log is not None and hasattr(gaussians, '_scaling') and gaussians._scaling.shape[-1] >= 6:
-            sc = gaussians._scaling[seeded_idx, 3:6]
-            scale_prune = (sc.max(dim=1).values > float(scale_ceiling_log))
-
-        seed_prune = opacity_prune | distance_prune | scale_prune
-
-        n_pruned = int(seed_prune.sum().item())
-        if n_pruned <= 0:
-            return {
-                'enabled': True,
-                'n_seeded_before': n_seeded,
-                'n_seeded_after': n_seeded,
-                'n_pruned': 0,
-                'n_pruned_opacity': int(opacity_prune.sum().item()),
-                'n_pruned_distance': int(distance_prune.sum().item()),
-                'n_pruned_scale': int(scale_prune.sum().item()),
-                'opacity_threshold': float(opacity_threshold),
-                'distance_threshold': float(distance_mult * float(object_radius)),
-                'scale_ceiling_log': None if scale_ceiling_log is None else float(scale_ceiling_log),
-            }
-
-        global_prune_mask = torch.zeros((n_total,), dtype=torch.bool, device=device)
-        global_prune_mask[seeded_idx[seed_prune]] = True
-        keep_mask = ~global_prune_mask
-
-        old_seed_lift = None
-        if hasattr(gaussians, 'replenishment_seed_opacity_lift'):
-            old_seed_lift = gaussians.replenishment_seed_opacity_lift.detach().clone()
-
-        # prune_anchor() depends on the original training optimizer param-group
-        # names (anchor/offset/scaling/...), while finetune uses a reduced set.
-        # Do a direct tensor prune here because optimization is already finished.
-        _prune_attrs = ['_anchor', '_offset', '_anchor_feat', '_scaling', '_rotation']
-        for _name in _prune_attrs:
-            if not hasattr(gaussians, _name):
-                continue
-            _param = getattr(gaussians, _name)
-            if _param is None:
-                continue
-            if isinstance(_param, torch.nn.Parameter):
-                _new = torch.nn.Parameter(
-                    _param.detach()[keep_mask].clone().requires_grad_(_param.requires_grad)
-                )
-            else:
-                _new = _param[keep_mask].clone()
-            setattr(gaussians, _name, _new)
-
-        if hasattr(gaussians, 'label_ids') and gaussians.label_ids is not None:
-            gaussians.label_ids = gaussians.label_ids[keep_mask].clone()
-
-        # Rebuild seeded gate/lift metadata for surviving seeded anchors.
-        if hasattr(gaussians, 'n_original_anchors') and gaussians.n_original_anchors is not None:
-            n_orig = int(gaussians.n_original_anchors)
-            n_after = int(gaussians._anchor.shape[0])
-            new_seed_count = max(0, n_after - n_orig)
-            gaussians.replenishment_seed_opacity_gate = torch.ones(
-                (new_seed_count, 1), dtype=torch.float32, device=device
-            )
-            if hasattr(gaussians, 'replenishment_seed_opacity_logit'):
-                delattr(gaussians, 'replenishment_seed_opacity_logit')
-
-            if old_seed_lift is not None:
-                kept_seed_global = torch.nonzero(keep_mask, as_tuple=False).squeeze(1)
-                kept_seed_rows = kept_seed_global[kept_seed_global >= n_orig] - n_orig
-                if kept_seed_rows.numel() > 0 and old_seed_lift.numel() > 0:
-                    kept_seed_rows = kept_seed_rows[kept_seed_rows < old_seed_lift.shape[0]]
-                    if kept_seed_rows.numel() > 0:
-                        gaussians.replenishment_seed_opacity_lift = old_seed_lift[kept_seed_rows]
-                    else:
-                        gaussians.replenishment_seed_opacity_lift = torch.zeros(
-                            (0, int(gaussians.n_offsets)), dtype=torch.float32, device=device
-                        )
-                else:
-                    gaussians.replenishment_seed_opacity_lift = torch.zeros(
-                        (0, int(gaussians.n_offsets)), dtype=torch.float32, device=device
-                    )
-
-        return {
-            'enabled': True,
-            'n_seeded_before': n_seeded,
-            'n_seeded_after': int(max(0, gaussians._anchor.shape[0] - int(getattr(gaussians, 'n_original_anchors', gaussians._anchor.shape[0])))),
-            'n_pruned': int(n_pruned),
-            'n_pruned_opacity': int((opacity_prune & seed_prune).sum().item()),
-            'n_pruned_distance': int((distance_prune & seed_prune).sum().item()),
-            'n_pruned_scale': int((scale_prune & seed_prune).sum().item()),
-            'opacity_threshold': float(opacity_threshold),
-            'distance_threshold': float(distance_mult * float(object_radius)),
-            'scale_ceiling_log': None if scale_ceiling_log is None else float(scale_ceiling_log),
-            'opacity_max_stats': {
-                'min': float(opacity_view_max.min().item()),
-                'median': float(opacity_view_max.median().item()),
-                'mean': float(opacity_view_max.mean().item()),
-                'max': float(opacity_view_max.max().item()),
-            },
-        }
 
 
 def _largest_component_mask(mask: 'np.ndarray', min_pixels: int = 16):

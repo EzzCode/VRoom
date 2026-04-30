@@ -342,7 +342,6 @@ def project_anchor_silhouette(
     height: int = None,
     width: int = None,
     blur_size: int = 9,
-    radius_scale: float = 0.18,
 ) -> np.ndarray:
     """Project 3D anchors into a soft 2D silhouette mask.
 
@@ -397,8 +396,7 @@ def project_anchor_silhouette(
     object_radius = float(object_radius) if object_radius is not None else 1.0
 
     # Convert the object radius to a conservative projected footprint.
-    radius_scale = float(np.clip(radius_scale, 0.02, 1.0))
-    base_radius = np.clip((object_radius / np.median(depth)) * focal * radius_scale, 2.0, 48.0)
+    base_radius = np.clip((object_radius / np.median(depth)) * focal * 0.18, 2.0, 48.0)
     mask = np.zeros((h, w), dtype=np.float32)
 
     for (x, y), z in zip(pixels, depth):
