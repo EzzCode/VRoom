@@ -304,6 +304,8 @@ renderCUDA(
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
 
+	// Warp-level optimization for early exit
+	cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
 #if RENDER_AXUTILITY
 	// render axutility ouput
@@ -341,8 +343,15 @@ renderCUDA(
 		block.sync();
 
 		// Iterate over current batch
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
+		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
 		{
+			// Warp-level early exit: if all threads in this warp are done, skip
+			if (warp.all(done))
+				continue;
+
+			if (done)
+				continue;
+
 			// Keep track of current position in range
 			contributor++;
 

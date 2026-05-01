@@ -78,6 +78,19 @@ __forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& r
 	};
 }
 
+// Asymmetric bounding box: separate x/y radii for elongated surfels
+__forceinline__ __device__ void getRect(const float2 p, int radius_x, int radius_y, uint2& rect_min, uint2& rect_max, dim3 grid)
+{
+	rect_min = {
+		(unsigned int)max(0, min((int)grid.x, (int)((p.x - radius_x) / BLOCK_X))),
+		(unsigned int)max(0, min((int)grid.y, (int)((p.y - radius_y) / BLOCK_Y)))
+	};
+	rect_max = {
+		(unsigned int)max(0, min((int)grid.x, (int)((p.x + radius_x + BLOCK_X - 1) / BLOCK_X))),
+		(unsigned int)max(0, min((int)grid.y, (int)((p.y + radius_y + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+}
+
 __forceinline__ __device__ float3 transformPoint4x3(const float3& p, const float* matrix)
 {
 	float3 transformed = {
