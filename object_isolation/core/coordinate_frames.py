@@ -85,8 +85,11 @@ def look_at_w2c(camera_center_W: np.ndarray, target_W: np.ndarray, up_W: np.ndar
     if abs(float(np.dot(forward, up))) > 0.999:
         up = _unit(np.array([1.0, 0.0, 0.0]) if abs(forward[0]) < 0.9
                    else np.array([0.0, 1.0, 0.0]))
-    right = _unit(np.cross(up, forward))
-    cam_up = _unit(np.cross(forward, right))  # orthonormalize
+    # OpenCV / COLMAP: x-right, y-down, z-forward (right-handed). With
+    # world up `up` and forward `f`, the image-right axis is f × up
+    # (not up × f — that would mirror the image horizontally).
+    right = _unit(np.cross(forward, up))
+    cam_up = _unit(np.cross(right, forward))  # orthonormalize
 
     R_w2c = np.stack([right, -cam_up, forward], axis=0).astype(np.float32)  # rows
     T_w2c = (-R_w2c @ eye).astype(np.float32)

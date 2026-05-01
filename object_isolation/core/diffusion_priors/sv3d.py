@@ -44,14 +44,10 @@ from .base import DiffusionPriorBackend, HallucinatedView
 logger = logging.getLogger(__name__)
 
 
-# ──────────────────────────────────────────────────────────────────────
-# HF cache redirection (D: drive). Must run before any from_pretrained.
-# ──────────────────────────────────────────────────────────────────────
-_DEFAULT_HF_CACHE = r"D:\conda_envs\hf_cache"
 
 
 def _ensure_hf_cache_env(cache_dir: Optional[str] = None) -> str:
-    target = cache_dir or os.environ.get("HF_HOME") or _DEFAULT_HF_CACHE
+    target = cache_dir or os.environ.get("HF_HOME")
     target = str(Path(target).expanduser().resolve())
     Path(target).mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", target)
@@ -87,7 +83,7 @@ class SV3DBackend(DiffusionPriorBackend):
     def __init__(
         self,
         num_frames: int = 21,
-        decode_chunk_size: int = 1,
+        decode_chunk_size: int = 4,
         dtype: torch.dtype = torch.float16,
         offload_strategy: str = "sequential",  # "sequential" | "model" | "none"
         safe_mode: bool = False,
@@ -276,7 +272,13 @@ class SV3DBackend(DiffusionPriorBackend):
 
         views: List[HallucinatedView] = []
         for i, pim in enumerate(frames_pil):
-            az_abs = cond_azimuth_deg + float(az_off_deg[i])
+            # SV3D's orbit advances azimuth in the OPPOSITE direction to our
+            # V-frame convention (LocalSV3D measures az from +Z toward +X,
+            # CCW from above; SV3D rotates CW). Negate az_off so frame i is
+            # tagged with its true V-frame azimuth. The conditioning frame
+            # (last frame, az_off ≈ 0 or 360) still pins to cond_azimuth_deg.
+            az_off_signed = -float(az_off_deg[i])
+            az_abs = cond_azimuth_deg + az_off_signed
             az_abs = ((az_abs + 180.0) % 360.0) - 180.0
             rgb = np.asarray(pim.convert("RGB"))
             views.append(HallucinatedView(

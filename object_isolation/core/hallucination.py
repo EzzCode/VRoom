@@ -122,6 +122,17 @@ def _normalize_framing(rgb: np.ndarray, alpha: np.ndarray,
         a01 = a01 / 255.0
     a01 = np.clip(a01, 0.0, 1.0)
     mask = a01 > 0.4
+    # Drop floaters: keep only the largest connected component for the bbox.
+    # (Stray Gaussians outside the object inflate the bbox and squash the
+    # actual silhouette into a corner — visible as apparent mirror/flip on
+    # frames where there are sparse floaters off to one side.)
+    mask_u8 = mask.astype(np.uint8)
+    n_lbl, lbls, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    if n_lbl > 1:
+        # stats[0] is background; pick the largest non-background area.
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        biggest = 1 + int(np.argmax(areas))
+        mask = (lbls == biggest)
     ys, xs = np.where(mask)
     if len(xs) == 0:
         # Fall back: blank frame at target_size with white bg.
@@ -181,7 +192,8 @@ def _load_sv3d_cache(out_raw: Path, cond_az: float, cond_el: float,
         bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         # Reproduce sv3d_p azimuth schedule: az_off = (i+1)*360/n.
-        az_off = ((i + 1) * 360.0 / n) % 360.0
+        # Negate to match the V-frame convention (see SV3DBackend.hallucinate).
+        az_off = -(((i + 1) * 360.0 / n) % 360.0)
         az_abs = ((cond_az + az_off + 180.0) % 360.0) - 180.0
         views.append(HallucinatedView(
             rgb=rgb, azimuth_V_deg=float(az_abs),
@@ -198,7 +210,8 @@ def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
                       object_label_id: int,
                       az_V_deg: float, el_V_deg: float,
                       resolution: int = 576,
-                      fov_y_deg: float = 50.0):
+                      fov_y_deg: float = 50.0,
+                      up_W_override: Optional[np.ndarray] = None):
     """Render ObjectGS at a V-frame pose; returns (rgb uint8 HxWx3, alpha float HxW).
 
     Distance from object centroid is local_sv3d.world_local.radius
@@ -211,6 +224,15 @@ def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
     R_w2c, T_w2c, _C_W = local_sv3d.sv3d_view_to_world_camera(
         az_V_deg, el_V_deg,
     )
+    if up_W_override is not None:
+        # Re-roll the look-at using the conditioning camera's own world-up so
+        # that ObjectGS reference renders match SV3D's inherited roll.
+        from .coordinate_frames import look_at_w2c
+        R_w2c, T_w2c = look_at_w2c(
+            np.asarray(_C_W, dtype=np.float64),
+            np.asarray(local_sv3d.world_local.centroid_W, dtype=np.float64),
+            np.asarray(up_W_override, dtype=np.float64),
+        )
 
     # Build K from desired FOV.
     fov_y = math.radians(fov_y_deg)
@@ -307,6 +329,23 @@ def run_hallucination(
     logger.info("Conditioning: cam=%d az_V=%.1f el_V=%.1f score=%.3f from %s",
                 top1["cam_index"], cond_az, cond_el, top1["score"], rgba_path.name)
 
+    # Extract the conditioning camera's own world-up (= -R_w2c[1] in OpenCV).
+    # SV3D outputs inherit the cond image's roll; reference renders must use
+    # the same up so the silhouettes align (otherwise scene-averaged up_W can
+    # be tens of degrees off-axis from any individual camera).
+    cond_cam_up_W: Optional[np.ndarray] = None
+    try:
+        cond_cam_dict = scope.cameras[int(top1["cam_index"])]
+        R_cond = np.asarray(cond_cam_dict["R"], dtype=np.float64)  # already R_w2c
+        cond_cam_up_W = (-R_cond[1]).astype(np.float64)
+        cond_cam_up_W = cond_cam_up_W / max(np.linalg.norm(cond_cam_up_W), 1e-9)
+        ang_deg = float(np.degrees(np.arccos(np.clip(
+            cond_cam_up_W @ np.asarray(scope.up_W, dtype=np.float64), -1.0, 1.0))))
+        logger.info("Cond cam up_W=%s (∠ scope.up_W = %.1f°)",
+                    np.round(cond_cam_up_W, 3).tolist(), ang_deg)
+    except (IndexError, KeyError, ValueError) as e:
+        logger.warning("Could not extract cond cam up; falling back to scope.up_W (%s)", e)
+
     # Backend.
     if backend is None:
         from .diffusion_priors.sv3d import SV3DBackend
@@ -339,6 +378,7 @@ def run_hallucination(
             object_label_id=object_label_id,
             az_V_deg=v.azimuth_V_deg, el_V_deg=v.elevation_V_deg,
             resolution=res, fov_y_deg=fov_y_deg,
+            up_W_override=cond_cam_up_W,
         )
         m_objgs = ref_alpha > 0.4
         m_sv3d = _alpha_from_white_bg(v.rgb)
