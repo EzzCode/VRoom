@@ -233,13 +233,19 @@ class DensificationController:
             if not candidates.any():
                 continue
 
-            child_xyz = (
-                field.anchor.unsqueeze(1) + field.offset * anchor_extent.unsqueeze(1)
+            # Compute selected child positions without materializing the full
+            # [N_anchors, n_offsets, 3] tensor — avoids OOM on large scenes
+            candidate_indices = candidates.nonzero(as_tuple=True)[0]
+            anchor_idx = candidate_indices // model.n_offsets
+            offset_idx = candidate_indices % model.n_offsets
+            selected_xyz = (
+                field.anchor[anchor_idx]
+                + field.offset[anchor_idx, offset_idx]
+                  * anchor_extent[anchor_idx]
             )
             scale_divisor = max(hierarchy_factor ** level, 1)
             cell_size = field.voxel_size * (init_factor // scale_divisor)
 
-            selected_xyz = child_xyz.reshape(-1, 3)[candidates]
             novel_anchors, novel_features, novel_labels = self._filter_novel_voxels(
                 field, model, candidates, selected_xyz, cell_size, opt
             )
@@ -344,14 +350,17 @@ class DensificationController:
         novel_positions = unique_grid[novel].float() * cell_size
 
         # Pool features from contributing offsets
-        repeated_feat = field.feature.repeat_interleave(
-            model.n_offsets, dim=0
-        )[candidates]
+        # Avoid repeat_interleave which creates [N_anchors * n_offsets, feat_dim] —
+        # instead compute which anchor each candidate belongs to and index directly.
+        candidate_indices = candidates.nonzero(as_tuple=True)[0]
+        anchor_indices = candidate_indices // model.n_offsets
+        candidate_features = field.feature[anchor_indices]  # [n_candidates, feat_dim]
+
         pooled = torch.zeros(
             (unique_grid.shape[0], field.feature.shape[1]), device=self.device
         )
         counts = torch.zeros((unique_grid.shape[0], 1), device=self.device)
-        pooled.index_add_(0, inverse, repeated_feat)
+        pooled.index_add_(0, inverse, candidate_features)
         counts.index_add_(
             0, inverse, torch.ones((inverse.shape[0], 1), device=self.device)
         )
@@ -361,22 +370,12 @@ class DensificationController:
         # Pool labels from contributing offsets
         novel_labels = None
         if field.label_ids is not None:
-            repeated_labels = field.label_ids.repeat_interleave(
-                model.n_offsets, dim=0
-            ).view(-1)[candidates]
+            candidate_labels = field.label_ids.view(-1)[anchor_indices]
             # Vectorized majority vote per unique voxel
             n_unique = unique_grid.shape[0]
-            n_classes = int(repeated_labels.max().item()) + 1 if repeated_labels.numel() > 0 else 1
-            votes = torch.zeros((n_unique, n_classes), dtype=torch.long, device=self.device)
-            votes.scatter_add_(
-                0,
-                inverse.unsqueeze(1).expand(-1, 1),
-                torch.ones((inverse.shape[0], 1), dtype=torch.long, device=self.device),
-            )
-            # This gives votes per (voxel, class) — but we need per-class vote counts
-            # Use a one-hot approach instead
-            one_hot = torch.zeros((repeated_labels.shape[0], n_classes), dtype=torch.long, device=self.device)
-            one_hot.scatter_(1, repeated_labels.view(-1, 1).long(), 1)
+            n_classes = int(candidate_labels.max().item()) + 1 if candidate_labels.numel() > 0 else 1
+            one_hot = torch.zeros((candidate_labels.shape[0], n_classes), dtype=torch.long, device=self.device)
+            one_hot.scatter_(1, candidate_labels.view(-1, 1).long(), 1)
             votes = torch.zeros((n_unique, n_classes), dtype=torch.long, device=self.device)
             votes.scatter_add_(0, inverse.unsqueeze(1).expand(-1, n_classes), one_hot)
             pooled_labels = votes.argmax(dim=1)
