@@ -49,6 +49,10 @@ def run_phase7(
     grid_resolution: int = 25,
     visual_hull_min_views: int = 10,
     colmap_init_target_points: int = 8000,
+    enable_densification: bool = False,
+    max_anchor_count: int = 20000,
+    densify_grad_threshold: float = 0.00005,
+    densify_extra_ratio: float = 0.08,
     use_cond_cam_up: bool = True,
     fov_y_deg: float = 50.0,
 ) -> dict:
@@ -141,10 +145,12 @@ def run_phase7(
         parent_gaussians=gaussians,
         pipe_config=pipe_config,
         lr_scale=float(scratch_lr_scale),
-        init_grid_resolution=max(16, int(grid_resolution)),
-        min_visual_hull_support=max(10, int(visual_hull_min_views)),
         colmap_init_target_points=int(colmap_init_target_points),
         rgb_weight=float(novel_rgb_weight),
+        enable_densification=bool(enable_densification),
+        max_anchor_count=int(max_anchor_count),
+        densify_grad_threshold=float(densify_grad_threshold),
+        densify_extra_ratio=float(densify_extra_ratio),
     )
     summary = dict(scratch["summary"])
     summary.update({

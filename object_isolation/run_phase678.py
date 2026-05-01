@@ -77,6 +77,10 @@ def run(
     grid_resolution: int = 25,
     visual_hull_min_views: int = 10,
     colmap_init_target_points: int = 8000,
+    enable_densification: bool = False,
+    max_anchor_count: int = 20000,
+    densify_grad_threshold: float = 0.00005,
+    densify_extra_ratio: float = 0.08,
     n_compare_views: int = 8,
     skip_compare: bool = False,
 ) -> dict:
@@ -162,6 +166,10 @@ def run(
                 grid_resolution=int(grid_resolution),
                 visual_hull_min_views=int(visual_hull_min_views),
                 colmap_init_target_points=int(colmap_init_target_points),
+                enable_densification=bool(enable_densification),
+                max_anchor_count=int(max_anchor_count),
+                densify_grad_threshold=float(densify_grad_threshold),
+                densify_extra_ratio=float(densify_extra_ratio),
             )
             scratch_gaussians = summary.pop("_scratch_gaussians", None)
         except Exception as e:
@@ -252,6 +260,12 @@ def _parse_args() -> argparse.Namespace:
                    help="Deprecated; scratch initialization now uses labeled COLMAP seed points.")
     p.add_argument("--colmap_init_target_points", type=int, default=8000,
                    help="Minimum fresh seed points after COLMAP-neighbor interpolation; no parent ObjectGS points are used.")
+    p.add_argument("--enable_densification", action="store_true",
+                   help="Enable ObjectGS densification from fresh COLMAP seed points only.")
+    p.add_argument("--max_anchor_count", type=int, default=20000,
+                   help="Stop requesting densification once this scratch-anchor count is reached.")
+    p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
+    p.add_argument("--densify_extra_ratio", type=float, default=0.08)
     p.add_argument("--n_compare_views", type=int, default=8)
     p.add_argument("--skip_compare", action="store_true",
                    help="Skip before/after orbit rendering (faster for batch runs).")
@@ -276,6 +290,10 @@ def main():
         grid_resolution=args.grid_resolution,
         visual_hull_min_views=args.visual_hull_min_views,
         colmap_init_target_points=args.colmap_init_target_points,
+        enable_densification=args.enable_densification,
+        max_anchor_count=args.max_anchor_count,
+        densify_grad_threshold=args.densify_grad_threshold,
+        densify_extra_ratio=args.densify_extra_ratio,
         n_compare_views=args.n_compare_views,
         skip_compare=args.skip_compare,
     )

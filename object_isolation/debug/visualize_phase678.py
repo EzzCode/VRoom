@@ -212,6 +212,11 @@ def run_debug(
     fov_y_deg: float = 50.0,
     grid_resolution: int = 25,
     visual_hull_min_views: int = 10,
+    colmap_init_target_points: int = 8000,
+    enable_densification: bool = False,
+    max_anchor_count: int = 20000,
+    densify_grad_threshold: float = 0.00005,
+    densify_extra_ratio: float = 0.08,
     n_compare_views: int = 8,
     no_run: bool = False,
 ) -> dict:
@@ -232,6 +237,11 @@ def run_debug(
             fov_y_deg=float(fov_y_deg),
             grid_resolution=int(grid_resolution),
             visual_hull_min_views=int(visual_hull_min_views),
+            colmap_init_target_points=int(colmap_init_target_points),
+            enable_densification=bool(enable_densification),
+            max_anchor_count=int(max_anchor_count),
+            densify_grad_threshold=float(densify_grad_threshold),
+            densify_extra_ratio=float(densify_extra_ratio),
             n_compare_views=int(n_compare_views),
             skip_compare=False,
         )
@@ -268,6 +278,11 @@ def main():
     parser.add_argument("--fov_y_deg", type=float, default=50.0)
     parser.add_argument("--grid_resolution", type=int, default=25)
     parser.add_argument("--visual_hull_min_views", type=int, default=10)
+    parser.add_argument("--colmap_init_target_points", type=int, default=8000)
+    parser.add_argument("--enable_densification", action="store_true")
+    parser.add_argument("--max_anchor_count", type=int, default=20000)
+    parser.add_argument("--densify_grad_threshold", type=float, default=0.00005)
+    parser.add_argument("--densify_extra_ratio", type=float, default=0.08)
     parser.add_argument("--n_compare_views", type=int, default=8)
     parser.add_argument("--no_run", action="store_true", help="Only build debug panels from existing Phase 6/7/8 outputs.")
     args = parser.parse_args()
@@ -283,6 +298,11 @@ def main():
         fov_y_deg=args.fov_y_deg,
         grid_resolution=args.grid_resolution,
         visual_hull_min_views=args.visual_hull_min_views,
+        colmap_init_target_points=args.colmap_init_target_points,
+        enable_densification=args.enable_densification,
+        max_anchor_count=args.max_anchor_count,
+        densify_grad_threshold=args.densify_grad_threshold,
+        densify_extra_ratio=args.densify_extra_ratio,
         n_compare_views=args.n_compare_views,
         no_run=args.no_run,
     )

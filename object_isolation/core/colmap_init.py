@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
 import yaml
 
@@ -61,11 +62,30 @@ def _read_phase3_module_label(extraction_index_path: str | Path | None) -> Optio
         return None
 
 
+def _read_phase3_manifest(extraction_index_path: str | Path | None) -> tuple[Optional[dict], Optional[int]]:
+    if extraction_index_path is None:
+        return None, None
+    path = Path(extraction_index_path)
+    if not path.exists():
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        value = manifest.get("module1_obj_id")
+        module_label = int(value) if value is not None else None
+        return manifest, module_label
+    except Exception as exc:
+        logger.warning("Could not read Phase-3 manifest from %s: %s", path, exc)
+        return None, None
+
+
 def _candidate_labeled_plys(source_path: Path) -> list[Path]:
     return [
+        source_path / "sparse" / "0" / "points3D_corr.ply",
         source_path / "vote_output" / "points3D_labeled.ply",
         source_path / "sparse" / "0" / "points3D_labeled.ply",
         source_path / "sparse" / "0" / "points3D_deva.ply",
+        source_path / "sparse" / "points3D_corr.ply",
         source_path / "sparse" / "points3D_labeled.ply",
         source_path / "sparse" / "points3D_deva.ply",
     ]
@@ -159,6 +179,106 @@ def _upsample_from_colmap_neighbors(
     }
 
 
+def _project_points(points: np.ndarray, cam: dict, mask_shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    R = np.asarray(cam["R"], dtype=np.float32)
+    T = np.asarray(cam["T"], dtype=np.float32).reshape(1, 3)
+    K = np.asarray(cam["K"], dtype=np.float32)
+    height, width = int(mask_shape[0]), int(mask_shape[1])
+    cam_height = int(cam.get("height", height))
+    cam_width = int(cam.get("width", width))
+
+    cam_pts = points @ R.T + T
+    z = cam_pts[:, 2]
+    u = K[0, 0] * cam_pts[:, 0] / np.maximum(z, 1e-8) + K[0, 2]
+    v = K[1, 1] * cam_pts[:, 1] / np.maximum(z, 1e-8) + K[1, 2]
+    if cam_width > 0 and cam_height > 0 and (cam_width != width or cam_height != height):
+        u = u * (float(width) / float(cam_width))
+        v = v * (float(height) / float(cam_height))
+    ui = np.rint(u).astype(np.int64)
+    vi = np.rint(v).astype(np.int64)
+    valid = (z > 1e-4) & (ui >= 0) & (ui < width) & (vi >= 0) & (vi < height)
+    return ui, vi, valid
+
+
+def _score_colmap_labels_against_phase3(
+    xyz_all: np.ndarray,
+    labels_all: np.ndarray,
+    *,
+    scope,
+    extraction_index_path: str | Path | None,
+    min_points: int,
+) -> dict[int, dict]:
+    manifest, _module_label = _read_phase3_manifest(extraction_index_path)
+    if manifest is None or scope is None:
+        return {}
+
+    manifest_dir = Path(extraction_index_path).parent if extraction_index_path is not None else _VROOM_ROOT
+    candidate_labels = [
+        int(label) for label in np.unique(labels_all)
+        if int(label) != 0 and int((labels_all == int(label)).sum()) >= int(min_points)
+    ]
+    scores = {
+        int(label): {
+            "label_count": int((labels_all == int(label)).sum()),
+            "projected_votes": 0,
+            "inside_votes": 0,
+            "mask_frames_seen": 0,
+            "inside_fraction": 0.0,
+            "projection_score": 0.0,
+        }
+        for label in candidate_labels
+    }
+    if not scores:
+        return {}
+
+    frames = list(manifest.get("frames", []))
+    for frame in frames:
+        try:
+            cam_index = int(frame["cam_index"])
+        except Exception:
+            continue
+        if cam_index < 0 or cam_index >= len(scope.cameras):
+            continue
+        mask_value = frame.get("out_mask_path") or frame.get("out_rgba_path")
+        if not mask_value:
+            continue
+        mask_path = _resolve_path(mask_value, base_dir=manifest_dir)
+        mask_img = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED) if mask_path.exists() else None
+        if mask_img is None:
+            continue
+        if mask_img.ndim == 3 and mask_img.shape[2] == 4:
+            mask = mask_img[..., 3] > 127
+        elif mask_img.ndim == 3:
+            mask = mask_img.mean(axis=2) > 127
+        else:
+            mask = mask_img > 127
+        if int(mask.sum()) < 64:
+            continue
+
+        ui, vi, valid = _project_points(xyz_all, scope.cameras[cam_index], mask.shape[:2])
+        if not valid.any():
+            continue
+        inside_all = np.zeros(labels_all.shape[0], dtype=bool)
+        inside_all[valid] = mask[vi[valid], ui[valid]]
+        for label in candidate_labels:
+            label_mask = labels_all == int(label)
+            projected = int(np.logical_and(label_mask, valid).sum())
+            if projected <= 0:
+                continue
+            inside = int(np.logical_and(label_mask, inside_all).sum())
+            scores[label]["projected_votes"] += projected
+            scores[label]["inside_votes"] += inside
+            scores[label]["mask_frames_seen"] += 1
+
+    for label, score in scores.items():
+        projected = int(score["projected_votes"])
+        inside = int(score["inside_votes"])
+        inside_fraction = float(inside) / max(float(projected), 1.0)
+        score["inside_fraction"] = inside_fraction
+        score["projection_score"] = float(inside_fraction * np.log1p(float(inside)))
+    return scores
+
+
 def load_colmap_object_point_cloud(
     *,
     model_path: str | Path,
@@ -185,14 +305,36 @@ def load_colmap_object_point_cloud(
     colors_all = colors_all[finite]
     labels_all = labels_all[finite]
 
-    module_label = _read_phase3_module_label(extraction_index_path)
+    _manifest, module_label = _read_phase3_manifest(extraction_index_path)
     label_priority: list[int] = []
     for value in (module_label, int(object_id)):
         if value is not None and int(value) not in label_priority:
             label_priority.append(int(value))
 
     label_counts = {int(label): int((labels_all == label).sum()) for label in np.unique(labels_all)}
-    chosen_label = next((label for label in label_priority if label_counts.get(label, 0) >= int(min_points)), None)
+    label_projection_scores = _score_colmap_labels_against_phase3(
+        xyz_all,
+        labels_all,
+        scope=scope,
+        extraction_index_path=extraction_index_path,
+        min_points=int(min_points),
+    )
+    scored_candidates = [
+        (label, data) for label, data in label_projection_scores.items()
+        if int(data.get("inside_votes", 0)) >= max(5, int(min_points) // 2)
+    ]
+    chosen_label = None
+    if scored_candidates:
+        chosen_label = max(
+            scored_candidates,
+            key=lambda item: (
+                float(item[1].get("projection_score", 0.0)),
+                float(item[1].get("inside_fraction", 0.0)),
+                int(item[1].get("inside_votes", 0)),
+            ),
+        )[0]
+    if chosen_label is None:
+        chosen_label = next((label for label in label_priority if label_counts.get(label, 0) >= int(min_points)), None)
     if chosen_label is None:
         positive = {label: count for label, count in label_counts.items() if label != 0 and count >= int(min_points)}
         if not positive:
@@ -214,6 +356,7 @@ def load_colmap_object_point_cloud(
         )
 
     min_keep = max(int(min_points), min(int(xyz.shape[0]), 32))
+    n_colmap_selected_points = int(xyz.shape[0])
     xyz, colors, aabb_filtered = _filter_scope_aabb(xyz, colors, scope=scope, min_keep=min_keep)
 
     target_points = min(int(max_points), max(int(target_points), int(xyz.shape[0])))
@@ -239,7 +382,9 @@ def load_colmap_object_point_cloud(
         "phase3_module_label": int(module_label) if module_label is not None else None,
         "colmap_label_used": int(chosen_label),
         "colmap_label_counts": label_counts,
+        "colmap_label_projection_scores": label_projection_scores,
         "aabb_filtered": bool(aabb_filtered),
+        "n_colmap_selected_points": int(n_colmap_selected_points),
         "n_colmap_seed_points": int(xyz.shape[0]),
         "label_ids_written_as_object_id": int(object_id),
         **upsample_meta,

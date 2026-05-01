@@ -35,7 +35,6 @@ if str(_OBJECTGS_DIR) not in sys.path:
 from gaussian_renderer.render import render as _ogs_render  # noqa: E402
 from gaussian_renderer.render import prefilter_voxel as _prefilter  # noqa: E402
 from scene.base_model import GaussianModel  # noqa: E402
-from utils.graphics_utils import BasicPointCloud  # noqa: E402
 from utils.loss_utils import ssim  # noqa: E402
 
 
@@ -50,91 +49,6 @@ def _to_tensor_image(rgb: np.ndarray) -> torch.Tensor:
 
 def _to_tensor_mask(mask: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(np.asarray(mask).astype(np.float32)).unsqueeze(0).cuda()
-
-
-def _project(points: np.ndarray, cam: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    R = np.asarray(cam["R"], dtype=np.float32)
-    T = np.asarray(cam["T"], dtype=np.float32).reshape(1, 3)
-    K = np.asarray(cam["K"], dtype=np.float32)
-    cam_pts = points @ R.T + T
-    z = cam_pts[:, 2]
-    u = K[0, 0] * cam_pts[:, 0] / np.maximum(z, 1e-8) + K[0, 2]
-    v = K[1, 1] * cam_pts[:, 1] / np.maximum(z, 1e-8) + K[1, 2]
-    return u, v, z
-
-
-def _sample_visual_hull_points(
-    supervision_views: list,
-    *,
-    scope,
-    object_id: int,
-    grid_resolution: int,
-    min_support: int,
-    max_points: int,
-) -> BasicPointCloud:
-    aabb_min = np.asarray(scope.aabb_min_W, dtype=np.float32)
-    aabb_max = np.asarray(scope.aabb_max_W, dtype=np.float32)
-    extent = np.maximum(aabb_max - aabb_min, 1e-5)
-    pad = 0.08 * extent
-    lo = aabb_min - pad
-    hi = aabb_max + pad
-
-    xs = np.linspace(lo[0], hi[0], int(grid_resolution), dtype=np.float32)
-    ys = np.linspace(lo[1], hi[1], int(grid_resolution), dtype=np.float32)
-    zs = np.linspace(lo[2], hi[2], int(grid_resolution), dtype=np.float32)
-    gx, gy, gz = np.meshgrid(xs, ys, zs, indexing="ij")
-    candidates = np.stack([gx.reshape(-1), gy.reshape(-1), gz.reshape(-1)], axis=1)
-
-    support = np.zeros(candidates.shape[0], dtype=np.int32)
-    color_sum = np.zeros((candidates.shape[0], 3), dtype=np.float32)
-    color_count = np.zeros(candidates.shape[0], dtype=np.float32)
-
-    for view in supervision_views:
-        mask = np.asarray(view["mask"]).astype(bool)
-        rgb = np.asarray(view["rgb"])
-        if rgb.dtype == np.uint8:
-            rgb_f = rgb.astype(np.float32) / 255.0
-        else:
-            rgb_f = np.clip(rgb.astype(np.float32), 0.0, 1.0)
-        height, width = mask.shape[:2]
-        u, v, z = _project(candidates, view["camera"])
-        ui = np.rint(u).astype(np.int64)
-        vi = np.rint(v).astype(np.int64)
-        valid = (z > 1e-4) & (ui >= 0) & (ui < width) & (vi >= 0) & (vi < height)
-        inside = np.zeros(candidates.shape[0], dtype=bool)
-        inside[valid] = mask[vi[valid], ui[valid]]
-        support += inside.astype(np.int32)
-        if inside.any():
-            color_sum[inside] += rgb_f[vi[inside], ui[inside]]
-            color_count[inside] += 1.0
-
-    keep = support >= int(min_support)
-    if not keep.any():
-        best_support = int(support.max()) if support.size else 0
-        raise RuntimeError(
-            f"Visual hull produced no points for object {object_id}; "
-            f"best support={best_support}, required={min_support}."
-        )
-
-    points = candidates[keep]
-    colors = color_sum[keep] / np.maximum(color_count[keep, None], 1.0)
-    missing_color = color_count[keep] <= 0
-    if missing_color.any():
-        colors[missing_color] = np.array([0.8, 0.8, 0.8], dtype=np.float32)
-
-    if points.shape[0] > int(max_points):
-        rng = np.random.default_rng(0)
-        idx = rng.choice(points.shape[0], size=int(max_points), replace=False)
-        points = points[idx]
-        colors = colors[idx]
-
-    normals = np.zeros_like(points, dtype=np.float32)
-    label_ids = np.full((points.shape[0],), int(object_id), dtype=np.uint8)
-    logger.info(
-        "Scratch init obj %d: visual-hull points=%d (grid=%d^3, min_support=%d).",
-        object_id, points.shape[0], int(grid_resolution), int(min_support),
-    )
-    return BasicPointCloud(points=points, colors=colors, normals=normals, label_ids=label_ids)
 
 
 def _model_kwargs_from_parent(parent_gaussians=None) -> dict:
@@ -167,7 +81,14 @@ def _prepare_direct_render_model(gaussians: GaussianModel) -> None:
     gaussians.weed_ratio = 0.0
 
 
-def _training_options(iterations: int, lr_scale: float, *, enable_densification: bool) -> SimpleNamespace:
+def _training_options(
+    iterations: int,
+    lr_scale: float,
+    *,
+    enable_densification: bool,
+    densify_grad_threshold: float,
+    densify_extra_ratio: float,
+) -> SimpleNamespace:
     iterations = int(iterations)
     return SimpleNamespace(
         iterations=iterations,
@@ -210,9 +131,9 @@ def _training_options(iterations: int, lr_scale: float, *, enable_densification:
         pruning_type="mean",
         min_opacity=0.005,
         success_threshold=0.8,
-        densify_grad_threshold=0.00001,
+        densify_grad_threshold=float(densify_grad_threshold),
         update_ratio=0.2,
-        extra_ratio=0.25,
+        extra_ratio=float(densify_extra_ratio),
         extra_up=0.05,
     )
 
@@ -229,14 +150,15 @@ def train_scratch_object(
     parent_gaussians=None,
     pipe_config=None,
     lr_scale: float = 1.0,
-    init_grid_resolution: int = 36,
-    min_visual_hull_support: int = 2,
     max_init_points: int = 20000,
     colmap_init_target_points: int = 8000,
     rgb_weight: float = 1.0,
     alpha_weight: float = 1.0,
     outside_alpha_weight: float = 2.0,
     enable_densification: bool = False,
+    max_anchor_count: int = 20000,
+    densify_grad_threshold: float = 0.00005,
+    densify_extra_ratio: float = 0.08,
     max_scale_growth: float = 1.35,
     max_offset_abs: float = 0.45,
 ) -> dict:
@@ -275,7 +197,13 @@ def train_scratch_object(
     spatial_extent = max(float(scope.radius), float(np.linalg.norm(scope.aabb_max_W - scope.aabb_min_W)))
     gaussians.create_from_pcd(pcd, spatial_extent, "", logger)
 
-    opt = _training_options(int(n_iterations), float(lr_scale), enable_densification=bool(enable_densification))
+    opt = _training_options(
+        int(n_iterations),
+        float(lr_scale),
+        enable_densification=bool(enable_densification),
+        densify_grad_threshold=float(densify_grad_threshold),
+        densify_extra_ratio=float(densify_extra_ratio),
+    )
     gaussians.training_setup(opt)
     initial_scaling = gaussians._scaling.detach().clone()
     initial_anchor_count = int(gaussians._anchor.shape[0])
@@ -339,7 +267,12 @@ def train_scratch_object(
             if iteration < opt.update_until and iteration > opt.start_stat:
                 gaussians.training_statis(opt, render_pkg, pred.shape[2], pred.shape[1])
                 densify_count += 1
-                if opt.densification and iteration > opt.update_from and densify_count % opt.update_interval == 0:
+                if (
+                    opt.densification
+                    and iteration > opt.update_from
+                    and densify_count % opt.update_interval == 0
+                    and int(gaussians._anchor.shape[0]) < int(max_anchor_count)
+                ):
                     gaussians.run_densify(opt, iteration)
 
             gaussians.optimizer.step()
@@ -372,6 +305,9 @@ def train_scratch_object(
         "n_final_anchors": int(gaussians._anchor.shape[0]),
         "initial_anchor_count": int(initial_anchor_count),
         "densification_enabled": bool(enable_densification),
+        "max_anchor_count": int(max_anchor_count),
+        "densify_grad_threshold": float(densify_grad_threshold),
+        "densify_extra_ratio": float(densify_extra_ratio),
         "final_sample_loss": float(loss_history[-1]) if loss_history else 0.0,
         "final_loss": float(np.mean(tail)) if tail else 0.0,
         "loss_history": loss_history,
