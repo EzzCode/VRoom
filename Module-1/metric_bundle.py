@@ -73,7 +73,7 @@ REQUIRED_SAM_MANIFEST_FIELDS = {"model_name", "model_version", "input_space", "m
 VALID_TRACKING_STATES = {"normal", "tracking", "tracking_ok", "ok"}
 MAX_POSITION_JUMP_METERS = 1.5
 MAX_ROTATION_JUMP_DEGREES = 75.0
-MAX_VELOCITY_MPS = 3.0  # m/s – fast walking speed; filters teleportation, not walking
+
 
 
 @dataclass(frozen=True)
@@ -297,19 +297,17 @@ def load_metric_bundle(bundle_root: str | Path) -> MetricBundle:
             dt = poses_records[frame_id].timestamp_ns - previous_sequential_pose.timestamp_ns
             if dt <= 0:
                 raise ValueError(f"Non-monotonic timestamps detected at frame_id={frame_id}.")
-            dt_seconds = dt / 1e9
-            position_delta = float(np.linalg.norm(
+            position_jump = float(np.linalg.norm(
                 poses_records[frame_id].camera_to_world[:3, 3] - previous_sequential_pose.camera_to_world[:3, 3]
             ))
-            velocity = position_delta / max(dt_seconds, 1e-6)
             rotation_jump = _rotation_angle_degrees(
                 previous_sequential_pose.camera_to_world[:3, :3],
                 poses_records[frame_id].camera_to_world[:3, :3],
             )
             if previous_dt is not None and dt > previous_dt * 5:
                 warnings.append(f"Large timestamp gap before frame_id={frame_id}: {dt} ns")
-            if velocity > MAX_VELOCITY_MPS:
-                reject_reason = f"velocity={velocity:.1f}m/s (delta={position_delta:.3f}m, dt={dt_seconds:.3f}s)"
+            if position_jump > MAX_POSITION_JUMP_METERS:
+                reject_reason = f"pose_jump_m={position_jump:.3f}"
             elif rotation_jump > MAX_ROTATION_JUMP_DEGREES:
                 reject_reason = f"pose_jump_deg={rotation_jump:.3f}"
             previous_dt = dt

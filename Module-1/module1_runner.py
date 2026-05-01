@@ -128,7 +128,9 @@ def main():
     paths = build_paths(data_path, output_path)
     reconstruction_mode = args.reconstruction_mode
     if reconstruction_mode is None:
-        reconstruction_mode = "known_pose_triangulation" if (data_path / "manifest.json").exists() else "standard_sfm"
+        reconstruction_mode = "standard_sfm"
+        if (data_path / "manifest.json").exists():
+            print("ARCore manifest detected — using standard SfM with post-hoc metric alignment.")
 
     if not paths["images"].exists() and not args.skip_colmap:
          # In known_pose mode, colmap_runner will create output_path/images

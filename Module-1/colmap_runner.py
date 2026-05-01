@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from metric_bundle import export_known_pose_colmap_workspace, load_metric_bundle
+from sim3_alignment import compute_metric_alignment
 
 
 logging.basicConfig(
@@ -182,12 +183,33 @@ def run_standard_colmap_pipeline(args, data_path, output_path):
         },
     )
 
-    if (sparse_dir / "cameras.bin").exists() or (sparse_dir / "cameras.txt").exists():
-        logger.info("COLMAP Pipeline completed successfully.")
-        logger.info("Data is ready for the voting script at: %s", sparse_dir)
-    else:
+    if not ((sparse_dir / "cameras.bin").exists() or (sparse_dir / "cameras.txt").exists()):
         logger.error("COLMAP Pipeline finished, but no sparse model was generated.")
         sys.exit(1)
+
+    logger.info("COLMAP Pipeline completed successfully.")
+    logger.info("Data is ready for the voting script at: %s", sparse_dir)
+
+    # ## Metric alignment: if ARCore data exists, align SfM → meters ####################
+    if (data_path / "poses.json").exists() and (data_path / "tracking.json").exists():
+        logger.info("ARCore data detected — running Sim(3) metric alignment.")
+        alignment = compute_metric_alignment(output_path, data_path)
+        if alignment is not None:
+            _update_summary(output_path, {
+                "metric_alignment": {
+                    "method": "umeyama_sim3",
+                    "scale": alignment.scale,
+                    "rmse_meters": alignment.rmse,
+                    "num_correspondences": alignment.num_correspondences,
+                },
+                "units": "meters",
+            })
+            logger.info(
+                "Model aligned to metric scale: scale=%.6f, RMSE=%.4fm",
+                alignment.scale, alignment.rmse,
+            )
+        else:
+            logger.warning("Metric alignment failed or was skipped; model remains in arbitrary scale.")
 
 
 def run_known_pose_pipeline(args, data_path, output_path):
