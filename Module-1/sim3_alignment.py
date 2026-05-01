@@ -119,6 +119,82 @@ def umeyama_alignment(
     )
 
 
+def robust_umeyama_alignment(
+    source: np.ndarray,
+    target: np.ndarray,
+    inlier_threshold: float = 0.30,
+    ransac_iterations: int = 1000,
+    min_sample_size: int = 7,
+    seed: int = 42,
+) -> tuple[AlignmentResult, np.ndarray]:
+    """RANSAC-robust Sim(3) alignment.
+
+    COLMAP SfM may place some cameras in very different positions than ARCore
+    (due to ambiguities in bundle adjustment).  This function uses RANSAC to
+    find the largest set of cameras that agree on a single Sim(3), filters
+    outliers, and refits Umeyama on the inlier set.
+
+    Parameters
+    ----------
+    source, target : (N, 3) arrays of corresponding camera centres.
+    inlier_threshold : Max residual (meters) to count a point as inlier.
+    ransac_iterations : Number of random trials.
+    min_sample_size : Points sampled per trial.
+    seed : RNG seed for reproducibility.
+
+    Returns
+    -------
+    (AlignmentResult, inlier_mask) where inlier_mask is a boolean (N,) array.
+    """
+    source = np.asarray(source, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    n = source.shape[0]
+    min_sample_size = min(min_sample_size, n)
+
+    # First try plain Umeyama — if it's already good, skip RANSAC.
+    plain = umeyama_alignment(source, target)
+    plain_residuals = np.linalg.norm(
+        target - (plain.scale * (source @ plain.rotation.T) + plain.translation),
+        axis=1,
+    )
+    if plain.rmse <= inlier_threshold:
+        logger.info("Plain Umeyama RMSE %.4fm is within threshold; skipping RANSAC.", plain.rmse)
+        return plain, np.ones(n, dtype=bool)
+
+    rng = np.random.default_rng(seed)
+    best_inlier_count = 0
+    best_inlier_mask = np.zeros(n, dtype=bool)
+
+    for _ in range(ransac_iterations):
+        indices = rng.choice(n, size=min_sample_size, replace=False)
+        try:
+            candidate = umeyama_alignment(source[indices], target[indices])
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        aligned = candidate.scale * (source @ candidate.rotation.T) + candidate.translation
+        residuals = np.linalg.norm(target - aligned, axis=1)
+        mask = residuals < inlier_threshold
+        count = int(mask.sum())
+        if count > best_inlier_count:
+            best_inlier_count = count
+            best_inlier_mask = mask
+
+    if best_inlier_count < MIN_ALIGNMENT_CORRESPONDENCES:
+        logger.warning(
+            "RANSAC found only %d inliers (need %d); falling back to plain Umeyama.",
+            best_inlier_count, MIN_ALIGNMENT_CORRESPONDENCES,
+        )
+        return plain, np.ones(n, dtype=bool)
+
+    # Refit on inliers
+    result = umeyama_alignment(source[best_inlier_mask], target[best_inlier_mask])
+    logger.info(
+        "RANSAC: %d/%d inliers, refit RMSE=%.4fm, scale=%.6f",
+        best_inlier_count, n, result.rmse, result.scale,
+    )
+    return result, best_inlier_mask
+
+
 # ## Pose loading helpers ####################################################
 
 def _load_arcore_camera_centres(data_path: Path) -> dict[str, np.ndarray]:
@@ -369,11 +445,11 @@ def compute_metric_alignment(
     src = np.array([colmap_centres[fid] for fid in common])
     tgt = np.array([arcore_centres[fid] for fid in common])
 
-    result = umeyama_alignment(src, tgt)
+    result, inlier_mask = robust_umeyama_alignment(src, tgt)
 
     logger.info(
-        "Sim(3) alignment: scale=%.6f, RMSE=%.4fm, correspondences=%d",
-        result.scale, result.rmse, result.num_correspondences,
+        "Sim(3) alignment: scale=%.6f, RMSE=%.4fm, inliers=%d/%d",
+        result.scale, result.rmse, int(inlier_mask.sum()), len(common),
     )
 
     if result.rmse > MAX_ACCEPTABLE_RMSE_METERS:
@@ -400,14 +476,19 @@ def compute_metric_alignment(
         json.dump(scene_transform, f, indent=2)
 
     # Write alignment diagnostics
+    inlier_ids = [common[i] for i in range(len(common)) if inlier_mask[i]]
+    outlier_ids = [common[i] for i in range(len(common)) if not inlier_mask[i]]
     alignment_info = {
-        "method": "umeyama_sim3",
+        "method": "ransac_umeyama_sim3",
         "scale": result.scale,
         "rotation": result.rotation.tolist(),
         "translation": result.translation.tolist(),
         "rmse_meters": result.rmse,
         "num_correspondences": result.num_correspondences,
-        "matched_frame_ids": common,
+        "num_inliers": int(inlier_mask.sum()),
+        "num_outliers": int((~inlier_mask).sum()),
+        "inlier_frame_ids": inlier_ids,
+        "outlier_frame_ids": outlier_ids,
     }
     with open(output_path / "metric_alignment.json", "w", encoding="utf-8") as f:
         json.dump(alignment_info, f, indent=2)
