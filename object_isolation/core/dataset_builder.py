@@ -23,8 +23,9 @@ Critical design points:
 - Real views use the original training camera R/T/K and Phase-3 alpha mask.
 - Hallucinated views use the Phase-5 SV3D orbit camera and Phase-5 alpha mask.
 - If an image is resized, K is scaled by exactly the same x/y factors.
-- No bbox alignment is applied anywhere; image, alpha and camera always move
-    together.
+- Hallucinated views may receive a small audited image-space correction
+    (flip and/or bbox scale/translate) only when the corrected image mask
+    passes the same reference-mask alignment thresholds used for acceptance.
 """
 
 from __future__ import annotations
@@ -196,6 +197,277 @@ def _audit_mask_alignment(
     }
 
 
+def _apply_flip(rgb: np.ndarray, mask: np.ndarray, flip_code: int | None) -> tuple[np.ndarray, np.ndarray]:
+    if flip_code is None:
+        return rgb.copy(), mask.astype(bool).copy()
+    return cv2.flip(rgb, flip_code), cv2.flip(mask.astype(np.uint8), flip_code) > 0
+
+
+def _fit_bbox_warp(
+    mask: np.ndarray,
+    ref_mask: np.ndarray,
+) -> tuple[np.ndarray | None, dict]:
+    src_bbox = _mask_bbox(mask)
+    ref_bbox = _mask_bbox(ref_mask)
+    if src_bbox is None or ref_bbox is None:
+        return None, {"bbox_warp_reasonable": False}
+
+    sx0, sy0, sx1, sy1 = src_bbox
+    rx0, ry0, rx1, ry1 = ref_bbox
+    src_w = max(float(sx1 - sx0), 1.0)
+    src_h = max(float(sy1 - sy0), 1.0)
+    ref_w = max(float(rx1 - rx0), 1.0)
+    ref_h = max(float(ry1 - ry0), 1.0)
+
+    scale_x = ref_w / src_w
+    scale_y = ref_h / src_h
+    src_cx = float(sx0) + 0.5 * src_w
+    src_cy = float(sy0) + 0.5 * src_h
+    ref_cx = float(rx0) + 0.5 * ref_w
+    ref_cy = float(ry0) + 0.5 * ref_h
+    translate_x = ref_cx - scale_x * src_cx
+    translate_y = ref_cy - scale_y * src_cy
+
+    diag = float(np.hypot(mask.shape[1], mask.shape[0]))
+    translation_norm = float(np.hypot(translate_x, translate_y) / max(diag, 1.0))
+    reasonable = (
+        0.55 <= float(scale_x) <= 1.80
+        and 0.55 <= float(scale_y) <= 1.80
+        and translation_norm <= 0.20
+    )
+    matrix = np.array([[scale_x, 0.0, translate_x], [0.0, scale_y, translate_y]], dtype=np.float32)
+    return matrix, {
+        "bbox_warp_reasonable": bool(reasonable),
+        "bbox_warp_scale_x": float(scale_x),
+        "bbox_warp_scale_y": float(scale_y),
+        "bbox_warp_translate_x": float(translate_x),
+        "bbox_warp_translate_y": float(translate_y),
+        "bbox_warp_translation_norm": float(translation_norm),
+    }
+
+
+def _warp_rgb_mask(rgb: np.ndarray, mask: np.ndarray, matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    height, width = mask.shape[:2]
+    warped_rgb = cv2.warpAffine(
+        rgb,
+        matrix,
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    warped_mask = cv2.warpAffine(
+        mask.astype(np.uint8),
+        matrix,
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ) > 0
+    return warped_rgb, warped_mask
+
+
+def _centroid_refine_warp(mask: np.ndarray, ref_mask: np.ndarray) -> tuple[np.ndarray | None, dict]:
+    centroid = _mask_centroid(mask)
+    ref_centroid = _mask_centroid(ref_mask)
+    if centroid is None or ref_centroid is None:
+        return None, {"centroid_refine_applied": False}
+    delta = ref_centroid - centroid
+    diag = float(np.hypot(mask.shape[1], mask.shape[0]))
+    shift_norm = float(np.linalg.norm(delta) / max(diag, 1.0))
+    if shift_norm > 0.08:
+        return None, {
+            "centroid_refine_applied": False,
+            "centroid_refine_shift_norm": float(shift_norm),
+        }
+    matrix = np.array([[1.0, 0.0, float(delta[0])], [0.0, 1.0, float(delta[1])]], dtype=np.float32)
+    return matrix, {
+        "centroid_refine_applied": True,
+        "centroid_refine_dx": float(delta[0]),
+        "centroid_refine_dy": float(delta[1]),
+        "centroid_refine_shift_norm": float(shift_norm),
+    }
+
+
+def _similarity_centroid_warp(
+    mask: np.ndarray,
+    ref_mask: np.ndarray,
+    *,
+    scale: float,
+) -> tuple[np.ndarray | None, dict]:
+    centroid = _mask_centroid(mask)
+    ref_centroid = _mask_centroid(ref_mask)
+    if centroid is None or ref_centroid is None:
+        return None, {"similarity_refine_applied": False}
+    delta = ref_centroid - centroid
+    diag = float(np.hypot(mask.shape[1], mask.shape[0]))
+    shift_norm = float(np.linalg.norm(delta) / max(diag, 1.0))
+    if shift_norm > 0.08 or not (0.84 <= float(scale) <= 1.16):
+        return None, {
+            "similarity_refine_applied": False,
+            "similarity_scale": float(scale),
+            "centroid_refine_shift_norm": float(shift_norm),
+        }
+    matrix = np.array(
+        [
+            [float(scale), 0.0, float(ref_centroid[0] - float(scale) * centroid[0])],
+            [0.0, float(scale), float(ref_centroid[1] - float(scale) * centroid[1])],
+        ],
+        dtype=np.float32,
+    )
+    return matrix, {
+        "similarity_refine_applied": True,
+        "similarity_scale": float(scale),
+        "centroid_refine_dx": float(delta[0]),
+        "centroid_refine_dy": float(delta[1]),
+        "centroid_refine_shift_norm": float(shift_norm),
+    }
+
+
+def _save_aligned_rgba(rgb: np.ndarray, mask: np.ndarray, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    alpha = (mask.astype(np.uint8) * 255)[..., None]
+    rgba = np.concatenate([rgb.astype(np.uint8), alpha], axis=2)
+    cv2.imwrite(str(out_path), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+
+
+def _recover_hallucination_alignment(
+    rgb: np.ndarray,
+    mask: np.ndarray,
+    ref_mask: np.ndarray,
+    *,
+    min_iou: float,
+    min_bbox_iou: float,
+    max_centroid_distance: float,
+    min_area_ratio: float,
+    max_area_ratio: float,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Try conservative image-space recovery for SV3D orientation/scale drift."""
+    if ref_mask.shape != mask.shape:
+        ref_mask = cv2.resize(
+            ref_mask.astype(np.uint8),
+            (mask.shape[1], mask.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ) > 0
+
+    def audit(candidate_mask: np.ndarray) -> dict:
+        return _audit_mask_alignment(
+            candidate_mask,
+            ref_mask,
+            min_iou=min_iou,
+            min_bbox_iou=min_bbox_iou,
+            max_centroid_distance=max_centroid_distance,
+            min_area_ratio=min_area_ratio,
+            max_area_ratio=max_area_ratio,
+        )
+
+    candidates: list[tuple[np.ndarray, np.ndarray, dict]] = []
+    flips = [
+        ("identity", None),
+        ("flip_h", 1),
+        ("flip_v", 0),
+        ("flip_hv", -1),
+    ]
+    for transform_name, flip_code in flips:
+        flip_rgb, flip_mask = _apply_flip(rgb, mask, flip_code)
+        direct_audit = audit(flip_mask)
+        direct_audit.update({
+            "alignment_transform": transform_name,
+            "bbox_warp_applied": False,
+            "centroid_refine_applied": False,
+        })
+        candidates.append((flip_rgb, flip_mask, direct_audit))
+
+        centroid_matrix, centroid_meta = _centroid_refine_warp(flip_mask, ref_mask)
+        if centroid_matrix is not None:
+            centroid_rgb, centroid_mask = _warp_rgb_mask(flip_rgb, flip_mask, centroid_matrix)
+            centroid_audit = audit(centroid_mask)
+            centroid_audit.update({
+                "alignment_transform": f"{transform_name}+centroid",
+                "bbox_warp_applied": False,
+                **centroid_meta,
+            })
+            candidates.append((centroid_rgb, centroid_mask, centroid_audit))
+
+        for scale in (0.86, 0.90, 0.94, 0.96, 0.98, 1.02, 1.04, 1.06, 1.10, 1.14):
+            sim_matrix, sim_meta = _similarity_centroid_warp(flip_mask, ref_mask, scale=float(scale))
+            if sim_matrix is None:
+                continue
+            sim_rgb, sim_mask = _warp_rgb_mask(flip_rgb, flip_mask, sim_matrix)
+            sim_audit = audit(sim_mask)
+            sim_audit.update({
+                "alignment_transform": f"{transform_name}+scale{float(scale):.2f}+centroid",
+                "bbox_warp_applied": False,
+                "centroid_refine_applied": True,
+                **sim_meta,
+            })
+            candidates.append((sim_rgb, sim_mask, sim_audit))
+
+        matrix, warp_meta = _fit_bbox_warp(flip_mask, ref_mask)
+        if matrix is None or not bool(warp_meta.get("bbox_warp_reasonable", False)):
+            continue
+        warp_rgb, warp_mask = _warp_rgb_mask(flip_rgb, flip_mask, matrix)
+        warp_audit = audit(warp_mask)
+        warp_audit.update({
+            "alignment_transform": f"{transform_name}+bbox",
+            "bbox_warp_applied": True,
+            "centroid_refine_applied": False,
+            **warp_meta,
+        })
+        candidates.append((warp_rgb, warp_mask, warp_audit))
+
+        centroid_matrix, centroid_meta = _centroid_refine_warp(warp_mask, ref_mask)
+        if centroid_matrix is not None:
+            refined_rgb, refined_mask = _warp_rgb_mask(warp_rgb, warp_mask, centroid_matrix)
+            refined_audit = audit(refined_mask)
+            refined_audit.update({
+                "alignment_transform": f"{transform_name}+bbox+centroid",
+                "bbox_warp_applied": True,
+                **warp_meta,
+                **centroid_meta,
+            })
+            candidates.append((refined_rgb, refined_mask, refined_audit))
+
+    original_audit = candidates[0][2]
+    accepted_candidates = [c for c in candidates if bool(c[2].get("accepted", False))]
+    if bool(original_audit.get("accepted", False)):
+        best_rgb, best_mask, best_audit = candidates[0]
+    elif accepted_candidates:
+        best_rgb, best_mask, best_audit = max(
+            accepted_candidates,
+            key=lambda item: (
+                float(item[2].get("mask_iou", 0.0)),
+                float(item[2].get("bbox_iou", 0.0)),
+                -float(item[2].get("centroid_distance_norm", 1.0)),
+            ),
+        )
+    else:
+        best_rgb, best_mask, best_audit = rgb, mask, original_audit
+
+    best_seen = max(
+        candidates,
+        key=lambda item: (
+            float(item[2].get("mask_iou", 0.0)),
+            float(item[2].get("bbox_iou", 0.0)),
+            -float(item[2].get("centroid_distance_norm", 1.0)),
+        ),
+    )[2]
+    best_audit["original_alignment"] = {
+        "mask_iou": float(original_audit.get("mask_iou", 0.0)),
+        "bbox_iou": float(original_audit.get("bbox_iou", 0.0)),
+        "centroid_distance_norm": float(original_audit.get("centroid_distance_norm", 1.0)),
+        "area_ratio": float(original_audit.get("area_ratio", 0.0)),
+    }
+    best_audit["best_rejected_candidate"] = {
+        "alignment_transform": best_seen.get("alignment_transform", "identity"),
+        "mask_iou": float(best_seen.get("mask_iou", 0.0)),
+        "bbox_iou": float(best_seen.get("bbox_iou", 0.0)),
+        "centroid_distance_norm": float(best_seen.get("centroid_distance_norm", 1.0)),
+        "area_ratio": float(best_seen.get("area_ratio", 0.0)),
+    }
+    return best_rgb, best_mask.astype(bool), best_audit
+
+
 def build_hallucinated_supervision_views(
     halluc_index_path: str | Path,
     local_sv3d: LocalSV3D,
@@ -303,7 +575,8 @@ def build_hallucinated_supervision_views(
             })
             continue
         _ref_rgb, ref_mask = _rgba_to_rgb_mask(ref_rgba)
-        audit = _audit_mask_alignment(
+        rgb, mask, audit = _recover_hallucination_alignment(
+            rgb,
             mask,
             ref_mask,
             min_iou=float(min_alignment_iou),
@@ -312,6 +585,15 @@ def build_hallucinated_supervision_views(
             min_area_ratio=float(min_alignment_area_ratio),
             max_area_ratio=float(max_alignment_area_ratio),
         )
+        original_rgba_path = rgba_path
+        if audit["accepted"] and str(audit.get("alignment_transform", "identity")) != "identity":
+            aligned_dir = (
+                Path(alignment_audit_path).parent / "phase6_aligned_hallucinated"
+                if alignment_audit_path is not None
+                else halluc_index_path.parent / "phase6_aligned_hallucinated"
+            )
+            rgba_path = aligned_dir / rgba_path.name
+            _save_aligned_rgba(rgb, mask, rgba_path)
         audit.update({
             "frame_index": int(fr.get("index", -1)),
             "manifest_accepted": bool(fr.get("accepted", False)),
@@ -319,6 +601,7 @@ def build_hallucinated_supervision_views(
             "azimuth_V_deg": float(fr["azimuth_V_deg"]),
             "elevation_V_deg": float(fr["elevation_V_deg"]),
             "image_path": str(rgba_path),
+            "original_image_path": str(original_rgba_path),
             "reference_path": str(ref_path),
         })
         audits.append(audit)
@@ -345,6 +628,7 @@ def build_hallucinated_supervision_views(
             "rgb": rgb,
             "mask": mask,
             "image_path": str(rgba_path),
+            "original_image_path": str(original_rgba_path),
             "camera": {
                 "R": np.asarray(R_w2c, dtype=np.float32),
                 "T": np.asarray(T_w2c, dtype=np.float32),
@@ -361,6 +645,7 @@ def build_hallucinated_supervision_views(
                 "alignment_bbox_iou": audit["bbox_iou"],
                 "alignment_centroid_distance_norm": audit["centroid_distance_norm"],
                 "alignment_area_ratio": audit["area_ratio"],
+                "alignment_transform": audit.get("alignment_transform", "identity"),
             },
             "weight": float(weight),
         })
@@ -517,6 +802,7 @@ def save_supervision_manifest(views: List[dict], output_path: str | Path) -> Pat
         payload.append({
             "source": v.get("source", "hallucinated"),
             "image_path": v.get("image_path"),
+            "original_image_path": v.get("original_image_path"),
             "azimuth_V_deg": cam["azimuth_offset_deg"],
             "elevation_V_deg": cam["elevation_offset_deg"],
             "is_conditioning": cam.get("is_conditioning", False),
@@ -525,6 +811,7 @@ def save_supervision_manifest(views: List[dict], output_path: str | Path) -> Pat
             "alignment_bbox_iou": cam.get("alignment_bbox_iou"),
             "alignment_centroid_distance_norm": cam.get("alignment_centroid_distance_norm"),
             "alignment_area_ratio": cam.get("alignment_area_ratio"),
+            "alignment_transform": cam.get("alignment_transform"),
             "R_w2c": cam["R"].tolist(),
             "T_w2c": cam["T"].tolist(),
             "K": cam["K"].tolist(),

@@ -1,9 +1,10 @@
 """Fresh object-only ObjectGS training for aligned real + hallucinated views.
 
-This module intentionally does not use target_replenishment optimizers or
-backside seeding. It builds a new object point cloud from the visual hull of
-the aligned supervision masks, creates a fresh ObjectGS GaussianModel, and
-trains that model directly against the joint real + hallucinated view set.
+This module intentionally does not use target_replenishment optimizers,
+backside seeding, or anchors from the already-trained ObjectGS model. It
+starts from the scene COLMAP point cloud, creates a fresh ObjectGS
+GaussianModel, and trains that model directly against the joint real +
+hallucinated view set.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import torch.nn.functional as F
 from torch import nn
 from tqdm.auto import tqdm
 
+from .colmap_init import load_colmap_object_point_cloud
 from .gs_renderer import create_camera
 
 logger = logging.getLogger(__name__)
@@ -220,14 +222,17 @@ def train_scratch_object(
     supervision_views: list,
     scope,
     object_id: int,
+    model_path: str | Path,
     output_dir: str | Path,
     n_iterations: int,
+    extraction_index_path: str | Path | None = None,
     parent_gaussians=None,
     pipe_config=None,
     lr_scale: float = 1.0,
     init_grid_resolution: int = 36,
     min_visual_hull_support: int = 2,
     max_init_points: int = 20000,
+    colmap_init_target_points: int = 8000,
     rgb_weight: float = 1.0,
     alpha_weight: float = 1.0,
     outside_alpha_weight: float = 2.0,
@@ -235,7 +240,7 @@ def train_scratch_object(
     max_scale_growth: float = 1.35,
     max_offset_abs: float = 0.45,
 ) -> dict:
-    """Train a fresh object-only ObjectGS model from aligned supervision."""
+    """Train a fresh object-only ObjectGS model from COLMAP seed points."""
     if not supervision_views:
         raise RuntimeError("Cannot train scratch object model with no supervision views.")
 
@@ -255,13 +260,13 @@ def train_scratch_object(
             "source": str(view.get("source", "unknown")),
         })
 
-    pcd = _sample_visual_hull_points(
-        supervision_views,
-        scope=scope,
+    pcd, init_metadata = load_colmap_object_point_cloud(
+        model_path=model_path,
         object_id=int(object_id),
-        grid_resolution=int(init_grid_resolution),
-        min_support=int(min_visual_hull_support),
+        scope=scope,
+        extraction_index_path=extraction_index_path,
         max_points=int(max_init_points),
+        target_points=int(colmap_init_target_points),
     )
 
     gaussians = GaussianModel(**_model_kwargs_from_parent(parent_gaussians))
@@ -359,6 +364,8 @@ def train_scratch_object(
     summary = {
         "object_id": int(object_id),
         "mode": "scratch_object_training",
+        "scratch_init_source": init_metadata.get("init_source", "unknown"),
+        "scratch_init_metadata": init_metadata,
         "n_supervision_views": len(supervision_views),
         "source_counts": source_counts,
         "n_init_points": int(len(pcd.points)),

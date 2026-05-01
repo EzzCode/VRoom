@@ -48,6 +48,7 @@ def run_phase7(
     novel_rgb_weight: float = 1.0,
     grid_resolution: int = 25,
     visual_hull_min_views: int = 10,
+    colmap_init_target_points: int = 8000,
     use_cond_cam_up: bool = True,
     fov_y_deg: float = 50.0,
 ) -> dict:
@@ -126,20 +127,23 @@ def run_phase7(
     n_parent_obj_anchors = int((labels == int(object_label_id)).sum()) if labels.size else 0
 
     logger.info(
-        "Phase 7: scratch-training obj %d for %d iters from aligned views (no seeding, no target optimizer).",
+        "Phase 7: scratch-training obj %d for %d iters from COLMAP seed points and aligned views (no parent anchors, no target optimizer).",
         object_label_id, int(scratch_iterations),
     )
     scratch = train_scratch_object(
         supervision_views=supervision_views,
         scope=scope,
         object_id=int(object_label_id),
+        model_path=model_path,
         output_dir=obj_dir,
         n_iterations=int(scratch_iterations),
+        extraction_index_path=extraction_index_path,
         parent_gaussians=gaussians,
         pipe_config=pipe_config,
         lr_scale=float(scratch_lr_scale),
         init_grid_resolution=max(16, int(grid_resolution)),
         min_visual_hull_support=max(10, int(visual_hull_min_views)),
+        colmap_init_target_points=int(colmap_init_target_points),
         rgb_weight=float(novel_rgb_weight),
     )
     summary = dict(scratch["summary"])

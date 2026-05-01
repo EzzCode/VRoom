@@ -76,6 +76,7 @@ def run(
     fov_y_deg: float = 50.0,
     grid_resolution: int = 25,
     visual_hull_min_views: int = 10,
+    colmap_init_target_points: int = 8000,
     n_compare_views: int = 8,
     skip_compare: bool = False,
 ) -> dict:
@@ -160,6 +161,7 @@ def run(
                 fov_y_deg=float(fov_y_deg),
                 grid_resolution=int(grid_resolution),
                 visual_hull_min_views=int(visual_hull_min_views),
+                colmap_init_target_points=int(colmap_init_target_points),
             )
             scratch_gaussians = summary.pop("_scratch_gaussians", None)
         except Exception as e:
@@ -245,9 +247,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--fov_y_deg", type=float, default=50.0,
                    help="Vertical FOV used for SV3D outputs (must match Phase-5 setting).")
     p.add_argument("--grid_resolution", type=int, default=25,
-                   help="Visual-hull initialization grid resolution per axis.")
+                   help="Deprecated; scratch initialization now uses labeled COLMAP seed points.")
     p.add_argument("--visual_hull_min_views", type=int, default=10,
-                   help="Minimum number of supervision masks a point must project inside to initialize a scratch anchor.")
+                   help="Deprecated; scratch initialization now uses labeled COLMAP seed points.")
+    p.add_argument("--colmap_init_target_points", type=int, default=8000,
+                   help="Minimum fresh seed points after COLMAP-neighbor interpolation; no parent ObjectGS points are used.")
     p.add_argument("--n_compare_views", type=int, default=8)
     p.add_argument("--skip_compare", action="store_true",
                    help="Skip before/after orbit rendering (faster for batch runs).")
@@ -271,6 +275,7 @@ def main():
         fov_y_deg=args.fov_y_deg,
         grid_resolution=args.grid_resolution,
         visual_hull_min_views=args.visual_hull_min_views,
+        colmap_init_target_points=args.colmap_init_target_points,
         n_compare_views=args.n_compare_views,
         skip_compare=args.skip_compare,
     )
