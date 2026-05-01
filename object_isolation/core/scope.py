@@ -1,41 +1,23 @@
-"""
-Phase 1 — Object scope discovery.
-
-Computes everything geometric we need about the target object:
-    - Anchor positions, AABB, centroid, principal axes
-    - World up (from training cameras)
-    - Orbit base direction (zero-azimuth in Local frame)
-    - Orbit radius (median dist of training cams that see the object)
-    - Indices of training cameras that see the object
-    - Azimuth coverage histogram in the V-frame (used by hallucination)
-
-Reuses primitives from `target_replenishment.core.diagnostics` and
-`target_replenishment.core.perspective_graph` so we don't duplicate the
-camera-convention code.
-"""
+"""Phase 1 — object scope discovery for object_isolation."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 import logging
-import sys
 
 import numpy as np
 
 
-_VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_VROOM_ROOT) not in sys.path:
-    sys.path.insert(0, str(_VROOM_ROOT))
-
-from target_replenishment.core import diagnostics as _diag
-from target_replenishment.core.perspective_graph import (
-    build_perspective_graph, _count_visible_anchors,
-)
-from target_replenishment.core.objectgs_bridge import (
-    load_gaussians, get_anchor_positions, get_label_ids,
-)
-
 from object_isolation.core.coordinate_frames import WorldLocal, LocalSV3D
+from object_isolation.core.objectgs_model import (
+    build_perspective_graph,
+    count_visible_anchors,
+    estimate_scene_up_from_cameras,
+    get_anchor_positions,
+    get_label_ids,
+    load_gaussians,
+    orbit_base_direction_from_cameras,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -116,13 +98,13 @@ def discover_object_scope(
 
     visible_indices: list = []
     for ci, cam in enumerate(cameras):
-        vis = _count_visible_anchors(cam, anchor_xyz)
+        vis = count_visible_anchors(cam, anchor_xyz)
         if int(vis.sum()) >= visibility_min_anchors:
             visible_indices.append(ci)
     if not visible_indices:
         # Relaxed fallback: any camera that sees ≥1 anchor.
         for ci, cam in enumerate(cameras):
-            vis = _count_visible_anchors(cam, anchor_xyz)
+            vis = count_visible_anchors(cam, anchor_xyz)
             if int(vis.sum()) >= 1:
                 visible_indices.append(ci)
         logger.warning(
@@ -137,8 +119,8 @@ def discover_object_scope(
 
     # ── World up + orbit base direction (numpy-only helpers from diagnostics) ──
     raw_cam_data = _read_cameras_json_raw(cameras_json)
-    up_W = _diag.estimate_scene_up_from_cameras(raw_cam_data)
-    base_dir_W = _diag.orbit_base_direction_from_cameras(
+    up_W = estimate_scene_up_from_cameras(raw_cam_data)
+    base_dir_W = orbit_base_direction_from_cameras(
         cam_centers_vis, centroid, up_W,
     )
 

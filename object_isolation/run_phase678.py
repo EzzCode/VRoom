@@ -4,9 +4,9 @@ Assumes Phase 0–5 have already been run (i.e. ``object_isolation/outputs/
 obj_<id>/phase5/hallucination_index.json`` exists).
 
 Per object:
-    Phase 6 — build supervision_views from Phase-5 SV3D outputs.
-    Phase 7 — anchor seeding + optimizer fine-tune (mutates parent gaussians).
-    Phase 8 — render before/after comparison + save merged final model.
+    Phase 6 — build aligned supervision_views from Phase-3 real outputs + Phase-5 SV3D outputs.
+    Phase 7 — scratch ObjectGS object training from aligned real + hallucinated views.
+    Phase 8 — render scratch composite comparisons + save a scratch scene package.
 
 Usage::
 
@@ -14,8 +14,8 @@ Usage::
         --model_path temp_deps/ObjectGS/outputs/replica/.../office_0/.../ \
         --output_root object_isolation/outputs \
         --object_ids 8 9 \
-        --finetune_iterations 1200 \
-        --hallucination_weight 0.10
+        --scratch_iterations 1200 \
+        --hallucination_weight 1.0
 """
 
 from __future__ import annotations
@@ -38,7 +38,8 @@ from object_isolation.core.scope import discover_object_scope
 from object_isolation.core.training import run_phase7
 from object_isolation.core.reintegration import (
     build_orbit_cameras, render_with_orbit, save_compare_grid,
-    save_final_model, build_reintegration_metadata, label_anchor_counts,
+    save_final_model, save_scratch_scene_package, build_reintegration_metadata,
+    label_anchor_counts, render_composited_scratch_with_orbit,
 )
 
 
@@ -69,7 +70,8 @@ def run(
     output_root: str | Path,
     object_ids: List[int],
     finetune_iterations: int = 1200,
-    hallucination_weight: float = 0.10,
+    hallucination_weight: float = 1.0,
+    real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
     fov_y_deg: float = 50.0,
     grid_resolution: int = 25,
@@ -77,13 +79,13 @@ def run(
     skip_compare: bool = False,
     freeze_originals: bool = True,
 ) -> dict:
-    """Run Phases 6/7/8 for every requested object_id and save final model."""
+    """Run Phases 6/7/8 for every requested object_id."""
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
     # ── Load parent model once via Phase-1 discovery for the first object ─
-    # All subsequent objects reuse the same gaussians/pipe_config so seeding
-    # accumulates into the SAME tensor (cross-object reintegration is implicit).
+    # All subsequent objects reuse the same parent model for scope discovery
+    # and parent-with-object-hidden composite renders.
     if not object_ids:
         raise ValueError("object_ids must not be empty.")
 
@@ -115,15 +117,19 @@ def run(
         obj_out = output_root / f"obj_{obj_id}"
         (obj_out / "phase78").mkdir(parents=True, exist_ok=True)
 
-        # ── Build comparison cameras BEFORE Phase 7 mutates the gaussians ─
+        # ── Build comparison cameras BEFORE Phase 7 ───────────────────────
         compare_cams = None
         before_obj_frames = before_full_frames = None
         if not skip_compare:
             ref_cam_pos = scope.cam_centers_visible_W.mean(axis=0).astype(np.float32)
+            object_half_size = float(np.linalg.norm(
+                np.asarray(scope.aabb_max_W, dtype=np.float32)
+                - np.asarray(scope.aabb_min_W, dtype=np.float32)
+            ) / 2.0)
             compare_cams = build_orbit_cameras(
                 center=np.asarray(scope.centroid_W, dtype=np.float32),
-                radius=float(scope.radius),
-                orbit_radius=float(scope.radius * 2.5),
+                radius=object_half_size,
+                orbit_radius=float(scope.radius),
                 up=np.asarray(scope.up_W, dtype=np.float32),
                 ref_cam_position=ref_cam_pos,
                 n_views=int(n_compare_views),
@@ -135,7 +141,8 @@ def run(
                 gaussians, pipe_config, compare_cams, object_label_id=None,
             )
 
-        # ── Phase 7: seed + optimize (mutates parent gaussians in-place) ──
+        # ── Phase 7: scratch-train object model ───────────────────────────
+        scratch_gaussians = None
         try:
             summary = run_phase7(
                 model_path=model_path,
@@ -148,11 +155,13 @@ def run(
                 local_sv3d=local_sv3d,
                 finetune_iterations=int(finetune_iterations),
                 hallucination_weight=float(hallucination_weight),
+                real_weight=float(real_weight),
                 novel_rgb_weight=float(novel_rgb_weight),
                 fov_y_deg=float(fov_y_deg),
                 grid_resolution=int(grid_resolution),
                 freeze_originals=bool(freeze_originals),
             )
+            scratch_gaussians = summary.pop("_scratch_gaussians", None)
         except Exception as e:
             logger.exception("Phase 7 failed for obj %d: %s", obj_id, e)
             summary = {"object_id": obj_id, "skipped_reason": f"phase7_error: {e}"}
@@ -160,13 +169,13 @@ def run(
         per_object_summaries.append(summary)
 
         # ── Phase 8: after renders + compare ──────────────────────────────
-        if compare_cams is not None and not skip_compare:
+        if compare_cams is not None and not skip_compare and scratch_gaussians is not None:
             try:
                 after_obj_frames = render_with_orbit(
-                    gaussians, pipe_config, compare_cams, object_label_id=obj_id,
+                    scratch_gaussians, pipe_config, compare_cams, object_label_id=None,
                 )
-                after_full_frames = render_with_orbit(
-                    gaussians, pipe_config, compare_cams, object_label_id=None,
+                after_full_frames = render_composited_scratch_with_orbit(
+                    gaussians, scratch_gaussians, pipe_config, compare_cams, object_label_id=obj_id,
                 )
                 save_compare_grid(
                     before_obj_frames, after_obj_frames,
@@ -193,12 +202,21 @@ def run(
         per_object_summaries=per_object_summaries,
         reference_model_path=str(model_path),
     )
-    save_final_model(
-        gaussians,
-        output_dir=output_root,
-        reference_model_path=model_path,
-        extra_metadata=metadata,
-    )
+    all_scratch = all(s.get("mode") == "scratch_object_training" for s in per_object_summaries)
+    if all_scratch:
+        final_output = save_scratch_scene_package(
+            output_dir=output_root,
+            reference_model_path=model_path,
+            per_object_summaries=per_object_summaries,
+            extra_metadata=metadata,
+        )
+    else:
+        final_output = save_final_model(
+            gaussians,
+            output_dir=output_root,
+            reference_model_path=model_path,
+            extra_metadata=metadata,
+        )
 
     with open(output_root / "phase678_summary.json", "w", encoding="utf-8") as f:
         json.dump({
@@ -207,7 +225,7 @@ def run(
             "metadata": metadata,
         }, f, indent=2)
 
-    logger.info("\nPhase 6/7/8 complete. Final model -> %s", output_root / "final_model")
+    logger.info("\nPhase 6/7/8 complete. Output -> %s", final_output)
     return metadata
 
 
@@ -218,14 +236,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output_root", default="object_isolation/outputs",
                    help="Root holding obj_<id>/phase5 inputs and where Phase 7/8 writes.")
     p.add_argument("--object_ids", type=int, nargs="+", required=True,
-                   help="One or more object label IDs to replenish (Phase 5 must already exist).")
-    p.add_argument("--finetune_iterations", type=int, default=1200)
-    p.add_argument("--hallucination_weight", type=float, default=0.10)
+                   help="One or more object label IDs to train from scratch (Phase 5 must already exist).")
+    p.add_argument("--scratch_iterations", "--finetune_iterations", dest="finetune_iterations",
+                   type=int, default=1200,
+                   help="Number of scratch ObjectGS training iterations. The --finetune_iterations alias is kept for old scripts.")
+    p.add_argument("--hallucination_weight", type=float, default=1.0)
+    p.add_argument("--real_weight", type=float, default=1.0)
     p.add_argument("--novel_rgb_weight", type=float, default=1.0)
     p.add_argument("--fov_y_deg", type=float, default=50.0,
                    help="Vertical FOV used for SV3D outputs (must match Phase-5 setting).")
     p.add_argument("--grid_resolution", type=int, default=25,
-                   help="Backside seeding grid resolution per axis.")
+                   help="Visual-hull initialization grid resolution per axis.")
     p.add_argument("--n_compare_views", type=int, default=8)
     p.add_argument("--skip_compare", action="store_true",
                    help="Skip before/after orbit rendering (faster for batch runs).")
@@ -246,6 +267,7 @@ def main():
         object_ids=args.object_ids,
         finetune_iterations=args.finetune_iterations,
         hallucination_weight=args.hallucination_weight,
+        real_weight=args.real_weight,
         novel_rgb_weight=args.novel_rgb_weight,
         fov_y_deg=args.fov_y_deg,
         grid_resolution=args.grid_resolution,

@@ -1,19 +1,16 @@
-"""Phase 8 — Final-model save + before/after verification renders.
+"""Phase 8 — Final export + before/after verification renders.
 
-The parent ``ObjectGS`` model is mutated **in-place** by Phase 7 (anchor
-seeding appends rows to ``_anchor`` and friends, with new ``label_ids ==
-object_id``). This module is responsible for:
+For legacy seeded runs the parent ``ObjectGS`` model may be mutated in-place.
+For scratch object training the parent and object models stay separate because
+their MLP checkpoints are independent. This module is responsible for:
 
 1. Building a fixed orbit of comparison cameras around an object's centroid
    so the *same* viewpoints can be rendered before and after Phase 7.
-2. Saving the merged scene model in the ObjectGS-compatible checkpoint
-   layout (``final_model/point_cloud/iteration_1/``).
+2. Saving either a mutated parent model or a scratch-scene package that points
+    at the reference scene plus per-object scratch checkpoints.
 3. Writing a ``reintegration_metadata.json`` summary listing every object
    that was replenished, its anchor counts, and scene-wide totals.
 
-Note: there is intentionally no "merge two models" step — because Phase 7
-operates directly on the shared parent gaussians, the merge is implicit.
-This file simply captures and exports the resulting state.
 """
 
 from __future__ import annotations
@@ -49,7 +46,7 @@ class _OrbitCam:
 
 
 def _look_at(cam_pos: np.ndarray, target: np.ndarray, up: np.ndarray):
-    """COLMAP-convention look-at (matches target_replenishment.render_360)."""
+    """COLMAP-convention look-at used by the comparison orbit renders."""
     forward = target - cam_pos
     forward = forward / max(np.linalg.norm(forward), 1e-8)
     right = np.cross(up, forward)
@@ -114,22 +111,66 @@ def build_orbit_cameras(
 
 
 def render_with_orbit(gaussians, pipe_config, cams: List[_OrbitCam],
-                      object_label_id: Optional[int] = None) -> List[np.ndarray]:
+                      object_label_id: Optional[int] = None,
+                      exclude_object_label_id: Optional[int] = None,
+                      bg_white: bool = True) -> List[np.ndarray]:
     """Render each orbit camera against the current gaussians state.
 
     If ``object_label_id`` is given, only anchors with that label are rendered
     (object-isolated view). Otherwise the full scene is rendered."""
-    from target_replenishment.core.objectgs_bridge import (
-        create_virtual_camera, render_view,
-    )
-    bg = torch.ones(3, dtype=torch.float32, device="cuda")
+    from .gs_renderer import create_camera, render_rgba
     frames: List[np.ndarray] = []
     for c in cams:
-        cam = create_virtual_camera(c.R, c.T, c.K, c.width, c.height)
-        kwargs = {} if object_label_id is None else {"object_label_id": int(object_label_id)}
-        res = render_view(gaussians, cam, pipe_config, bg, **kwargs)
-        rgb = (res["rgb"].permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
+        cam = create_camera(c.R, c.T, c.K, c.width, c.height)
+        pkg = render_rgba(
+            gaussians,
+            cam,
+            pipe_config,
+            bg_white=bool(bg_white),
+            object_label_id=object_label_id,
+            exclude_object_label_id=exclude_object_label_id,
+        )
+        rgb = (pkg["rgb"].detach().permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
         frames.append(rgb)
+    return frames
+
+
+def render_composited_scratch_with_orbit(
+    parent_gaussians,
+    scratch_gaussians,
+    pipe_config,
+    cams: List[_OrbitCam],
+    *,
+    object_label_id: int,
+) -> List[np.ndarray]:
+    """Render parent scene with old object hidden and scratch object alpha-composited.
+
+    The scratch object has its own MLPs, so it must be rendered as a separate
+    ObjectGS model. Rendering it on black gives premultiplied RGB suitable for
+    compositing over the parent-without-object render.
+    """
+    from .gs_renderer import create_camera, render_rgba
+
+    frames: List[np.ndarray] = []
+    for c in cams:
+        cam = create_camera(c.R, c.T, c.K, c.width, c.height)
+        base = render_rgba(
+            parent_gaussians,
+            cam,
+            pipe_config,
+            bg_white=True,
+            exclude_object_label_id=int(object_label_id),
+        )
+        obj = render_rgba(
+            scratch_gaussians,
+            cam,
+            pipe_config,
+            bg_white=False,
+        )
+        alpha = obj["alpha"].detach().clamp(0.0, 1.0).unsqueeze(0)
+        rgb = obj["rgb"].detach().clamp(0.0, 1.0) + base["rgb"].detach().clamp(0.0, 1.0) * (1.0 - alpha)
+        rgb_np = (rgb.clamp(0.0, 1.0).permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
+        frames.append(rgb_np)
     return frames
 
 
@@ -190,7 +231,7 @@ def save_final_model(
     iter_dir = final_dir / "point_cloud" / "iteration_1"
     iter_dir.mkdir(parents=True, exist_ok=True)
 
-    # Legacy + ObjectGS-loadable layout (mirror target_replenishment).
+    # Legacy + ObjectGS-loadable layout.
     gaussians.save_ply(str(final_dir / "point_cloud.ply"))
     gaussians.save_mlp_checkpoints(str(final_dir))
     gaussians.save_ply(str(iter_dir / "point_cloud.ply"))
@@ -209,6 +250,53 @@ def save_final_model(
 
     logger.info("Phase 8: saved final model to %s", final_dir)
     return final_dir
+
+
+def save_scratch_scene_package(
+    *,
+    output_dir: Path | str,
+    reference_model_path: Path | str,
+    per_object_summaries: List[dict],
+    extra_metadata: Optional[dict] = None,
+) -> Path:
+    """Save an honest scratch-scene package without merging incompatible MLPs."""
+    output_dir = Path(output_dir)
+    scene_dir = output_dir / "scratch_scene"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+
+    ref = Path(reference_model_path)
+    for name in ("config.yaml", "cameras.json"):
+        src = ref / name
+        dst = scene_dir / name
+        if src.exists():
+            shutil.copy2(src, dst)
+
+    object_models = []
+    for summary in per_object_summaries:
+        if summary.get("mode") != "scratch_object_training":
+            continue
+        object_id = int(summary.get("object_id", -1))
+        object_models.append({
+            "object_id": object_id,
+            "model_dir": str((Path("..") / f"obj_{object_id}" / "model").as_posix()),
+            "n_final_anchors": int(summary.get("n_final_anchors", 0)),
+            "source_counts": summary.get("source_counts", {}),
+            "final_loss": float(summary.get("final_loss", 0.0)),
+        })
+
+    payload = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "mode": "scratch_scene_composite",
+        "reference_model_path": str(reference_model_path),
+        "reference_scene_policy": "Render the parent scene with trained object labels hidden, then alpha-composite the scratch object model.",
+        "object_models": object_models,
+        "metadata": extra_metadata or {},
+    }
+    with open(scene_dir / "scratch_scene_metadata.json", "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    logger.info("Phase 8: saved scratch scene package to %s", scene_dir)
+    return scene_dir
 
 
 def build_reintegration_metadata(
