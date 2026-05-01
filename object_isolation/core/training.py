@@ -12,11 +12,12 @@ Output layout (per object_id)::
 
     <output_dir>/obj_<id>/
         supervision_manifest.json
-        replenishment_summary.json
+        scratch_training_summary.json
+        phase6_alignment_audit.json
         model/
             point_cloud.ply
             color_mlp.pt  cov_mlp.pt  opacity_mlp.pt
-            replenishment.json
+            scratch_object.json
 """
 
 from __future__ import annotations
@@ -27,8 +28,6 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import torch
-
 logger = logging.getLogger(__name__)
 
 
@@ -42,38 +41,13 @@ def run_phase7(
     pipe_config=None,
     scope=None,
     local_sv3d=None,
-    finetune_iterations: int = 1200,
-    finetune_lr_scale: float = 1.0,
+    scratch_iterations: int = 1200,
+    scratch_lr_scale: float = 1.0,
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
-    target_mask_erode_px: int = 0,
-    freeze_originals: bool = True,
     grid_resolution: int = 25,
-    seed_opacity_gate_init: float = 0.02,
-    seed_opacity_gate_lr_scale: float = 50.0,
-    seed_opacity_gate_reg_weight: float = 0.005,
-    seed_opacity_lift_init: float = 0.0,
-    seed_opacity_lift_lr_scale: float = 10.0,
-    seed_opacity_lift_reg_weight: float = 0.02,
-    seed_opacity_accept_threshold: float = 0.05,
-    seeded_scale_max_frac: float = 0.06,
-    seeded_scale_reg_weight: float = 0.20,
-    seeded_offset_reg_weight: float = 0.20,
-    seeded_max_scale_delta: float = 0.20,
-    seeded_max_offset_delta: float = 0.20,
-    originals_lr_scale: float = 0.05,
-    originals_max_scale_delta: float = 0.05,
-    originals_max_offset_delta: float = 0.05,
-    originals_reg_weight: float = 0.5,
-    feat_lr_scale: float = 0.25,
-    feat_reg_weight: float = 0.05,
-    cage_padding_frac: float = 0.02,
-    silhouette_iou_thresh: float = 0.20,
-    hole_weight_max: float = 2.5,
-    seeded_anisotropy_max: float = 3.0,
-    visual_hull_min_views: int = 2,
-    surface_shell_min_norm: float = 0.65,
+    visual_hull_min_views: int = 10,
     use_cond_cam_up: bool = True,
     fov_y_deg: float = 50.0,
 ) -> dict:
@@ -136,6 +110,7 @@ def run_phase7(
         hallucination_resolution=576,
         real_target_long_edge=576,
         up_W_override=cond_cam_up_W,
+        hallucination_alignment_audit_path=obj_dir / "phase6_alignment_audit.json",
     )
     if not supervision_views:
         raise RuntimeError(f"Phase 6 produced no joint supervision views for obj {object_label_id}.")
@@ -152,19 +127,19 @@ def run_phase7(
 
     logger.info(
         "Phase 7: scratch-training obj %d for %d iters from aligned views (no seeding, no target optimizer).",
-        object_label_id, int(finetune_iterations),
+        object_label_id, int(scratch_iterations),
     )
     scratch = train_scratch_object(
         supervision_views=supervision_views,
         scope=scope,
         object_id=int(object_label_id),
         output_dir=obj_dir,
-        n_iterations=int(finetune_iterations),
+        n_iterations=int(scratch_iterations),
         parent_gaussians=gaussians,
         pipe_config=pipe_config,
-        lr_scale=float(finetune_lr_scale),
+        lr_scale=float(scratch_lr_scale),
         init_grid_resolution=max(16, int(grid_resolution)),
-        min_visual_hull_support=max(2, int(visual_hull_min_views)),
+        min_visual_hull_support=max(10, int(visual_hull_min_views)),
         rgb_weight=float(novel_rgb_weight),
     )
     summary = dict(scratch["summary"])
@@ -178,14 +153,14 @@ def run_phase7(
         "model_path": str(model_path),
     })
 
-    with open(obj_dir / "model" / "replenishment.json", "w", encoding="utf-8") as f:
+    with open(obj_dir / "model" / "scratch_object.json", "w", encoding="utf-8") as f:
         json.dump({
             "object_id": int(object_label_id),
             "mode": "scratch_object_training",
             "n_parent_obj_anchors": int(n_parent_obj_anchors),
             "n_final_anchors": int(summary.get("n_final_anchors", 0)),
         }, f, indent=2)
-    with open(obj_dir / "replenishment_summary.json", "w", encoding="utf-8") as f:
+    with open(obj_dir / "scratch_training_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     logger.info(

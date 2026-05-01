@@ -165,7 +165,7 @@ def _prepare_direct_render_model(gaussians: GaussianModel) -> None:
     gaussians.weed_ratio = 0.0
 
 
-def _training_options(iterations: int, lr_scale: float) -> SimpleNamespace:
+def _training_options(iterations: int, lr_scale: float, *, enable_densification: bool) -> SimpleNamespace:
     iterations = int(iterations)
     return SimpleNamespace(
         iterations=iterations,
@@ -173,12 +173,12 @@ def _training_options(iterations: int, lr_scale: float) -> SimpleNamespace:
         position_lr_final=0.0,
         position_lr_delay_mult=0.01,
         position_lr_max_steps=iterations,
-        offset_lr_init=0.010 * float(lr_scale),
-        offset_lr_final=0.00010 * float(lr_scale),
+        offset_lr_init=0.0040 * float(lr_scale),
+        offset_lr_final=0.00005 * float(lr_scale),
         offset_lr_delay_mult=0.01,
         offset_lr_max_steps=iterations,
         feature_lr=0.0075 * float(lr_scale),
-        scaling_lr=0.0070 * float(lr_scale),
+        scaling_lr=0.0015 * float(lr_scale),
         rotation_lr=0.0020 * float(lr_scale),
         mlp_opacity_lr_init=0.0020 * float(lr_scale),
         mlp_opacity_lr_final=0.000020 * float(lr_scale),
@@ -201,9 +201,9 @@ def _training_options(iterations: int, lr_scale: float) -> SimpleNamespace:
         start_stat=max(25, min(500, iterations // 8)),
         update_from=max(50, min(1500, iterations // 4)),
         update_interval=max(25, min(100, iterations // 20)),
-        update_until=max(1, iterations),
+        update_until=max(1, iterations) if bool(enable_densification) else 0,
         overlap=False,
-        densification=True,
+        densification=bool(enable_densification),
         growing_type="mean",
         pruning_type="mean",
         min_opacity=0.005,
@@ -231,6 +231,9 @@ def train_scratch_object(
     rgb_weight: float = 1.0,
     alpha_weight: float = 1.0,
     outside_alpha_weight: float = 2.0,
+    enable_densification: bool = False,
+    max_scale_growth: float = 1.35,
+    max_offset_abs: float = 0.45,
 ) -> dict:
     """Train a fresh object-only ObjectGS model from aligned supervision."""
     if not supervision_views:
@@ -267,8 +270,11 @@ def train_scratch_object(
     spatial_extent = max(float(scope.radius), float(np.linalg.norm(scope.aabb_max_W - scope.aabb_min_W)))
     gaussians.create_from_pcd(pcd, spatial_extent, "", logger)
 
-    opt = _training_options(int(n_iterations), float(lr_scale))
+    opt = _training_options(int(n_iterations), float(lr_scale), enable_densification=bool(enable_densification))
     gaussians.training_setup(opt)
+    initial_scaling = gaussians._scaling.detach().clone()
+    initial_anchor_count = int(gaussians._anchor.shape[0])
+    max_scale_log = float(np.log(max(float(max_scale_growth), 1.001)))
 
     pipe = pipe_config or SimpleNamespace(add_prefilter=True)
     if not hasattr(pipe, "add_prefilter"):
@@ -313,10 +319,13 @@ def train_scratch_object(
         alpha_fg = (mask * (1.0 - alpha)).mean()
         alpha_bg = ((1.0 - mask) * alpha).mean()
         scale_reg = render_pkg["scaling"].prod(dim=1).mean() if render_pkg["scaling"].numel() else torch.tensor(0.0, device="cuda")
+        scale_drift = torch.tensor(0.0, device="cuda")
+        if gaussians._scaling.shape == initial_scaling.shape:
+            scale_drift = (gaussians._scaling - initial_scaling).pow(2).mean()
 
         total = weight * float(rgb_weight) * (0.8 * rgb_fg + 0.2 * ssim_loss + 0.2 * rgb_bg)
         total = total + float(alpha_weight) * alpha_fg + float(outside_alpha_weight) * alpha_bg
-        total = total + float(opt.lambda_dreg) * scale_reg
+        total = total + float(opt.lambda_dreg) * scale_reg + 0.01 * scale_drift
 
         gaussians.optimizer.zero_grad(set_to_none=True)
         total.backward()
@@ -328,8 +337,10 @@ def train_scratch_object(
                 if opt.densification and iteration > opt.update_from and densify_count % opt.update_interval == 0:
                     gaussians.run_densify(opt, iteration)
 
-            if iteration < int(n_iterations):
-                gaussians.optimizer.step()
+            gaussians.optimizer.step()
+            if gaussians._scaling.shape == initial_scaling.shape:
+                gaussians._scaling.data.clamp_(min=initial_scaling - 1.25, max=initial_scaling + max_scale_log)
+            gaussians._offset.data.clamp_(min=-float(max_offset_abs), max=float(max_offset_abs))
 
         loss_value = float(total.detach().item())
         loss_history.append(loss_value)
@@ -344,6 +355,7 @@ def train_scratch_object(
     gaussians.save_ply(str(model_dir / "point_cloud.ply"))
     gaussians.save_mlp_checkpoints(str(model_dir))
 
+    tail = loss_history[-min(50, len(loss_history)):] if loss_history else []
     summary = {
         "object_id": int(object_id),
         "mode": "scratch_object_training",
@@ -351,8 +363,11 @@ def train_scratch_object(
         "source_counts": source_counts,
         "n_init_points": int(len(pcd.points)),
         "n_final_anchors": int(gaussians._anchor.shape[0]),
-        "final_loss": float(loss_history[-1]) if loss_history else 0.0,
-        "loss_history": loss_history[:50],
+        "initial_anchor_count": int(initial_anchor_count),
+        "densification_enabled": bool(enable_densification),
+        "final_sample_loss": float(loss_history[-1]) if loss_history else 0.0,
+        "final_loss": float(np.mean(tail)) if tail else 0.0,
+        "loss_history": loss_history,
         "model_dir": str(model_dir),
     }
     with open(out_dir / "scratch_training_summary.json", "w", encoding="utf-8") as f:

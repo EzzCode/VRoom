@@ -111,6 +111,91 @@ def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     return inter / max(union, 1.0)
 
 
+def _mask_bbox(mask: np.ndarray) -> Optional[tuple[int, int, int, int]]:
+    ys, xs = np.where(np.asarray(mask).astype(bool))
+    if xs.size == 0 or ys.size == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def _bbox_iou(a: Optional[tuple[int, int, int, int]], b: Optional[tuple[int, int, int, int]]) -> float:
+    if a is None or b is None:
+        return 0.0
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+    area_a = max(0, ax1 - ax0) * max(0, ay1 - ay0)
+    area_b = max(0, bx1 - bx0) * max(0, by1 - by0)
+    return float(inter) / max(float(area_a + area_b - inter), 1.0)
+
+
+def _mask_centroid(mask: np.ndarray) -> Optional[np.ndarray]:
+    ys, xs = np.where(np.asarray(mask).astype(bool))
+    if xs.size == 0 or ys.size == 0:
+        return None
+    return np.array([float(xs.mean()), float(ys.mean())], dtype=np.float32)
+
+
+def _audit_mask_alignment(
+    mask: np.ndarray,
+    ref_mask: np.ndarray,
+    *,
+    min_iou: float,
+    min_bbox_iou: float,
+    max_centroid_distance: float,
+    min_area_ratio: float,
+    max_area_ratio: float,
+) -> dict:
+    mask = np.asarray(mask).astype(bool)
+    ref_mask = np.asarray(ref_mask).astype(bool)
+    if ref_mask.shape != mask.shape:
+        ref_mask = cv2.resize(
+            ref_mask.astype(np.uint8),
+            (mask.shape[1], mask.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ) > 0
+
+    mask_area = int(mask.sum())
+    ref_area = int(ref_mask.sum())
+    iou = _mask_iou(mask, ref_mask)
+    bbox_iou = _bbox_iou(_mask_bbox(mask), _mask_bbox(ref_mask))
+    centroid = _mask_centroid(mask)
+    ref_centroid = _mask_centroid(ref_mask)
+    diag = float(np.hypot(mask.shape[1], mask.shape[0]))
+    if centroid is None or ref_centroid is None:
+        centroid_distance = 1.0
+    else:
+        centroid_distance = float(np.linalg.norm(centroid - ref_centroid) / max(diag, 1.0))
+    area_ratio = float(mask_area) / max(float(ref_area), 1.0)
+
+    reasons: list[str] = []
+    if mask_area < 200:
+        reasons.append("hallucination_mask_empty")
+    if ref_area < 200:
+        reasons.append("reference_mask_empty")
+    if iou < float(min_iou):
+        reasons.append(f"mask_iou_{iou:.3f}_lt_{float(min_iou):.3f}")
+    if bbox_iou < float(min_bbox_iou):
+        reasons.append(f"bbox_iou_{bbox_iou:.3f}_lt_{float(min_bbox_iou):.3f}")
+    if centroid_distance > float(max_centroid_distance):
+        reasons.append(f"centroid_dist_{centroid_distance:.3f}_gt_{float(max_centroid_distance):.3f}")
+    if area_ratio < float(min_area_ratio) or area_ratio > float(max_area_ratio):
+        reasons.append(f"area_ratio_{area_ratio:.3f}_outside_{float(min_area_ratio):.3f}_{float(max_area_ratio):.3f}")
+
+    return {
+        "accepted": not reasons,
+        "reject_reasons": reasons,
+        "mask_iou": float(iou),
+        "bbox_iou": float(bbox_iou),
+        "centroid_distance_norm": float(centroid_distance),
+        "area_ratio": float(area_ratio),
+        "mask_pixels": int(mask_area),
+        "reference_pixels": int(ref_area),
+    }
+
+
 def build_hallucinated_supervision_views(
     halluc_index_path: str | Path,
     local_sv3d: LocalSV3D,
@@ -121,6 +206,11 @@ def build_hallucinated_supervision_views(
     up_W_override: Optional[np.ndarray] = None,
     include_conditioning: bool = True,
     min_alignment_iou: float = 0.55,
+    min_alignment_bbox_iou: float = 0.55,
+    max_alignment_centroid_distance: float = 0.045,
+    min_alignment_area_ratio: float = 0.65,
+    max_alignment_area_ratio: float = 1.45,
+    alignment_audit_path: str | Path | None = None,
 ) -> List[dict]:
     """Read a Phase-5 hallucination manifest and return hallucinated views.
 
@@ -145,14 +235,13 @@ def build_hallucinated_supervision_views(
         manifest = json.load(f)
 
     frames = manifest.get("frames", [])
-    accepted = [fr for fr in frames if bool(fr.get("accepted"))]
+    candidates = list(frames)
     if not include_conditioning:
-        accepted = [fr for fr in accepted if not bool(fr.get("is_conditioning"))]
+        candidates = [fr for fr in candidates if not bool(fr.get("is_conditioning"))]
 
-    if not accepted:
+    if not candidates:
         raise RuntimeError(
-            f"No accepted frames in {halluc_index_path}. "
-            "Re-run Phase 5 with looser IoU threshold or more cond views."
+            f"No hallucinated frames in {halluc_index_path}. Run Phase 5 first."
         )
 
     # Build K from FOV.
@@ -165,15 +254,28 @@ def build_hallucinated_supervision_views(
     centroid_W = np.asarray(local_sv3d.world_local.centroid_W, dtype=np.float64)
 
     views: List[dict] = []
-    for fr in accepted:
+    audits: list[dict] = []
+    for fr in candidates:
         rgba_path = _resolve_path(fr["out_rgba_path"], manifest_dir=halluc_index_path.parent)
         if not rgba_path.exists():
             logger.warning("Missing supervision RGBA %s; skipping.", rgba_path)
+            audits.append({
+                "frame_index": int(fr.get("index", -1)),
+                "accepted": False,
+                "reject_reasons": ["missing_hallucinated_rgba"],
+                "image_path": str(rgba_path),
+            })
             continue
 
         rgba = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
         if rgba is None:
             logger.warning("Failed to read %s; skipping.", rgba_path)
+            audits.append({
+                "frame_index": int(fr.get("index", -1)),
+                "accepted": False,
+                "reject_reasons": ["unreadable_hallucinated_rgba"],
+                "image_path": str(rgba_path),
+            })
             continue
 
         rgb, mask = _rgba_to_rgb_mask(rgba)
@@ -181,21 +283,52 @@ def build_hallucinated_supervision_views(
             rgb = cv2.resize(rgb, (res, res), interpolation=cv2.INTER_AREA)
             mask = cv2.resize(mask.astype(np.uint8), (res, res), interpolation=cv2.INTER_NEAREST) > 0
 
-        ref_iou = None
-        if fr.get("objgs_ref_path"):
-            ref_path = _resolve_path(fr["objgs_ref_path"], manifest_dir=halluc_index_path.parent)
-            ref_rgba = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED) if ref_path.exists() else None
-            if ref_rgba is not None:
-                _ref_rgb, ref_mask = _rgba_to_rgb_mask(ref_rgba)
-                if ref_mask.shape != mask.shape:
-                    ref_mask = cv2.resize(ref_mask.astype(np.uint8), (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
-                ref_iou = _mask_iou(mask, ref_mask)
-                if ref_iou < float(min_alignment_iou):
-                    logger.warning(
-                        "Skipping hallucinated frame %s: mask/ref IoU %.3f < %.3f.",
-                        fr.get("index"), ref_iou, float(min_alignment_iou),
-                    )
-                    continue
+        if not fr.get("objgs_ref_path"):
+            audits.append({
+                "frame_index": int(fr.get("index", -1)),
+                "accepted": False,
+                "reject_reasons": ["missing_reference_path"],
+                "image_path": str(rgba_path),
+            })
+            continue
+        ref_path = _resolve_path(fr["objgs_ref_path"], manifest_dir=halluc_index_path.parent)
+        ref_rgba = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED) if ref_path.exists() else None
+        if ref_rgba is None:
+            audits.append({
+                "frame_index": int(fr.get("index", -1)),
+                "accepted": False,
+                "reject_reasons": ["unreadable_reference_rgba"],
+                "image_path": str(rgba_path),
+                "reference_path": str(ref_path),
+            })
+            continue
+        _ref_rgb, ref_mask = _rgba_to_rgb_mask(ref_rgba)
+        audit = _audit_mask_alignment(
+            mask,
+            ref_mask,
+            min_iou=float(min_alignment_iou),
+            min_bbox_iou=float(min_alignment_bbox_iou),
+            max_centroid_distance=float(max_alignment_centroid_distance),
+            min_area_ratio=float(min_alignment_area_ratio),
+            max_area_ratio=float(max_alignment_area_ratio),
+        )
+        audit.update({
+            "frame_index": int(fr.get("index", -1)),
+            "manifest_accepted": bool(fr.get("accepted", False)),
+            "manifest_iou": fr.get("iou_with_objgs"),
+            "azimuth_V_deg": float(fr["azimuth_V_deg"]),
+            "elevation_V_deg": float(fr["elevation_V_deg"]),
+            "image_path": str(rgba_path),
+            "reference_path": str(ref_path),
+        })
+        audits.append(audit)
+        if not audit["accepted"]:
+            logger.warning(
+                "Skipping hallucinated frame %s after image audit: %s (mask_iou=%.3f bbox_iou=%.3f centroid=%.3f area=%.3f).",
+                fr.get("index"), ",".join(audit["reject_reasons"]),
+                audit["mask_iou"], audit["bbox_iou"], audit["centroid_distance_norm"], audit["area_ratio"],
+            )
+            continue
 
         az_V = float(fr["azimuth_V_deg"])
         el_V = float(fr["elevation_V_deg"])
@@ -224,14 +357,35 @@ def build_hallucinated_supervision_views(
                 "azimuth_world_rad": float(np.deg2rad(az_V)),
                 "is_conditioning": bool(fr.get("is_conditioning", False)),
                 "frame_index": int(fr.get("index", 0)),
-                "alignment_iou": ref_iou,
+                "alignment_iou": audit["mask_iou"],
+                "alignment_bbox_iou": audit["bbox_iou"],
+                "alignment_centroid_distance_norm": audit["centroid_distance_norm"],
+                "alignment_area_ratio": audit["area_ratio"],
             },
             "weight": float(weight),
         })
 
+    if alignment_audit_path is not None:
+        audit_path = Path(alignment_audit_path)
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(audit_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "hallucination_index_path": str(halluc_index_path),
+                "n_frames_audited": len(audits),
+                "n_retained": len(views),
+                "thresholds": {
+                    "min_mask_iou": float(min_alignment_iou),
+                    "min_bbox_iou": float(min_alignment_bbox_iou),
+                    "max_centroid_distance_norm": float(max_alignment_centroid_distance),
+                    "min_area_ratio": float(min_alignment_area_ratio),
+                    "max_area_ratio": float(max_alignment_area_ratio),
+                },
+                "frames": audits,
+            }, f, indent=2)
+
     logger.info(
-        "Phase 6: built %d supervision views from %s (manifest_accepted=%d/%d, alignment_retained=%d).",
-        len(views), halluc_index_path.name, len(accepted), len(frames), len(views),
+        "Phase 6: built %d hallucinated supervision views from %s after auditing %d frame files.",
+        len(views), halluc_index_path.name, len(audits),
     )
     return views
 
@@ -315,6 +469,7 @@ def build_joint_supervision_views(
     up_W_override: Optional[np.ndarray] = None,
     include_conditioning: bool = True,
     min_hallucination_alignment_iou: float = 0.55,
+    hallucination_alignment_audit_path: str | Path | None = None,
 ) -> List[dict]:
     """Build one aligned training set containing real and hallucinated views."""
     real_views = build_real_supervision_views(
@@ -332,6 +487,7 @@ def build_joint_supervision_views(
         up_W_override=up_W_override,
         include_conditioning=include_conditioning,
         min_alignment_iou=float(min_hallucination_alignment_iou),
+        alignment_audit_path=hallucination_alignment_audit_path,
     )
     views = real_views + hallucinated_views
     logger.info(
@@ -366,6 +522,9 @@ def save_supervision_manifest(views: List[dict], output_path: str | Path) -> Pat
             "is_conditioning": cam.get("is_conditioning", False),
             "frame_index": cam.get("frame_index"),
             "alignment_iou": cam.get("alignment_iou"),
+            "alignment_bbox_iou": cam.get("alignment_bbox_iou"),
+            "alignment_centroid_distance_norm": cam.get("alignment_centroid_distance_norm"),
+            "alignment_area_ratio": cam.get("alignment_area_ratio"),
             "R_w2c": cam["R"].tolist(),
             "T_w2c": cam["T"].tolist(),
             "K": cam["K"].tolist(),

@@ -69,15 +69,15 @@ def run(
     model_path: str,
     output_root: str | Path,
     object_ids: List[int],
-    finetune_iterations: int = 1200,
+    scratch_iterations: int = 1200,
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
     fov_y_deg: float = 50.0,
     grid_resolution: int = 25,
+    visual_hull_min_views: int = 10,
     n_compare_views: int = 8,
     skip_compare: bool = False,
-    freeze_originals: bool = True,
 ) -> dict:
     """Run Phases 6/7/8 for every requested object_id."""
     output_root = Path(output_root)
@@ -153,13 +153,13 @@ def run(
                 pipe_config=pipe_config,
                 scope=scope,
                 local_sv3d=local_sv3d,
-                finetune_iterations=int(finetune_iterations),
+                scratch_iterations=int(scratch_iterations),
                 hallucination_weight=float(hallucination_weight),
                 real_weight=float(real_weight),
                 novel_rgb_weight=float(novel_rgb_weight),
                 fov_y_deg=float(fov_y_deg),
                 grid_resolution=int(grid_resolution),
-                freeze_originals=bool(freeze_originals),
+                visual_hull_min_views=int(visual_hull_min_views),
             )
             scratch_gaussians = summary.pop("_scratch_gaussians", None)
         except Exception as e:
@@ -237,9 +237,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Root holding obj_<id>/phase5 inputs and where Phase 7/8 writes.")
     p.add_argument("--object_ids", type=int, nargs="+", required=True,
                    help="One or more object label IDs to train from scratch (Phase 5 must already exist).")
-    p.add_argument("--scratch_iterations", "--finetune_iterations", dest="finetune_iterations",
-                   type=int, default=1200,
-                   help="Number of scratch ObjectGS training iterations. The --finetune_iterations alias is kept for old scripts.")
+    p.add_argument("--scratch_iterations", type=int, default=1200,
+                   help="Number of scratch ObjectGS training iterations.")
     p.add_argument("--hallucination_weight", type=float, default=1.0)
     p.add_argument("--real_weight", type=float, default=1.0)
     p.add_argument("--novel_rgb_weight", type=float, default=1.0)
@@ -247,11 +246,11 @@ def _parse_args() -> argparse.Namespace:
                    help="Vertical FOV used for SV3D outputs (must match Phase-5 setting).")
     p.add_argument("--grid_resolution", type=int, default=25,
                    help="Visual-hull initialization grid resolution per axis.")
+    p.add_argument("--visual_hull_min_views", type=int, default=10,
+                   help="Minimum number of supervision masks a point must project inside to initialize a scratch anchor.")
     p.add_argument("--n_compare_views", type=int, default=8)
     p.add_argument("--skip_compare", action="store_true",
                    help="Skip before/after orbit rendering (faster for batch runs).")
-    p.add_argument("--no_freeze_originals", action="store_true",
-                   help="Allow optimizer to update the original-object anchors too.")
     p.add_argument("--log_level", default="INFO")
     return p.parse_args()
 
@@ -265,15 +264,15 @@ def main():
         model_path=args.model_path,
         output_root=args.output_root,
         object_ids=args.object_ids,
-        finetune_iterations=args.finetune_iterations,
+        scratch_iterations=args.scratch_iterations,
         hallucination_weight=args.hallucination_weight,
         real_weight=args.real_weight,
         novel_rgb_weight=args.novel_rgb_weight,
         fov_y_deg=args.fov_y_deg,
         grid_resolution=args.grid_resolution,
+        visual_hull_min_views=args.visual_hull_min_views,
         n_compare_views=args.n_compare_views,
         skip_compare=args.skip_compare,
-        freeze_originals=not args.no_freeze_originals,
     )
 
 
