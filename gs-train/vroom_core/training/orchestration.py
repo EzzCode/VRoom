@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field as dc_field
 from random import randint
 from typing import List, Optional
@@ -86,7 +87,7 @@ class PipelineConfig:
     weed_ratio: float = 0.0
     save_explicit: bool = False
     save_vis: bool = True
-    save_iterations: List[int] = dc_field(default_factory=lambda: [7000, 30000])
+    save_iterations: List[int] = dc_field(default_factory=lambda: [7000, 10000, 150000, 20000, 250000])
 
 
 PipeConfig = PipelineConfig
@@ -218,3 +219,14 @@ class TrainingOrchestrator:
             torch.save(self.gaussians.capture(), state_path)
         except Exception:
             pass  # non-critical
+
+        # Zip the checkpoint directory
+        try:
+            # checkpoint_dir is .../point_cloud/iteration_N
+            # we want to create .../point_cloud/iteration_N.zip
+            shutil.make_archive(checkpoint_dir, 'zip', checkpoint_dir)
+            if self.logger:
+                self.logger.info(f"Compressed checkpoint to {checkpoint_dir}.zip")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to zip checkpoint: {e}")
