@@ -4,7 +4,7 @@ Extract single-object meshes using semantic masks.
 Inputs required in the `inputs/` directory:
 - `cameras.json`: Camera intrinsics and extrinsics
 - `raw_depth/`: Directory containing raw depth maps
-- RGB images and Semantic masks: Used to colorize and isolate specific objects
+- RGB images and Semantic masks: Used to color and isolate objects
 
 For each object label found in the semantic maps:
 1. Mask depth maps (zero out pixels that don't belong to this object)
@@ -12,7 +12,7 @@ For each object label found in the semantic maps:
 3. Run TSDF fusion with a tight grid around just that object
 4. Export individual colored mesh
 
-Output: objects/ folder with one OBJ per object label.
+Output: objects/ folder with one PLY per object label.
 """
 
 import argparse
@@ -36,13 +36,15 @@ args = parser.parse_args()
 # 1. Load Camera Data
 # ============================================================================
 input_dir = args.inputs
-# Create the 'objects' folder right next to 'mesh_inputs' in the model directory
+# Create the objects folder in the same directory as inputs folder
 output_dir = os.path.join(os.path.dirname(input_dir), "objects")
 os.makedirs(output_dir, exist_ok=True)
 
+# Load camera.json to get camera intrinsics and extrinsics
 with open(os.path.join(input_dir, "cameras.json"), "r") as f:
     cameras = json.load(f)
 
+# Number of cameras is the same as the number of depth maps
 num_depth_files = len(os.listdir(os.path.join(input_dir, "raw_depth")))
 cameras = cameras[:num_depth_files]
 num_cams = len(cameras)
@@ -63,22 +65,27 @@ for i, cam in enumerate(cameras):
     # Intrinsics
     fx, fy = cam["fx"], cam["fy"]
     W, H = cam["width"], cam["height"]
-    cx, cy = W / 2.0, H / 2.0
+    cx, cy = W / 2.0, H / 2.0 # principal point (center of the image)
+    # Intrinsics matrix K
+    # K = [fx, 0, cx]
+    #     [0, fy, cy]
+    #     [0, 0,  1 ]
     intrinsics = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
 
-    # Extrinsics — rotation in cameras.json is camera-to-world (C2W)
+    # Extrinsics, rotation in cameras.json is camera-to-world (C2W)
     R_c2w = np.array(cam["rotation"])
     R_w2c = R_c2w.T  # transpose to get world-to-camera
     pos = np.array(cam["position"])
-    extrinsics = np.eye(4)
-    extrinsics[:3, :3] = R_w2c
-    extrinsics[:3, 3] = -R_w2c @ pos
+    extrinsics = np.eye(4) # create 4x4 identity matrix
+    extrinsics[:3, :3] = R_w2c # set the top-left 3x3 matrix to the rotation matrix
+    extrinsics[:3, 3] = -R_w2c @ pos # set the last column to the translation vector
 
     # Depth
     depth_maps_raw.append(np.load(os.path.join(input_dir, "raw_depth", f"{i:05d}.npy")))
 
     # RGB
     rgb = np.array(Image.open(os.path.join(input_dir, "renders", f"{i:05d}.png")))
+    # Drop alpha channel, normalize to [0, 1] and append
     color_images_raw.append(rgb[:, :, :3].astype(np.float64) / 255.0)
 
     # Semantic
@@ -95,11 +102,12 @@ print("All data loaded.")
 # ============================================================================
 all_labels = set()
 for sem in semantic_maps:
-    all_labels.update(np.unique(sem))
+    all_labels.update(np.unique(sem)) # discover unique objects
 all_labels = sorted(all_labels)
 print(f"\nFound {len(all_labels)} unique labels: {all_labels}")
 
-# Count pixel presence per label across all views
+# Count number of pixels for each object across all views (semantic maps is a list
+# containing images from each view)
 label_counts = {}
 for label_id in all_labels:
     total_pixels = sum(np.sum(sem == label_id) for sem in semantic_maps)

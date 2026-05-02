@@ -86,7 +86,9 @@ def extract_mesh_inputs(model_path, output_dir, iteration=30000):
         if "render" in pkg:
             rgb = pkg["render"].clone().clamp(0, 1).detach().cpu().numpy().transpose(1, 2, 0)
             Image.fromarray((rgb * 255).astype(np.uint8)).save(exp_dir / "renders" / f"{idx:05d}.png")
-            
+        
+        # Depth maps are saved as .npy files because they are 2D arrays and need to store
+        # depth values with high precision
         if "render_depth" in pkg:
             np.save(exp_dir / "raw_depth" / f"{idx:05d}.npy", pkg["render_depth"].squeeze().detach().cpu().numpy())
             
