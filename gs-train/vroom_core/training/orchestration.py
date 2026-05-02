@@ -220,13 +220,18 @@ class TrainingOrchestrator:
         except Exception:
             pass  # non-critical
 
-        # Zip the checkpoint directory
+        # Zip the entire output directory
         try:
-            # checkpoint_dir is .../point_cloud/iteration_N
-            # we want to create .../point_cloud/iteration_N.zip
-            shutil.make_archive(checkpoint_dir, 'zip', checkpoint_dir)
+            # We want to zip the entire self.output_dir and save it in the working directory
+            # Use the experiment name and iteration for the zip filename
+            parent_dir = os.path.basename(os.path.dirname(self.output_dir))
+            timestamp = os.path.basename(self.output_dir)
+            zip_filename = f"{parent_dir}_{timestamp}_iter_{iteration}"
+            zip_path = os.path.join(os.getcwd(), zip_filename)
+            
+            shutil.make_archive(zip_path, 'zip', self.output_dir)
             if self.logger:
-                self.logger.info(f"Compressed checkpoint to {checkpoint_dir}.zip")
+                self.logger.info(f"Compressed entire output directory to {zip_path}.zip")
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Failed to zip checkpoint: {e}")
+                self.logger.error(f"Failed to zip output directory: {e}")
