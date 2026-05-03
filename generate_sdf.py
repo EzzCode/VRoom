@@ -14,7 +14,7 @@ def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, v
     - intrinsics: 3x3 Camera lens matrix.
     - extrinsics: 4x4 Camera pose matrix (World-to-Camera).
     - grid_shape: Tuple (N, N, N) for the grid size.
-    - voxel_size: Physical size of one voxel in meters.
+    - voxel_size: Physical size of one voxel in coordinate units.
     - trunc_margin: The maximum +/- distance to cap the SDF (the "T" in TSDF).
     - color_image: (optional) (H, W, 3) RGB image from the same camera. If provided,
       colors are sampled at the same pixel coordinates as depth.
@@ -270,7 +270,7 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
     - intrinsics_list: list of 3x3 intrinsics matrices, one per camera.
     - extrinsics_list: list of 4x4 extrinsics matrices, one per camera.
     - grid_shape: Tuple (N, N, N) for the grid size.
-    - voxel_size: Physical size of one voxel in meters.
+    - voxel_size: Physical size of one voxel in coordinate units.
     - trunc_margin: The maximum +/- distance to cap the SDF.
     - color_images: (optional) list of (H, W, 3) RGB images, one per camera.
     - grid_origin: (optional) (3,) array, the world-space corner where the grid starts.

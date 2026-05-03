@@ -20,6 +20,8 @@ from marching_cubes import run_marching_cubes
 from export_ply import export_ply_binary
 from utils import remove_small_components, compute_depth_trunc, unproject_to_3d
 
+total_start_time = time.time()
+
 # ============================================================================
 # 1. Load Camera Data
 # ============================================================================
@@ -63,10 +65,10 @@ for i, cam in enumerate(cameras):
     # Extrinsics, rotation in cameras.json is camera-to-world (C2W)
     R_c2w = np.array(cam["rotation"])
     R_w2c = R_c2w.T  # transpose to get world-to-camera
-    pos = np.array(cam["position"])
+    pos = np.array(cam["position"]) # position of the camera in world coordinates
     extrinsics = np.eye(4) # create 4x4 identity matrix
     extrinsics[:3, :3] = R_w2c # set the top-left 3x3 matrix to the rotation matrix
-    extrinsics[:3, 3] = -R_w2c @ pos # set the last column to the translation vector
+    extrinsics[:3, 3] = -R_w2c @ pos # set the last column to the translation  (@ is matrix multiplication)
 
     # Depth
     depth_maps_raw.append(np.load(os.path.join(input_dir, "raw_depth", f"{i:05d}.npy")))
@@ -108,11 +110,11 @@ for label_id in sorted_labels:
     print(f"  Label {label_id:3d}: {label_counts[label_id]:,} pixels")
 
 # ============================================================================
-# 5. Process Each Object
+# 4. Process Each Object
 # ============================================================================
 # Skip labels with too few pixels (noise) or the dominant background label
 MIN_PIXELS = 50000  # minimum total pixels across all views to process
-# BBOX_DEPTH_TRUNC is now computed automatically per object (see compute_depth_trunc)
+# BBOX_DEPTH_TRUNC is computed automatically per object (in compute_depth_trunc)
 SKIP_LABELS = []
 
 print(f"\n{'='*60}")
@@ -131,30 +133,33 @@ for label_id in sorted_labels:
     print(f"Object label {label_id} ({label_counts[label_id]:,} pixels)")
     print(f"{'='*60}")
 
-    # --- Auto-compute depth_trunc for this object ---
+    # Auto-compute depth_trunc for this object
+    # BBOX_DEPTH_TRUNC is the maximum depth distance to process.
+    # Any pixels further away than this cutoff are ignored to remove background noise.
     BBOX_DEPTH_TRUNC = compute_depth_trunc(depth_maps_raw, semantic_maps, label_id)
-    print(f"  Auto depth_trunc: {BBOX_DEPTH_TRUNC:.2f} m")
+    print(f"  Auto depth_trunc: {BBOX_DEPTH_TRUNC:.2f} units")
 
-    # --- Step A: Create masked depth maps for this object ---
+    # Step A & B: Create masked depth maps and find object's 3D bounding box
     masked_depths = []
     masked_colors = []
+    all_world_pts = []
+    
     for i in range(num_cams):
         d = depth_maps_raw[i].copy()
+        # Compute mask once per camera
         mask = (semantic_maps[i] == label_id) & (d > 0) & (d < BBOX_DEPTH_TRUNC)
+        
+        # Step A: Mask depth maps
         d[~mask] = 0  # zero out non-object pixels and far depths
         masked_depths.append(d)
-        masked_colors.append(color_images_raw[i])  # color stays full, only depth gates the TSDF
+        masked_colors.append(color_images_raw[i])  # color stays full, filtering depth is enough to gate TSDF
 
-    # --- Step B: Find object's 3D bounding box ---
-    all_world_pts = []
-    for i in range(num_cams):
-        # Only use pixels within depth_trunc for bbox computation
-        mask = (semantic_maps[i] == label_id) & (depth_maps_raw[i] > 0) & (depth_maps_raw[i] < BBOX_DEPTH_TRUNC)
+        # Step B: Find 3D points for bounding box
         pts = unproject_to_3d(depth_maps_raw[i], mask, intrinsics_list[i], extrinsics_list[i])
         if len(pts) > 0:
             # Subsample for speed (don't need all points for bbox)
             if len(pts) > 5000:
-                idx = np.random.choice(len(pts), 5000, replace=False)
+                idx = np.random.choice(len(pts), 5000, replace=False) # random sampling, idx are pts indices
                 pts = pts[idx]
             all_world_pts.append(pts)
 
@@ -162,31 +167,36 @@ for label_id in sorted_labels:
         print(f"  No 3D points found, skipping.")
         continue
 
-    all_world_pts = np.vstack(all_world_pts)
+    all_world_pts = np.vstack(all_world_pts) # stack all points from all cameras
     # Use percentiles instead of min/max to ignore outliers from noisy masks
-    obj_min = np.percentile(all_world_pts, 2, axis=0)
-    obj_max = np.percentile(all_world_pts, 98, axis=0)
+    # This way, if there are outliers in the depth values of an object, we ignore them
+    # and get a tighter bounding box. If the object extends beyond the percentiles, padding
+    # will keep it included.
+    obj_min = np.percentile(all_world_pts, 2, axis=0) # 2nd percentile
+    obj_max = np.percentile(all_world_pts, 98, axis=0) # 98th percentile
     obj_size = obj_max - obj_min
 
     print(f"  3D bbox: min={obj_min.round(3)}, max={obj_max.round(3)}")
-    print(f"  3D size: {(obj_size * 100).round(1)} cm")
+    print(f"  3D size: {obj_size.round(3)} units")
 
-    # --- Step C: Set grid parameters ---
-    padding = 0.05  # 5cm padding instead of 10cm for a tighter resolution mesh
+    # Step C: Set grid parameters
+    padding = 0.05  # 0.05 units padding instead of 0.1 for a tighter resolution mesh
     grid_min = obj_min - padding
     grid_max = obj_max + padding
-    grid_size = grid_max - grid_min
+    grid_size = grid_max - grid_min # width, height, and depth of the bounding box
 
-    N = 128  # resolution per object (enough for single objects)
-    voxel_size = grid_size.max() / N
-    trunc_margin = voxel_size * 5
+    N = 128  # resolution per object (enough for single objects) - 128 corners (encloses 127 voxels)
+    # grid_size.max() to make sure the grid is big enough to contain the object (extracts largest dimension of grid)
+    voxel_size = grid_size.max() / N 
+    trunc_margin = voxel_size * 5 # truncate the sdf values to 5 times the voxel size
     depth_trunc = BBOX_DEPTH_TRUNC
 
-    print(f"  Grid: {N}^3, voxel={voxel_size:.4f}m, trunc={trunc_margin:.4f}m")
+    print(f"  Grid: {N}^3, voxel={voxel_size:.4f} units, trunc={trunc_margin:.4f} units")
 
-    # --- Step D: Run TSDF fusion ---
+    # Step D: Run TSDF fusion
     print(f"  Fusing...")
     t0 = time.time()
+    # Fused grid represents voxels corners
     fused_grid, fused_colors, obs_count = fuse_tsdf(
         masked_depths, intrinsics_list, extrinsics_list,
         grid_shape=(N, N, N),
@@ -199,20 +209,21 @@ for label_id in sorted_labels:
     t1 = time.time()
     print(f"  TSDF fusion: {t1 - t0:.2f}s")
 
-    # --- Step D2: Filter low-confidence voxels (removes flying pixels) ---
-    # Voxels seen by fewer than min_obs cameras are unreliable — set to +1 (outside)
+    # Step D2: Filter low-confidence voxels corners (removes flying pixels)
+    # Voxel corners seen by fewer than min_obs cameras are unreliable, set to +1 (outside)
     # so Marching Cubes won't generate surfaces there.
     min_obs = 2
     low_conf_mask = obs_count < min_obs
-    n_removed = np.sum((fused_grid < 0) & low_conf_mask)
+    n_removed = np.sum((fused_grid < 0) & low_conf_mask) # negative values are inside the object
     fused_grid[low_conf_mask] = 1.0
     if fused_colors is not None:
         fused_colors[low_conf_mask] = 0.0
-    print(f"  Confidence filter: removed {n_removed} low-confidence surface voxels (min_obs={min_obs})")
+    print(f"  Confidence filter: removed {n_removed} low-confidence surface voxel corners (min_obs={min_obs})")
 
-    # --- Step E: Run Marching Cubes ---
+    # Step E: Run Marching Cubes
     print(f"  Marching Cubes...")
     t2 = time.time()
+    # Each vertex has a color. 3D Software interpolates the colors of the 3 vertices in each triangle
     vertices, triangles, vertex_colors = run_marching_cubes(fused_grid, N, color_grid=fused_colors)
     t3 = time.time()
     print(f"  Result: {len(vertices)} vertices, {len(triangles)} triangles")
@@ -222,17 +233,18 @@ for label_id in sorted_labels:
         print(f"  No mesh generated, skipping.")
         continue
 
-    # --- Step E2: Remove flying fragments ---
+    # Step E2: Remove flying fragments
     vertices, triangles, vertex_colors = remove_small_components(
         vertices, triangles, vertex_colors, min_ratio=0.05
     )
     print(f"  After cleanup: {len(vertices)} vertices, {len(triangles)} triangles")
 
     # Scale to world coordinates (vectorized)
+    # (Grid Coordinate * Size of one grid block) + Where the grid started in the room
     verts_arr = np.array(vertices) * voxel_size + grid_min
-    scaled_vertices = [tuple(v) for v in verts_arr]
+    scaled_vertices = [tuple(v) for v in verts_arr] # turns the array of vertices into a list of tuples to be used in export
 
-    # --- Step F: Export ---
+    # Step F: Export
     t4 = time.time()
     ply_path = os.path.join(output_dir, f"object_{label_id:03d}.ply")
     export_ply_binary(scaled_vertices, triangles, ply_path, vertex_colors=vertex_colors)
@@ -242,4 +254,6 @@ for label_id in sorted_labels:
 
 print(f"\n{'='*60}")
 print(f"Done! Check the 'objects/' folder for individual meshes.")
+total_end_time = time.time()
+print(f"Total pipeline execution time: {total_end_time - total_start_time:.2f} seconds")
 print(f"{'='*60}")
