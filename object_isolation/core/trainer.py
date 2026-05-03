@@ -1,10 +1,16 @@
-"""Fresh object-only ObjectGS training for aligned real + hallucinated views.
+"""Object-only ObjectGS training for aligned real + hallucinated views.
 
-This module intentionally does not use target_replenishment optimizers,
-backside seeding, or anchors from the already-trained ObjectGS model. It
-starts from the scene COLMAP point cloud, creates a fresh ObjectGS
-GaussianModel, and trains that model directly against the joint real +
-hallucinated view set.
+This module starts from the scene COLMAP point cloud, creates a fresh
+ObjectGS GaussianModel, and trains that model directly against the joint
+real + hallucinated view set.
+
+Key design choices vs. ObjectGS scene-level training:
+  * Asymmetric depth supervision: parent ObjectGS is rendered with
+    ``object_mask`` at each *real* view to provide reliable front-surface
+    depth. Hallucinated (SV3D) views have NO depth target.
+  * SSIM is enabled only on real views (SV3D textures are unreliable).
+  * Hallucination loss weight decays in the late stage so noisy backside
+    textures stop dragging the appearance MLPs after the geometry locks.
 """
 
 from __future__ import annotations
@@ -51,26 +57,6 @@ def _to_tensor_mask(mask: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(np.asarray(mask).astype(np.float32)).unsqueeze(0).cuda()
 
 
-def _as_depth_tensor(depth) -> Optional[torch.Tensor]:
-    if depth is None:
-        return None
-    if depth.ndim == 2:
-        depth = depth.unsqueeze(0)
-    elif depth.ndim == 3:
-        depth = depth[0:1]
-    else:
-        return None
-    return depth.float()
-
-
-def _as_alpha_tensor(alpha) -> torch.Tensor:
-    if alpha.ndim == 3:
-        return alpha[0:1].float()
-    if alpha.ndim == 2:
-        return alpha.unsqueeze(0).float()
-    return alpha.reshape(1, *alpha.shape[-2:]).float()
-
-
 def _model_kwargs_from_parent(parent_gaussians=None) -> dict:
     keys = (
         "fork", "gs_attr", "color_attr", "feat_dim", "view_dim", "appearance_dim",
@@ -99,55 +85,6 @@ def _model_kwargs_from_parent(parent_gaussians=None) -> dict:
 def _prepare_direct_render_model(gaussians: GaussianModel) -> None:
     gaussians.explicit_gs = False
     gaussians.weed_ratio = 0.0
-
-
-def _render_parent_object_depth_target(
-    *,
-    parent_gaussians,
-    pipe_config,
-    cam,
-    object_id: int,
-    real_mask: torch.Tensor,
-    alpha_threshold: float,
-) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-    if parent_gaussians is None or not hasattr(parent_gaussians, "label_ids"):
-        return None, None
-
-    with torch.no_grad():
-        labels = parent_gaussians.label_ids.squeeze()
-        object_mask = labels == int(object_id)
-        if not bool(object_mask.any().item()):
-            return None, None
-
-        parent_gaussians.set_anchor_mask(cam.camera_center, cam.resolution_scale)
-        try:
-            visible_mask = _prefilter(cam, parent_gaussians).squeeze()
-        except Exception:
-            visible_mask = parent_gaussians._anchor_mask
-
-        bg = torch.zeros(3, dtype=torch.float32, device="cuda")
-        pkg = _ogs_render(
-            cam,
-            parent_gaussians,
-            pipe_config,
-            bg,
-            visible_mask=visible_mask,
-            training=False,
-            object_mask=object_mask,
-        )
-        depth = _as_depth_tensor(pkg.get("render_depth"))
-        if depth is None:
-            return None, None
-        alpha = _as_alpha_tensor(pkg["render_alphas"])
-        valid = (
-            (real_mask > 0.5)
-            & (alpha > float(alpha_threshold))
-            & torch.isfinite(depth)
-            & (depth > 0.0)
-        ).float()
-        if int(valid.sum().item()) < 64:
-            return None, None
-        return depth.detach(), valid.detach()
 
 
 def _training_options(
@@ -207,6 +144,66 @@ def _training_options(
     )
 
 
+def _precompute_real_view_depths(
+    *,
+    parent_gaussians,
+    parent_pipe,
+    entries: list,
+    object_label_id: int,
+    depth_alpha_threshold: float = 0.5,
+) -> int:
+    """Render parent ObjectGS depth at each real view, restricted to the object.
+
+    Stores ``gt_depth`` (1,H,W) and ``depth_mask`` (1,H,W) on each real-view
+    entry. Hallucinated views are skipped. Returns number of real views with
+    depth populated.
+    """
+    if parent_gaussians is None:
+        return 0
+    labels = parent_gaussians.label_ids.squeeze(-1)
+    object_anchor_mask = (labels == int(object_label_id))
+    if int(object_anchor_mask.sum()) == 0:
+        logger.warning("Parent has 0 anchors with label %d; skipping real-view depth.", object_label_id)
+        return 0
+
+    pipe = parent_pipe or SimpleNamespace(add_prefilter=True)
+    if not hasattr(pipe, "add_prefilter"):
+        pipe.add_prefilter = True
+    bg = torch.zeros(3, dtype=torch.float32, device="cuda")
+    n_filled = 0
+    with torch.no_grad():
+        for entry in entries:
+            if entry.get("source") != "real":
+                continue
+            cam = entry["camera"]
+            parent_gaussians.set_anchor_mask(cam.camera_center, cam.resolution_scale)
+            visible_mask = parent_gaussians._anchor_mask & object_anchor_mask
+            if int(visible_mask.sum()) == 0:
+                continue
+            pkg = _ogs_render(cam, parent_gaussians, pipe, bg,
+                              visible_mask=visible_mask, training=False)
+            depth = pkg.get("render_depth")
+            alpha = pkg.get("render_alphas")
+            if depth is None or alpha is None:
+                continue
+            if alpha.ndim == 3 and alpha.shape[0] != 1:
+                alpha = alpha[0:1]
+            elif alpha.ndim == 2:
+                alpha = alpha.unsqueeze(0)
+            if depth.ndim == 3 and depth.shape[0] != 1:
+                depth = depth[0:1]
+            elif depth.ndim == 2:
+                depth = depth.unsqueeze(0)
+            depth_mask = ((alpha > float(depth_alpha_threshold)).float()
+                          * entry["gt_mask"]).clamp(0.0, 1.0)
+            if float(depth_mask.sum()) < 16.0:
+                continue
+            entry["gt_depth"] = depth.detach().clone()
+            entry["depth_mask"] = depth_mask.detach().clone()
+            n_filled += 1
+    return n_filled
+
+
 def train_object(
     *,
     supervision_views: list,
@@ -222,22 +219,23 @@ def train_object(
     max_init_points: int = 20000,
     colmap_init_target_points: int = 8000,
     rgb_weight: float = 1.0,
-    hallucination_rgb_scale: float = 1.0,
-    alpha_weight: float = 1.0,
+    alpha_weight: float = 2.0,
     outside_alpha_weight: float = 2.0,
-    depth_weight: float = 0.1,
-    depth_start_iter: int = 100,
-    depth_front_weight: float = 1.0,
-    depth_back_weight: float = 0.15,
-    depth_alpha_threshold: float = 0.35,
     enable_densification: bool = False,
     max_anchor_count: int = 20000,
     densify_grad_threshold: float = 0.00005,
     densify_extra_ratio: float = 0.08,
     max_scale_growth: float = 1.35,
     max_offset_abs: float = 0.45,
+    enable_depth_supervision: bool = True,
+    depth_weight: float = 0.5,
+    depth_alpha_threshold: float = 0.5,
+    depth_start_iter_frac: float = 0.0,
+    halluc_decay_start_frac: float = 0.6,
+    halluc_weight_floor: float = 0.3,
+    scale_drift_weight: float = 0.05,
 ) -> dict:
-    """Train a fresh object-only ObjectGS model from COLMAP seed points."""
+    """Train an object-only ObjectGS model from COLMAP seed points."""
     if not supervision_views:
         raise RuntimeError("Cannot train object model with no supervision views.")
 
@@ -255,31 +253,9 @@ def train_object(
             "gt_mask": _to_tensor_mask(view["mask"]),
             "weight": float(view.get("weight", 1.0)),
             "source": str(view.get("source", "unknown")),
+            "gt_depth": None,
+            "depth_mask": None,
         })
-
-    n_depth_targets = 0
-    if float(depth_weight) > 0.0 and parent_gaussians is not None:
-        for entry in entries:
-            if entry["source"] != "real":
-                entry["depth_target"] = None
-                entry["depth_valid"] = None
-                continue
-            depth_target, depth_valid = _render_parent_object_depth_target(
-                parent_gaussians=parent_gaussians,
-                pipe_config=pipe_config,
-                cam=entry["camera"],
-                object_id=int(object_id),
-                real_mask=entry["gt_mask"],
-                alpha_threshold=float(depth_alpha_threshold),
-            )
-            entry["depth_target"] = depth_target
-            entry["depth_valid"] = depth_valid
-            if depth_target is not None:
-                n_depth_targets += 1
-    else:
-        for entry in entries:
-            entry["depth_target"] = None
-            entry["depth_valid"] = None
 
     pcd, init_metadata = load_colmap_object_point_cloud(
         model_path=model_path,
@@ -319,9 +295,24 @@ def train_object(
     for entry in entries:
         source_counts[entry["source"]] = source_counts.get(entry["source"], 0) + 1
 
+    n_real_with_depth = 0
+    if bool(enable_depth_supervision):
+        n_real_with_depth = _precompute_real_view_depths(
+            parent_gaussians=parent_gaussians,
+            parent_pipe=pipe_config,
+            entries=entries,
+            object_label_id=int(object_id),
+            depth_alpha_threshold=float(depth_alpha_threshold),
+        )
+        logger.info(
+            "Asymmetric depth supervision: %d / %d real views populated with parent depth.",
+            n_real_with_depth, source_counts.get("real", 0),
+        )
+
     order = list(range(len(entries)))
     rng = np.random.default_rng(0)
     densify_count = 0
+    depth_start_iter = int(max(0, float(depth_start_iter_frac)) * float(n_iterations))
 
     progress = tqdm(range(1, int(n_iterations) + 1), desc=f"obj {int(object_id)}", dynamic_ncols=True)
     for iteration in progress:
@@ -331,14 +322,24 @@ def train_object(
         cam = entry["camera"]
         gt = entry["gt_image"]
         mask = entry["gt_mask"]
-        weight = float(entry["weight"])
-        rgb_scale = float(hallucination_rgb_scale) if entry["source"] == "hallucinated" else 1.0
+        is_real = entry["source"] == "real"
+
+        # Hallucinated weight schedule: full early, decay after halluc_decay_start_frac.
+        iter_frac = float(iteration) / float(max(1, n_iterations))
+        if not is_real and iter_frac > float(halluc_decay_start_frac):
+            decay_t = (iter_frac - float(halluc_decay_start_frac)) / max(
+                1e-6, 1.0 - float(halluc_decay_start_frac))
+            halluc_scale = 1.0 - float(decay_t) * (1.0 - float(halluc_weight_floor))
+        else:
+            halluc_scale = 1.0
+        weight = float(entry["weight"]) * float(halluc_scale)
 
         gaussians.update_learning_rate(iteration)
         gaussians.set_anchor_mask(cam.camera_center, cam.resolution_scale)
         visible_mask = _prefilter(cam, gaussians).squeeze() if getattr(pipe, "add_prefilter", True) else gaussians._anchor_mask
         render_pkg = _ogs_render(cam, gaussians, pipe, background, visible_mask=visible_mask, training=True)
         pred = torch.clamp(render_pkg["render"], 0.0, 1.0)
+        pred_depth = render_pkg.get("render_depth")
         alpha = render_pkg["render_alphas"]
         if alpha.ndim == 3:
             alpha = alpha[0:1]
@@ -349,7 +350,12 @@ def train_object(
         n_bg = (1.0 - mask).sum().clamp(min=1.0)
         rgb_fg = torch.abs((pred - gt) * mask).sum() / (3.0 * n_fg)
         rgb_bg = torch.abs((pred - gt) * (1.0 - mask)).sum() / (3.0 * n_bg)
-        ssim_loss = 1.0 - ssim(pred.unsqueeze(0) * mask.unsqueeze(0), gt.unsqueeze(0) * mask.unsqueeze(0))
+        # SSIM only on real views — SV3D textures are unreliable.
+        if is_real:
+            ssim_loss = 1.0 - ssim(pred.unsqueeze(0) * mask.unsqueeze(0),
+                                   gt.unsqueeze(0) * mask.unsqueeze(0))
+        else:
+            ssim_loss = torch.tensor(0.0, device="cuda")
         alpha_fg = (mask * (1.0 - alpha)).mean()
         alpha_bg = ((1.0 - mask) * alpha).mean()
         scale_reg = render_pkg["scaling"].prod(dim=1).mean() if render_pkg["scaling"].numel() else torch.tensor(0.0, device="cuda")
@@ -357,29 +363,29 @@ def train_object(
         if gaussians._scaling.shape == initial_scaling.shape:
             scale_drift = (gaussians._scaling - initial_scaling).pow(2).mean()
 
-        total = weight * float(rgb_weight) * rgb_scale * (0.8 * rgb_fg + 0.2 * ssim_loss + 0.2 * rgb_bg)
-        total = total + float(alpha_weight) * alpha_fg + float(outside_alpha_weight) * alpha_bg
-        total = total + float(opt.lambda_dreg) * scale_reg + 0.01 * scale_drift
-
-        depth_loss = torch.tensor(0.0, device="cuda")
-        depth_target = entry.get("depth_target")
-        depth_valid = entry.get("depth_valid")
-        pred_depth = _as_depth_tensor(render_pkg.get("render_depth"))
+        # Asymmetric depth loss: only real views with reliable parent depth, only after warmup.
+        gt_depth = entry.get("gt_depth")
+        depth_mask_t = entry.get("depth_mask")
         if (
-            float(depth_weight) > 0.0
-            and iteration >= int(depth_start_iter)
-            and depth_target is not None
-            and depth_valid is not None
+            is_real
             and pred_depth is not None
+            and gt_depth is not None
+            and depth_mask_t is not None
+            and iteration >= depth_start_iter
         ):
-            rel_delta = (pred_depth - depth_target) / depth_target.detach().abs().clamp_min(1e-3)
-            closer_than_target = F.relu(-rel_delta)
-            farther_than_target = F.relu(rel_delta)
-            depth_loss = (
-                (float(depth_front_weight) * closer_than_target + float(depth_back_weight) * farther_than_target)
-                * depth_valid
-            ).sum() / depth_valid.sum().clamp_min(1.0)
-            total = total + float(depth_weight) * depth_loss
+            pd = pred_depth
+            if pd.ndim == 3 and pd.shape[0] != 1:
+                pd = pd[0:1]
+            elif pd.ndim == 2:
+                pd = pd.unsqueeze(0)
+            depth_loss = (torch.abs(pd - gt_depth) * depth_mask_t).sum() / depth_mask_t.sum().clamp(min=1.0)
+        else:
+            depth_loss = torch.tensor(0.0, device="cuda")
+
+        total = weight * float(rgb_weight) * (0.8 * rgb_fg + 0.2 * ssim_loss + 0.2 * rgb_bg)
+        total = total + float(alpha_weight) * alpha_fg + float(outside_alpha_weight) * alpha_bg
+        total = total + float(opt.lambda_dreg) * scale_reg + float(scale_drift_weight) * scale_drift
+        total = total + float(depth_weight) * depth_loss
 
         gaussians.optimizer.zero_grad(set_to_none=True)
         total.backward()
@@ -402,13 +408,11 @@ def train_object(
             gaussians._offset.data.clamp_(min=-float(max_offset_abs), max=float(max_offset_abs))
 
         loss_value = float(total.detach().item())
-        depth_loss_value = float(depth_loss.detach().item())
         loss_history.append(loss_value)
-        depth_loss_history.append(depth_loss_value)
+        depth_loss_history.append(float(depth_loss.detach().item()))
         if iteration == 1 or iteration % 10 == 0 or iteration == int(n_iterations):
             progress.set_postfix({
                 "loss": f"{loss_value:.4f}",
-                "depth": f"{depth_loss_value:.4f}",
                 "src": entry["source"],
                 "anchors": int(gaussians._anchor.shape[0]),
             })
@@ -424,7 +428,6 @@ def train_object(
         "init_source": init_metadata.get("init_source", "unknown"),
         "init_metadata": init_metadata,
         "n_supervision_views": len(supervision_views),
-        "n_depth_target_views": int(n_depth_targets),
         "source_counts": source_counts,
         "n_init_points": int(len(pcd.points)),
         "n_final_anchors": int(gaussians._anchor.shape[0]),
@@ -433,12 +436,16 @@ def train_object(
         "max_anchor_count": int(max_anchor_count),
         "densify_grad_threshold": float(densify_grad_threshold),
         "densify_extra_ratio": float(densify_extra_ratio),
-        "hallucination_rgb_scale": float(hallucination_rgb_scale),
+        "depth_supervision_enabled": bool(enable_depth_supervision),
+        "n_real_views_with_depth": int(n_real_with_depth),
         "depth_weight": float(depth_weight),
-        "depth_start_iter": int(depth_start_iter),
-        "depth_front_weight": float(depth_front_weight),
-        "depth_back_weight": float(depth_back_weight),
         "depth_alpha_threshold": float(depth_alpha_threshold),
+        "depth_start_iter": int(depth_start_iter),
+        "halluc_decay_start_frac": float(halluc_decay_start_frac),
+        "halluc_weight_floor": float(halluc_weight_floor),
+        "scale_drift_weight": float(scale_drift_weight),
+        "alpha_weight": float(alpha_weight),
+        "outside_alpha_weight": float(outside_alpha_weight),
         "final_sample_loss": float(loss_history[-1]) if loss_history else 0.0,
         "final_loss": float(np.mean(tail)) if tail else 0.0,
         "loss_history": loss_history,
