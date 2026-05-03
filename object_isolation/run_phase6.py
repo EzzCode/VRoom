@@ -76,22 +76,36 @@ def run(
     novel_rgb_weight: float = 1.0,
     fov_y_deg: float = 50.0,
     colmap_init_target_points: int = 8000,
-    enable_densification: bool = False,
+    enable_densification: bool = True,
     max_anchor_count: int = 20000,
     densify_grad_threshold: float = 0.00005,
     densify_extra_ratio: float = 0.08,
+    densify_real_views_only: bool = True,
+    max_splat_world_size: float = 0.15,
+    aabb_prune_margin: float = 0.3,
+    aabb_prune_interval: int = 500,
     n_compare_views: int = 8,
     skip_compare: bool = False,
     debug: bool = False,
     enable_depth_supervision: bool = True,
+    use_colmap_depth: bool = True,
+    colmap_depth_dilate: int = 3,
     depth_weight: float = 0.5,
     depth_alpha_threshold: float = 0.5,
     depth_start_iter_frac: float = 0.0,
     halluc_decay_start_frac: float = 0.6,
-    halluc_weight_floor: float = 0.3,
+    halluc_weight_floor: float = 0.5,
     alpha_weight: float = 2.0,
     outside_alpha_weight: float = 2.0,
     scale_drift_weight: float = 0.05,
+    normal_consistency_weight: float = 0.1,
+    normal_start_iter_frac: float = 0.1,
+    distortion_weight: float = 0.01,
+    distortion_start_iter_frac: float = 0.1,
+    enable_cam_pose_opt: bool = True,
+    cam_pose_lr: float = 0.0001,
+    cam_pose_rot_limit_deg: float = 8.0,
+    cam_pose_trans_limit: float = 0.05,
 ) -> dict:
     """Run Phases 6/7/8 for every requested object_id."""
     output_root = Path(output_root)
@@ -174,7 +188,13 @@ def run(
                 max_anchor_count=int(max_anchor_count),
                 densify_grad_threshold=float(densify_grad_threshold),
                 densify_extra_ratio=float(densify_extra_ratio),
+                densify_real_views_only=bool(densify_real_views_only),
+                max_splat_world_size=float(max_splat_world_size),
+                aabb_prune_margin=float(aabb_prune_margin),
+                aabb_prune_interval=int(aabb_prune_interval),
                 enable_depth_supervision=bool(enable_depth_supervision),
+                use_colmap_depth=bool(use_colmap_depth),
+                colmap_depth_dilate=int(colmap_depth_dilate),
                 depth_weight=float(depth_weight),
                 depth_alpha_threshold=float(depth_alpha_threshold),
                 depth_start_iter_frac=float(depth_start_iter_frac),
@@ -183,6 +203,14 @@ def run(
                 alpha_weight=float(alpha_weight),
                 outside_alpha_weight=float(outside_alpha_weight),
                 scale_drift_weight=float(scale_drift_weight),
+                normal_consistency_weight=float(normal_consistency_weight),
+                normal_start_iter_frac=float(normal_start_iter_frac),
+                distortion_weight=float(distortion_weight),
+                distortion_start_iter_frac=float(distortion_start_iter_frac),
+                enable_cam_pose_opt=bool(enable_cam_pose_opt),
+                cam_pose_lr=float(cam_pose_lr),
+                cam_pose_rot_limit_deg=float(cam_pose_rot_limit_deg),
+                cam_pose_trans_limit=float(cam_pose_trans_limit),
             )
             obj_gaussians = summary.pop("_gaussians", None)
         except Exception as e:
@@ -296,19 +324,34 @@ def _parse_args() -> argparse.Namespace:
                    help="Vertical FOV used for SV3D outputs (must match Phase-5 setting).")
     p.add_argument("--colmap_init_target_points", type=int, default=8000,
                    help="Fresh seed points via COLMAP-neighbor interpolation (no parent ObjectGS points used).")
-    p.add_argument("--enable_densification", action="store_true",
-                   help="Enable ObjectGS densification from COLMAP seed points.")
+    p.add_argument("--disable_densification", action="store_true",
+                   help="Disable ObjectGS densification (densification is ON by default).")
     p.add_argument("--max_anchor_count", type=int, default=20000,
                    help="Stop densification once this anchor count is reached.")
     p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
     p.add_argument("--densify_extra_ratio", type=float, default=0.08)
+    p.add_argument("--no_densify_real_views_only", action="store_true",
+                   help="Also accumulate densification gradients on hallucinated views "
+                        "(default: real views only so unseen back stays sparse).")
+    p.add_argument("--max_splat_world_size", type=float, default=0.15,
+                   help="Prune anchors whose max base scale exceeds this fraction of the "
+                        "object spatial extent. 0 = disabled.")
+    p.add_argument("--aabb_prune_margin", type=float, default=0.3,
+                   help="AABB margin (fraction of scope.radius) beyond which anchors are "
+                        "pruned as floaters. 0 = disabled.")
+    p.add_argument("--aabb_prune_interval", type=int, default=500,
+                   help="Run AABB floater pruning every N iterations.")
     p.add_argument("--n_compare_views", type=int, default=8)
     p.add_argument("--skip_compare", action="store_true",
                    help="Skip before/after orbit rendering.")
     p.add_argument("--debug", action="store_true",
                    help="Build debug visuals under obj_<id>/debug/ immediately after training.")
     p.add_argument("--disable_depth_supervision", action="store_true",
-                   help="Disable parent-rendered depth supervision on real views.")
+                   help="Disable depth supervision on real views.")
+    p.add_argument("--use_parent_render_depth", action="store_true",
+                   help="Use parent-rendered depth instead of COLMAP inverse-depth targets.")
+    p.add_argument("--colmap_depth_dilate", type=int, default=3,
+                   help="Odd kernel size used to dilate sparse projected COLMAP inverse-depth targets.")
     p.add_argument("--depth_weight", type=float, default=0.5,
                    help="Weight on the asymmetric depth L1 loss (real views only).")
     p.add_argument("--depth_alpha_threshold", type=float, default=0.5,
@@ -325,6 +368,22 @@ def _parse_args() -> argparse.Namespace:
                    help="Weight pushing alpha toward 0 outside the foreground mask.")
     p.add_argument("--scale_drift_weight", type=float, default=0.05,
                    help="Penalty on per-anchor scale drift from initialization.")
+    p.add_argument("--normal_consistency_weight", type=float, default=0.1,
+                   help="2DGS normal consistency weight; smooths clumpy round splats into surfaces.")
+    p.add_argument("--normal_start_iter_frac", type=float, default=0.1,
+                   help="Fraction of total iterations to wait before applying normal consistency.")
+    p.add_argument("--distortion_weight", type=float, default=0.01,
+                   help="2DGS distortion regularization weight for compact surfaces.")
+    p.add_argument("--distortion_start_iter_frac", type=float, default=0.1,
+                   help="Fraction of total iterations to wait before applying distortion regularization.")
+    p.add_argument("--disable_cam_pose_opt", action="store_true",
+                   help="Disable small pose refinement for hallucinated SV3D cameras. Real cameras are always locked.")
+    p.add_argument("--cam_pose_lr", type=float, default=0.0001,
+                   help="Learning rate for hallucinated SV3D camera pose deltas.")
+    p.add_argument("--cam_pose_rot_limit_deg", type=float, default=8.0,
+                   help="Clamp hallucinated camera rotation deltas to +/- this many degrees per axis.")
+    p.add_argument("--cam_pose_trans_limit", type=float, default=0.05,
+                   help="Clamp hallucinated camera translation deltas to this fraction of scope.radius.")
     p.add_argument("--log_level", default="INFO")
     return p.parse_args()
 
@@ -344,14 +403,20 @@ def main():
         novel_rgb_weight=args.novel_rgb_weight,
         fov_y_deg=args.fov_y_deg,
         colmap_init_target_points=args.colmap_init_target_points,
-        enable_densification=args.enable_densification,
+        enable_densification=not bool(args.disable_densification),
         max_anchor_count=args.max_anchor_count,
         densify_grad_threshold=args.densify_grad_threshold,
         densify_extra_ratio=args.densify_extra_ratio,
+        densify_real_views_only=not bool(args.no_densify_real_views_only),
+        max_splat_world_size=args.max_splat_world_size,
+        aabb_prune_margin=args.aabb_prune_margin,
+        aabb_prune_interval=args.aabb_prune_interval,
         n_compare_views=args.n_compare_views,
         skip_compare=args.skip_compare,
         debug=args.debug,
         enable_depth_supervision=not bool(args.disable_depth_supervision),
+        use_colmap_depth=not bool(args.use_parent_render_depth),
+        colmap_depth_dilate=args.colmap_depth_dilate,
         depth_weight=args.depth_weight,
         depth_alpha_threshold=args.depth_alpha_threshold,
         depth_start_iter_frac=args.depth_start_iter_frac,
@@ -360,6 +425,14 @@ def main():
         alpha_weight=args.alpha_weight,
         outside_alpha_weight=args.outside_alpha_weight,
         scale_drift_weight=args.scale_drift_weight,
+        normal_consistency_weight=args.normal_consistency_weight,
+        normal_start_iter_frac=args.normal_start_iter_frac,
+        distortion_weight=args.distortion_weight,
+        distortion_start_iter_frac=args.distortion_start_iter_frac,
+        enable_cam_pose_opt=not bool(args.disable_cam_pose_opt),
+        cam_pose_lr=args.cam_pose_lr,
+        cam_pose_rot_limit_deg=args.cam_pose_rot_limit_deg,
+        cam_pose_trans_limit=args.cam_pose_trans_limit,
     )
 
 
