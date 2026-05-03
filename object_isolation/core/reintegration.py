@@ -1,13 +1,13 @@
 """Phase 8 — Final export + before/after verification renders.
 
 For legacy seeded runs the parent ``ObjectGS`` model may be mutated in-place.
-For scratch object training the parent and object models stay separate because
+For object training the parent and object models stay separate because
 their MLP checkpoints are independent. This module is responsible for:
 
 1. Building a fixed orbit of comparison cameras around an object's centroid
    so the *same* viewpoints can be rendered before and after Phase 7.
-2. Saving either a mutated parent model or a scratch-scene package that points
-    at the reference scene plus per-object scratch checkpoints.
+2. Saving either a mutated parent model or a scene package that points
+    at the reference scene plus per-object checkpoints.
 3. Writing a ``reintegration_metadata.json`` summary listing every object
    that was replenished, its anchor counts, and scene-wide totals.
 

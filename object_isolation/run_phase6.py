@@ -74,6 +74,11 @@ def run(
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
+    hallucination_rgb_scale: float = 1.0,
+    depth_weight: float = 0.1,
+    depth_start_iter: int = 100,
+    depth_front_weight: float = 1.0,
+    depth_back_weight: float = 0.15,
     fov_y_deg: float = 50.0,
     colmap_init_target_points: int = 8000,
     enable_densification: bool = False,
@@ -159,6 +164,11 @@ def run(
                 hallucination_weight=float(hallucination_weight),
                 real_weight=float(real_weight),
                 novel_rgb_weight=float(novel_rgb_weight),
+                hallucination_rgb_scale=float(hallucination_rgb_scale),
+                depth_weight=float(depth_weight),
+                depth_start_iter=int(depth_start_iter),
+                depth_front_weight=float(depth_front_weight),
+                depth_back_weight=float(depth_back_weight),
                 fov_y_deg=float(fov_y_deg),
                 colmap_init_target_points=int(colmap_init_target_points),
                 enable_densification=bool(enable_densification),
@@ -248,6 +258,11 @@ def run(
                 hallucination_weight=float(hallucination_weight),
                 real_weight=float(real_weight),
                 novel_rgb_weight=float(novel_rgb_weight),
+                hallucination_rgb_scale=float(hallucination_rgb_scale),
+                depth_weight=float(depth_weight),
+                depth_start_iter=int(depth_start_iter),
+                depth_front_weight=float(depth_front_weight),
+                depth_back_weight=float(depth_back_weight),
                 fov_y_deg=float(fov_y_deg),
                 colmap_init_target_points=int(colmap_init_target_points),
                 enable_densification=bool(enable_densification),
@@ -274,6 +289,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--hallucination_weight", type=float, default=1.0)
     p.add_argument("--real_weight", type=float, default=1.0)
     p.add_argument("--novel_rgb_weight", type=float, default=1.0)
+    p.add_argument("--hallucination_rgb_scale", type=float, default=1.0,
+                   help="Extra RGB-loss scale for hallucinated views; masks/alpha still train shape.")
+    p.add_argument("--depth_weight", type=float, default=0.1,
+                   help="Asymmetric depth regularization weight for reliable real views only.")
+    p.add_argument("--depth_start_iter", type=int, default=100,
+                   help="First iteration where real-view depth regularization is active.")
+    p.add_argument("--depth_front_weight", type=float, default=1.0,
+                   help="Penalty scale when the object renders in front of reliable real depth.")
+    p.add_argument("--depth_back_weight", type=float, default=0.15,
+                   help="Penalty scale when the object renders behind reliable real depth.")
     p.add_argument("--fov_y_deg", type=float, default=50.0,
                    help="Vertical FOV used for SV3D outputs (must match Phase-5 setting).")
     p.add_argument("--colmap_init_target_points", type=int, default=8000,
@@ -306,6 +331,11 @@ def main():
         hallucination_weight=args.hallucination_weight,
         real_weight=args.real_weight,
         novel_rgb_weight=args.novel_rgb_weight,
+        hallucination_rgb_scale=args.hallucination_rgb_scale,
+        depth_weight=args.depth_weight,
+        depth_start_iter=args.depth_start_iter,
+        depth_front_weight=args.depth_front_weight,
+        depth_back_weight=args.depth_back_weight,
         fov_y_deg=args.fov_y_deg,
         colmap_init_target_points=args.colmap_init_target_points,
         enable_densification=args.enable_densification,
