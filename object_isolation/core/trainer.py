@@ -138,7 +138,7 @@ def _training_options(
     )
 
 
-def train_scratch_object(
+def train_object(
     *,
     supervision_views: list,
     scope,
@@ -296,7 +296,7 @@ def train_scratch_object(
     tail = loss_history[-min(50, len(loss_history)):] if loss_history else []
     summary = {
         "object_id": int(object_id),
-        "mode": "scratch_object_training",
+        "mode": "object_training",
         "scratch_init_source": init_metadata.get("init_source", "unknown"),
         "scratch_init_metadata": init_metadata,
         "n_supervision_views": len(supervision_views),

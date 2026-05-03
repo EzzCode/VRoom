@@ -1,10 +1,10 @@
-"""Visual debug for Phases 6, 7 and 8.
+"""Visual debug for the Phase 6 object-isolation training pipeline.
 
-Outputs under <output_root>/obj_<id>/debug_phase678/:
-    alignment_audit_strip.png       hallucinated | ObjectGS ref | overlap, with keep/drop reasons
-    supervision_contact_sheet.png   real + retained hallucinated supervision images
-    training_loss.png               scratch-training loss curve
-    phase8_compare_sheet.png        object/full-scene before-after comparison grids
+Outputs under <output_root>/obj_<id>/debug/:
+    alignment_audit_strip.png    before / after / ref / overlap for every hallucinated view
+    supervision_contact_sheet.png  real + retained supervision images
+    training_loss.png            training loss curve
+    compare_sheet.png            object/full-scene before-after comparison grids
     summary.json
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from object_isolation.run_phase678 import run as run_phase678
+from object_isolation.run_phase6 import run as _run_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -85,36 +85,69 @@ def make_alignment_audit_strip(audit_path: Path, out_path: Path, tile: int = 180
     if not frames:
         return None
 
+    # 4 tiles per row: original | aligned | ref | overlap
     row_h = tile + 42
     info_w = 340
-    canvas = np.full((40 + row_h * len(frames), 3 * tile + info_w, 3), 245, dtype=np.uint8)
-    _putlbl(canvas, "Phase 6 image-backed alignment audit", (10, 26), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
-    _putlbl(canvas, "red=hallucination only, green=ref only, yellow=overlap", (420, 26), fg=(70, 70, 70), bg=(255, 255, 255), scale=0.43)
+    n_tiles = 4
+    canvas = np.full((40 + row_h * len(frames), n_tiles * tile + info_w, 3), 245, dtype=np.uint8)
+    _putlbl(canvas, "Phase 6 alignment audit", (10, 26), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
+    _putlbl(canvas, "before | after | ref | overlap   red=halluc-only  green=ref-only  yellow=both",
+            (260, 26), fg=(70, 70, 70), bg=(255, 255, 255), scale=0.40)
 
     for idx, fr in enumerate(frames):
         y0 = 40 + idx * row_h
-        hall = _read_bgr(fr.get("image_path"))
-        ref = _read_bgr(fr.get("reference_path"))
-        hall_tile = _resize_tile(hall, tile)
-        ref_tile = _resize_tile(ref, tile)
-        mask = _mask_from_image(fr.get("image_path"))
-        ref_mask = _mask_from_image(fr.get("reference_path"), size_wh=(mask.shape[1], mask.shape[0]) if mask is not None else None)
-        ov = _overlay_masks(mask, ref_mask, tile)
 
-        canvas[y0:y0 + tile, 0:tile] = hall_tile
-        canvas[y0:y0 + tile, tile:2 * tile] = ref_tile
-        canvas[y0:y0 + tile, 2 * tile:3 * tile] = ov
+        original_path = fr.get("original_image_path") or fr.get("image_path")
+        aligned_path  = fr.get("image_path")
+        ref_path      = fr.get("reference_path")
 
-        keep = bool(fr.get("accepted"))
+        original_img = _read_bgr(original_path)
+        aligned_img  = _read_bgr(aligned_path)
+        ref_img      = _read_bgr(ref_path)
+
+        transform = str(fr.get("alignment_transform", "identity"))
+        accepted  = bool(fr.get("accepted"))
+
+        # column 0: original (before alignment)
+        canvas[y0:y0 + tile, 0:tile] = _resize_tile(original_img, tile)
+        _putlbl(canvas, "original", (4, y0 + tile + 14),
+                fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
+
+        # column 1: after alignment (may be same as original if identity)
+        is_identity = (transform == "identity") or (original_path == aligned_path)
+        col1 = _resize_tile(aligned_img, tile)
+        if not is_identity:
+            # green border around the aligned tile to signal a transform was applied
+            cv2.rectangle(col1, (0, 0), (tile - 1, tile - 1), (60, 180, 60), 3)
+        canvas[y0:y0 + tile, tile:2 * tile] = col1
+        label1 = transform[:18] if not is_identity else "identity"
+        _putlbl(canvas, label1, (tile + 4, y0 + tile + 14),
+                fg=(40, 130, 40) if not is_identity else (80, 80, 80),
+                bg=(255, 255, 255), scale=0.35)
+
+        # column 2: ObjectGS reference render
+        canvas[y0:y0 + tile, 2 * tile:3 * tile] = _resize_tile(ref_img, tile)
+        _putlbl(canvas, "ref", (2 * tile + 4, y0 + tile + 14),
+                fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
+
+        # column 3: overlap mask
+        mask     = _mask_from_image(aligned_path)
+        ref_mask = _mask_from_image(ref_path, size_wh=(mask.shape[1], mask.shape[0]) if mask is not None else None)
+        canvas[y0:y0 + tile, 3 * tile:4 * tile] = _overlay_masks(mask, ref_mask, tile)
+        _putlbl(canvas, "overlap", (3 * tile + 4, y0 + tile + 14),
+                fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
+
+        # info column
+        keep  = accepted
         color = (40, 150, 40) if keep else (40, 40, 190)
         status = "KEEP" if keep else "DROP"
-        info_x = 3 * tile + 12
+        info_x = n_tiles * tile + 12
         _putlbl(canvas, f"#{fr.get('frame_index')} {status}", (info_x, y0 + 24), fg=color, bg=(255, 255, 255), scale=0.55)
         _putlbl(canvas, f"az={float(fr.get('azimuth_V_deg', 0.0)):+.1f}", (info_x, y0 + 48), fg=(45, 45, 45), bg=(255, 255, 255), scale=0.43)
         _putlbl(canvas, f"mask IoU={float(fr.get('mask_iou', 0.0)):.3f}  bbox={float(fr.get('bbox_iou', 0.0)):.3f}", (info_x, y0 + 72), fg=(45, 45, 45), bg=(255, 255, 255), scale=0.43)
         _putlbl(canvas, f"centroid={float(fr.get('centroid_distance_norm', 0.0)):.3f}  area={float(fr.get('area_ratio', 0.0)):.3f}", (info_x, y0 + 96), fg=(45, 45, 45), bg=(255, 255, 255), scale=0.43)
         reasons = ",".join(fr.get("reject_reasons", []))[:52]
-        _putlbl(canvas, reasons if reasons else "image masks overlap cleanly", (info_x, y0 + 122), fg=color, bg=(255, 255, 255), scale=0.38)
+        _putlbl(canvas, reasons if reasons else "masks overlap cleanly", (info_x, y0 + 122), fg=color, bg=(255, 255, 255), scale=0.38)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), canvas)
@@ -155,7 +188,7 @@ def make_loss_plot(summary_path: Path, out_path: Path, width: int = 900, height:
     if not losses:
         return None
     canvas = np.full((height, width, 3), 250, dtype=np.uint8)
-    _putlbl(canvas, "Phase 7 scratch-training loss", (14, 28), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
+    _putlbl(canvas, "Phase 7 training loss", (14, 28), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
     plot = canvas[54:height - 34, 60:width - 24]
     plot[:] = 255
     lo, hi = min(losses), max(losses)
@@ -175,10 +208,10 @@ def make_loss_plot(summary_path: Path, out_path: Path, width: int = 900, height:
     return out_path
 
 
-def make_compare_sheet(phase78_dir: Path, out_path: Path, tile_w: int = 360) -> Path | None:
+def make_compare_sheet(renders_dir: Path, out_path: Path, tile_w: int = 360) -> Path | None:
     images = []
-    for sub in ("compare_object_only", "compare_full_scene"):
-        for path in sorted((phase78_dir / sub).glob("compare_*.png")):
+    for sub in ("object_only", "full_scene"):
+        for path in sorted((renders_dir / sub).glob("compare_*.png")):
             img = cv2.imread(str(path), cv2.IMREAD_COLOR)
             if img is not None:
                 ratio = tile_w / max(img.shape[1], 1)
@@ -205,13 +238,11 @@ def run_debug(
     model_path: str,
     object_id: int,
     output_root: str = "object_isolation/outputs",
-    scratch_iterations: int = 1200,
+    iterations: int = 1200,
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
     fov_y_deg: float = 50.0,
-    grid_resolution: int = 25,
-    visual_hull_min_views: int = 10,
     colmap_init_target_points: int = 8000,
     enable_densification: bool = False,
     max_anchor_count: int = 20000,
@@ -222,21 +253,19 @@ def run_debug(
 ) -> dict:
     output_root_p = Path(output_root)
     obj_dir = output_root_p / f"obj_{int(object_id)}"
-    debug_dir = obj_dir / "debug_phase678"
+    debug_dir = obj_dir / "debug"
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     if not no_run:
-        run_phase678(
+        _run_pipeline(
             model_path=model_path,
             output_root=output_root_p,
             object_ids=[int(object_id)],
-            scratch_iterations=int(scratch_iterations),
+            iterations=int(iterations),
             hallucination_weight=float(hallucination_weight),
             real_weight=float(real_weight),
             novel_rgb_weight=float(novel_rgb_weight),
             fov_y_deg=float(fov_y_deg),
-            grid_resolution=int(grid_resolution),
-            visual_hull_min_views=int(visual_hull_min_views),
             colmap_init_target_points=int(colmap_init_target_points),
             enable_densification=bool(enable_densification),
             max_anchor_count=int(max_anchor_count),
@@ -247,10 +276,14 @@ def run_debug(
         )
 
     outputs = {
-        "alignment_audit_strip": make_alignment_audit_strip(obj_dir / "phase6_alignment_audit.json", debug_dir / "alignment_audit_strip.png"),
-        "supervision_contact_sheet": make_supervision_contact_sheet(obj_dir / "supervision_manifest.json", debug_dir / "supervision_contact_sheet.png"),
-        "training_loss": make_loss_plot(obj_dir / "scratch_training_summary.json", debug_dir / "training_loss.png"),
-        "phase8_compare_sheet": make_compare_sheet(obj_dir / "phase78", debug_dir / "phase8_compare_sheet.png"),
+        "alignment_audit_strip": make_alignment_audit_strip(
+            obj_dir / "alignment_audit.json", debug_dir / "alignment_audit_strip.png"),
+        "supervision_contact_sheet": make_supervision_contact_sheet(
+            obj_dir / "supervision_manifest.json", debug_dir / "supervision_contact_sheet.png"),
+        "training_loss": make_loss_plot(
+            obj_dir / "training_summary.json", debug_dir / "training_loss.png"),
+        "compare_sheet": make_compare_sheet(
+            obj_dir / "renders", debug_dir / "compare_sheet.png"),
     }
     summary = {
         "object_id": int(object_id),
@@ -261,43 +294,40 @@ def run_debug(
     }
     with open(debug_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
-    logger.info("Phase 6/7/8 debug saved to: %s", debug_dir)
+    logger.info("Phase 6 debug visuals saved to: %s", debug_dir)
     return summary
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Phase 6/7/8 scratch training visual debug.")
+    parser = argparse.ArgumentParser(description="Phase 6 training pipeline debug visualizer.")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--object_id", required=True, type=int)
     parser.add_argument("--output_root", default="object_isolation/outputs")
-    parser.add_argument("--scratch_iterations", type=int, default=1200)
+    parser.add_argument("--iterations", type=int, default=1200)
     parser.add_argument("--hallucination_weight", type=float, default=1.0)
     parser.add_argument("--real_weight", type=float, default=1.0)
     parser.add_argument("--novel_rgb_weight", type=float, default=1.0)
     parser.add_argument("--fov_y_deg", type=float, default=50.0)
-    parser.add_argument("--grid_resolution", type=int, default=25)
-    parser.add_argument("--visual_hull_min_views", type=int, default=10)
     parser.add_argument("--colmap_init_target_points", type=int, default=8000)
     parser.add_argument("--enable_densification", action="store_true")
     parser.add_argument("--max_anchor_count", type=int, default=20000)
     parser.add_argument("--densify_grad_threshold", type=float, default=0.00005)
     parser.add_argument("--densify_extra_ratio", type=float, default=0.08)
     parser.add_argument("--n_compare_views", type=int, default=8)
-    parser.add_argument("--no_run", action="store_true", help="Only build debug panels from existing Phase 6/7/8 outputs.")
+    parser.add_argument("--no_run", action="store_true",
+                        help="Only regenerate debug panels from existing outputs (skip pipeline).")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
     run_debug(
         args.model_path,
         args.object_id,
         args.output_root,
-        scratch_iterations=args.scratch_iterations,
+        iterations=args.iterations,
         hallucination_weight=args.hallucination_weight,
         real_weight=args.real_weight,
         novel_rgb_weight=args.novel_rgb_weight,
         fov_y_deg=args.fov_y_deg,
-        grid_resolution=args.grid_resolution,
-        visual_hull_min_views=args.visual_hull_min_views,
         colmap_init_target_points=args.colmap_init_target_points,
         enable_densification=args.enable_densification,
         max_anchor_count=args.max_anchor_count,

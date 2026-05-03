@@ -588,9 +588,9 @@ def build_hallucinated_supervision_views(
         original_rgba_path = rgba_path
         if audit["accepted"] and str(audit.get("alignment_transform", "identity")) != "identity":
             aligned_dir = (
-                Path(alignment_audit_path).parent / "phase6_aligned_hallucinated"
+                Path(alignment_audit_path).parent / "aligned_hallucinated"
                 if alignment_audit_path is not None
-                else halluc_index_path.parent / "phase6_aligned_hallucinated"
+                else halluc_index_path.parent / "aligned_hallucinated"
             )
             rgba_path = aligned_dir / rgba_path.name
             _save_aligned_rgba(rgb, mask, rgba_path)

@@ -135,20 +135,15 @@ def render_with_orbit(gaussians, pipe_config, cams: List[_OrbitCam],
     return frames
 
 
-def render_composited_scratch_with_orbit(
+def render_composited_with_orbit(
     parent_gaussians,
-    scratch_gaussians,
+    obj_gaussians,
     pipe_config,
     cams: List[_OrbitCam],
     *,
     object_label_id: int,
 ) -> List[np.ndarray]:
-    """Render parent scene with old object hidden and scratch object alpha-composited.
-
-    The scratch object has its own MLPs, so it must be rendered as a separate
-    ObjectGS model. Rendering it on black gives premultiplied RGB suitable for
-    compositing over the parent-without-object render.
-    """
+    """Render parent scene with old object hidden and trained object alpha-composited."""
     from .gs_renderer import create_camera, render_rgba
 
     frames: List[np.ndarray] = []
@@ -162,7 +157,7 @@ def render_composited_scratch_with_orbit(
             exclude_object_label_id=int(object_label_id),
         )
         obj = render_rgba(
-            scratch_gaussians,
+            obj_gaussians,
             cam,
             pipe_config,
             bg_white=False,
@@ -252,16 +247,16 @@ def save_final_model(
     return final_dir
 
 
-def save_scratch_scene_package(
+def save_scene_package(
     *,
     output_dir: Path | str,
     reference_model_path: Path | str,
     per_object_summaries: List[dict],
     extra_metadata: Optional[dict] = None,
 ) -> Path:
-    """Save an honest scratch-scene package without merging incompatible MLPs."""
+    """Save the scene package with per-object trained model references."""
     output_dir = Path(output_dir)
-    scene_dir = output_dir / "scratch_scene"
+    scene_dir = output_dir / "scene"
     scene_dir.mkdir(parents=True, exist_ok=True)
 
     ref = Path(reference_model_path)
@@ -273,7 +268,7 @@ def save_scratch_scene_package(
 
     object_models = []
     for summary in per_object_summaries:
-        if summary.get("mode") != "scratch_object_training":
+        if summary.get("mode") != "object_training":
             continue
         object_id = int(summary.get("object_id", -1))
         object_models.append({
@@ -286,16 +281,16 @@ def save_scratch_scene_package(
 
     payload = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "mode": "scratch_scene_composite",
+        "mode": "scene_composite",
         "reference_model_path": str(reference_model_path),
-        "reference_scene_policy": "Render the parent scene with trained object labels hidden, then alpha-composite the scratch object model.",
+        "reference_scene_policy": "Render the parent scene with trained object labels hidden, then alpha-composite the object model.",
         "object_models": object_models,
         "metadata": extra_metadata or {},
     }
-    with open(scene_dir / "scratch_scene_metadata.json", "w", encoding="utf-8") as f:
+    with open(scene_dir / "scene_metadata.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
-    logger.info("Phase 8: saved scratch scene package to %s", scene_dir)
+    logger.info("Phase 8: saved scene package to %s", scene_dir)
     return scene_dir
 
 

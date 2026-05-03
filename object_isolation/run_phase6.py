@@ -1,21 +1,22 @@
-"""End-to-end orchestrator for Phases 6 → 7 → 8 of the object-isolation pipeline.
+"""Phase 6 — Object isolation training pipeline.
 
-Assumes Phase 0–5 have already been run (i.e. ``object_isolation/outputs/
-obj_<id>/phase5/hallucination_index.json`` exists).
+Assumes Phases 0–5 have already run (``obj_<id>/phase5/hallucination_index.json`` must exist).
 
 Per object:
-    Phase 6 — build aligned supervision_views from Phase-3 real outputs + Phase-5 SV3D outputs.
-    Phase 7 — scratch ObjectGS object training from aligned real + hallucinated views.
-    Phase 8 — render scratch composite comparisons + save a scratch scene package.
+    Phase 6 — build aligned supervision views from Phase-3 real outputs + Phase-5 SV3D outputs.
+    Phase 7 — train an ObjectGS object model from COLMAP seed points + aligned views.
+    Phase 8 — render before/after comparison orbit and save the scene package under obj_<id>/.
 
 Usage::
 
-    python -m object_isolation.run_phase678 \
-        --model_path temp_deps/ObjectGS/outputs/replica/.../office_0/.../ \
+    python -m object_isolation.run_phase6 \
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \
         --output_root object_isolation/outputs \
-        --object_ids 8 9 \
-        --scratch_iterations 1200 \
-        --hallucination_weight 1.0
+        --object_ids 8 \
+        --iterations 1200
+
+    # Run then immediately build debug visuals:
+    python -m object_isolation.run_phase6 ... --debug
 """
 
 from __future__ import annotations
@@ -35,11 +36,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from object_isolation.core.scope import discover_object_scope
-from object_isolation.core.training import run_phase7
+from object_isolation.core.training import run_training
 from object_isolation.core.reintegration import (
     build_orbit_cameras, render_with_orbit, save_compare_grid,
-    save_final_model, save_scratch_scene_package, build_reintegration_metadata,
-    label_anchor_counts, render_composited_scratch_with_orbit,
+    save_final_model, save_scene_package, build_reintegration_metadata,
+    label_anchor_counts, render_composited_with_orbit,
 )
 
 
@@ -69,13 +70,11 @@ def run(
     model_path: str,
     output_root: str | Path,
     object_ids: List[int],
-    scratch_iterations: int = 1200,
+    iterations: int = 1200,
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
     fov_y_deg: float = 50.0,
-    grid_resolution: int = 25,
-    visual_hull_min_views: int = 10,
     colmap_init_target_points: int = 8000,
     enable_densification: bool = False,
     max_anchor_count: int = 20000,
@@ -83,14 +82,12 @@ def run(
     densify_extra_ratio: float = 0.08,
     n_compare_views: int = 8,
     skip_compare: bool = False,
+    debug: bool = False,
 ) -> dict:
     """Run Phases 6/7/8 for every requested object_id."""
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    # ── Load parent model once via Phase-1 discovery for the first object ─
-    # All subsequent objects reuse the same parent model for scope discovery
-    # and parent-with-object-hidden composite renders.
     if not object_ids:
         raise ValueError("object_ids must not be empty.")
 
@@ -111,7 +108,6 @@ def run(
         logger.info("\n%s\n=== Object %d (%d/%d) ===\n%s",
                     "=" * 60, obj_id, idx + 1, len(object_ids), "=" * 60)
 
-        # Re-discover scope for this object (cheap — gaussians stays mutated).
         if obj_id == first_id and idx == 0:
             scope = scope0
             local_sv3d = local_sv3d_first
@@ -120,9 +116,10 @@ def run(
 
         halluc_index = _resolve_halluc_index(output_root, obj_id)
         obj_out = output_root / f"obj_{obj_id}"
-        (obj_out / "phase78").mkdir(parents=True, exist_ok=True)
+        renders_dir = obj_out / "renders"
+        renders_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── Build comparison cameras BEFORE Phase 7 ───────────────────────
+        # ── Build comparison cameras BEFORE training ───────────────────────
         compare_cams = None
         before_obj_frames = before_full_frames = None
         if not skip_compare:
@@ -146,10 +143,10 @@ def run(
                 gaussians, pipe_config, compare_cams, object_label_id=None,
             )
 
-        # ── Phase 7: scratch-train object model ───────────────────────────
-        scratch_gaussians = None
+        # ── Phase 6/7: align hallucinations + train object model ───────────
+        obj_gaussians = None
         try:
-            summary = run_phase7(
+            summary = run_training(
                 model_path=model_path,
                 object_label_id=obj_id,
                 halluc_index_path=str(halluc_index),
@@ -158,64 +155,67 @@ def run(
                 pipe_config=pipe_config,
                 scope=scope,
                 local_sv3d=local_sv3d,
-                scratch_iterations=int(scratch_iterations),
+                iterations=int(iterations),
                 hallucination_weight=float(hallucination_weight),
                 real_weight=float(real_weight),
                 novel_rgb_weight=float(novel_rgb_weight),
                 fov_y_deg=float(fov_y_deg),
-                grid_resolution=int(grid_resolution),
-                visual_hull_min_views=int(visual_hull_min_views),
                 colmap_init_target_points=int(colmap_init_target_points),
                 enable_densification=bool(enable_densification),
                 max_anchor_count=int(max_anchor_count),
                 densify_grad_threshold=float(densify_grad_threshold),
                 densify_extra_ratio=float(densify_extra_ratio),
             )
-            scratch_gaussians = summary.pop("_scratch_gaussians", None)
+            obj_gaussians = summary.pop("_gaussians", None)
         except Exception as e:
-            logger.exception("Phase 7 failed for obj %d: %s", obj_id, e)
-            summary = {"object_id": obj_id, "skipped_reason": f"phase7_error: {e}"}
+            logger.exception("Training failed for obj %d: %s", obj_id, e)
+            summary = {"object_id": obj_id, "skipped_reason": f"training_error: {e}"}
 
         per_object_summaries.append(summary)
 
-        # ── Phase 8: after renders + compare ──────────────────────────────
-        if compare_cams is not None and not skip_compare and scratch_gaussians is not None:
+        # ── Phase 8: before/after renders ─────────────────────────────────
+        if compare_cams is not None and not skip_compare and obj_gaussians is not None:
             try:
                 after_obj_frames = render_with_orbit(
-                    scratch_gaussians, pipe_config, compare_cams, object_label_id=None,
+                    obj_gaussians, pipe_config, compare_cams, object_label_id=None,
                 )
-                after_full_frames = render_composited_scratch_with_orbit(
-                    gaussians, scratch_gaussians, pipe_config, compare_cams, object_label_id=obj_id,
+                after_full_frames = render_composited_with_orbit(
+                    gaussians, obj_gaussians, pipe_config, compare_cams, object_label_id=obj_id,
                 )
                 save_compare_grid(
                     before_obj_frames, after_obj_frames,
-                    obj_out / "phase78" / "compare_object_only",
+                    renders_dir / "object_only",
                     prefix="obj",
                 )
                 save_compare_grid(
                     before_full_frames, after_full_frames,
-                    obj_out / "phase78" / "compare_full_scene",
+                    renders_dir / "full_scene",
                     prefix="scene",
                 )
-                logger.info("Phase 8: saved compare grids to %s", obj_out / "phase78")
+                logger.info("Phase 8: saved compare grids to %s", renders_dir)
             except Exception as e:
                 logger.exception("Phase 8 compare-render failed for obj %d: %s", obj_id, e)
 
     # ── Final model export ────────────────────────────────────────────────
     parent_label_counts_post = label_anchor_counts(gaussians)
-    logger.info("Parent model anchor counts (post): %s",
-                {k: v for k, v in sorted(parent_label_counts_post.items())})
-
     metadata = build_reintegration_metadata(
         parent_label_counts_pre=parent_label_counts_pre,
         parent_label_counts_post=parent_label_counts_post,
         per_object_summaries=per_object_summaries,
         reference_model_path=str(model_path),
     )
-    all_scratch = all(s.get("mode") == "scratch_object_training" for s in per_object_summaries)
-    if all_scratch:
-        final_output = save_scratch_scene_package(
-            output_dir=output_root,
+
+    all_object_training = all(s.get("mode") == "object_training" for s in per_object_summaries)
+    if all_object_training:
+        # For a single object the scene package lives next to its model;
+        # for multiple objects it aggregates at output_root/scene/.
+        scene_out = (
+            output_root / f"obj_{int(object_ids[0])}"
+            if len(object_ids) == 1
+            else output_root
+        )
+        final_output = save_scene_package(
+            output_dir=scene_out,
             reference_model_path=model_path,
             per_object_summaries=per_object_summaries,
             extra_metadata=metadata,
@@ -228,47 +228,67 @@ def run(
             extra_metadata=metadata,
         )
 
-    with open(output_root / "phase678_summary.json", "w", encoding="utf-8") as f:
+    with open(output_root / "pipeline_summary.json", "w", encoding="utf-8") as f:
         json.dump({
             "model_path": str(model_path),
             "object_ids": [int(x) for x in object_ids],
             "metadata": metadata,
         }, f, indent=2)
 
-    logger.info("\nPhase 6/7/8 complete. Output -> %s", final_output)
+    logger.info("Phase 6 pipeline complete. Output -> %s", final_output)
+
+    if debug:
+        from object_isolation.debug.visualize_phase6 import run_debug
+        for obj_id in object_ids:
+            run_debug(
+                model_path=model_path,
+                object_id=int(obj_id),
+                output_root=str(output_root),
+                iterations=int(iterations),
+                hallucination_weight=float(hallucination_weight),
+                real_weight=float(real_weight),
+                novel_rgb_weight=float(novel_rgb_weight),
+                fov_y_deg=float(fov_y_deg),
+                colmap_init_target_points=int(colmap_init_target_points),
+                enable_densification=bool(enable_densification),
+                max_anchor_count=int(max_anchor_count),
+                densify_grad_threshold=float(densify_grad_threshold),
+                densify_extra_ratio=float(densify_extra_ratio),
+                n_compare_views=int(n_compare_views),
+                no_run=True,  # pipeline already ran above
+            )
+
     return metadata
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Object-isolation Phase 6/7/8 orchestrator")
+    p = argparse.ArgumentParser(description="Object-isolation Phase 6 pipeline orchestrator")
     p.add_argument("--model_path", required=True,
                    help="Path to trained ObjectGS output dir (containing point_cloud/, cameras.json).")
     p.add_argument("--output_root", default="object_isolation/outputs",
-                   help="Root holding obj_<id>/phase5 inputs and where Phase 7/8 writes.")
+                   help="Root holding obj_<id>/phase5 inputs and where outputs are written.")
     p.add_argument("--object_ids", type=int, nargs="+", required=True,
-                   help="One or more object label IDs to train from scratch (Phase 5 must already exist).")
-    p.add_argument("--scratch_iterations", type=int, default=1200,
-                   help="Number of scratch ObjectGS training iterations.")
+                   help="Object label IDs to train (Phase 5 must already exist for each).")
+    p.add_argument("--iterations", type=int, default=1200,
+                   help="Number of ObjectGS training iterations.")
     p.add_argument("--hallucination_weight", type=float, default=1.0)
     p.add_argument("--real_weight", type=float, default=1.0)
     p.add_argument("--novel_rgb_weight", type=float, default=1.0)
     p.add_argument("--fov_y_deg", type=float, default=50.0,
                    help="Vertical FOV used for SV3D outputs (must match Phase-5 setting).")
-    p.add_argument("--grid_resolution", type=int, default=25,
-                   help="Deprecated; scratch initialization now uses labeled COLMAP seed points.")
-    p.add_argument("--visual_hull_min_views", type=int, default=10,
-                   help="Deprecated; scratch initialization now uses labeled COLMAP seed points.")
     p.add_argument("--colmap_init_target_points", type=int, default=8000,
-                   help="Minimum fresh seed points after COLMAP-neighbor interpolation; no parent ObjectGS points are used.")
+                   help="Fresh seed points via COLMAP-neighbor interpolation (no parent ObjectGS points used).")
     p.add_argument("--enable_densification", action="store_true",
-                   help="Enable ObjectGS densification from fresh COLMAP seed points only.")
+                   help="Enable ObjectGS densification from COLMAP seed points.")
     p.add_argument("--max_anchor_count", type=int, default=20000,
-                   help="Stop requesting densification once this scratch-anchor count is reached.")
+                   help="Stop densification once this anchor count is reached.")
     p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
     p.add_argument("--densify_extra_ratio", type=float, default=0.08)
     p.add_argument("--n_compare_views", type=int, default=8)
     p.add_argument("--skip_compare", action="store_true",
-                   help="Skip before/after orbit rendering (faster for batch runs).")
+                   help="Skip before/after orbit rendering.")
+    p.add_argument("--debug", action="store_true",
+                   help="Build debug visuals under obj_<id>/debug/ immediately after training.")
     p.add_argument("--log_level", default="INFO")
     return p.parse_args()
 
@@ -282,13 +302,11 @@ def main():
         model_path=args.model_path,
         output_root=args.output_root,
         object_ids=args.object_ids,
-        scratch_iterations=args.scratch_iterations,
+        iterations=args.iterations,
         hallucination_weight=args.hallucination_weight,
         real_weight=args.real_weight,
         novel_rgb_weight=args.novel_rgb_weight,
         fov_y_deg=args.fov_y_deg,
-        grid_resolution=args.grid_resolution,
-        visual_hull_min_views=args.visual_hull_min_views,
         colmap_init_target_points=args.colmap_init_target_points,
         enable_densification=args.enable_densification,
         max_anchor_count=args.max_anchor_count,
@@ -296,6 +314,7 @@ def main():
         densify_extra_ratio=args.densify_extra_ratio,
         n_compare_views=args.n_compare_views,
         skip_compare=args.skip_compare,
+        debug=args.debug,
     )
 
 

@@ -1,4 +1,4 @@
-"""Phase 7 — Fresh object training using aligned real + SV3D supervision.
+"""Phase 7 — Object training using aligned real + SV3D supervision.
 
 Uses ONLY ``object_isolation`` internals — no dependency on
 ``target_replenishment``.
@@ -6,18 +6,18 @@ Uses ONLY ``object_isolation`` internals — no dependency on
 Phases driven here
 ------------------
 Phase 6  : ``dataset_builder.build_joint_supervision_views``
-Phase 7  : ``scratch_trainer.train_scratch_object``
+Phase 7  : ``trainer.train_object``
 
 Output layout (per object_id)::
 
     <output_dir>/obj_<id>/
         supervision_manifest.json
-        scratch_training_summary.json
-        phase6_alignment_audit.json
+        training_summary.json
+        alignment_audit.json
         model/
             point_cloud.ply
             color_mlp.pt  cov_mlp.pt  opacity_mlp.pt
-            scratch_object.json
+            object_model.json
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def run_phase7(
+def run_training(
     *,
     model_path: str,
     object_label_id: int,
@@ -41,13 +41,11 @@ def run_phase7(
     pipe_config=None,
     scope=None,
     local_sv3d=None,
-    scratch_iterations: int = 1200,
-    scratch_lr_scale: float = 1.0,
+    iterations: int = 1200,
+    lr_scale: float = 1.0,
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
-    grid_resolution: int = 25,
-    visual_hull_min_views: int = 10,
     colmap_init_target_points: int = 8000,
     enable_densification: bool = False,
     max_anchor_count: int = 20000,
@@ -65,7 +63,7 @@ def run_phase7(
     """
     from .dataset_builder import build_joint_supervision_views, save_supervision_manifest
     from .scope import discover_object_scope
-    from .scratch_trainer import train_scratch_object
+    from .trainer import train_object
 
     out_dir = Path(output_dir)
     obj_dir = out_dir / f"obj_{int(object_label_id)}"
@@ -115,7 +113,7 @@ def run_phase7(
         hallucination_resolution=576,
         real_target_long_edge=576,
         up_W_override=cond_cam_up_W,
-        hallucination_alignment_audit_path=obj_dir / "phase6_alignment_audit.json",
+        hallucination_alignment_audit_path=obj_dir / "alignment_audit.json",
     )
     if not supervision_views:
         raise RuntimeError(f"Phase 6 produced no joint supervision views for obj {object_label_id}.")
@@ -131,20 +129,20 @@ def run_phase7(
     n_parent_obj_anchors = int((labels == int(object_label_id)).sum()) if labels.size else 0
 
     logger.info(
-        "Phase 7: scratch-training obj %d for %d iters from COLMAP seed points and aligned views (no parent anchors, no target optimizer).",
-        object_label_id, int(scratch_iterations),
+        "Phase 7: training obj %d for %d iters from COLMAP seed points and aligned views (no parent anchors).",
+        object_label_id, int(iterations),
     )
-    scratch = train_scratch_object(
+    scratch = train_object(
         supervision_views=supervision_views,
         scope=scope,
         object_id=int(object_label_id),
         model_path=model_path,
         output_dir=obj_dir,
-        n_iterations=int(scratch_iterations),
+        n_iterations=int(iterations),
         extraction_index_path=extraction_index_path,
         parent_gaussians=gaussians,
         pipe_config=pipe_config,
-        lr_scale=float(scratch_lr_scale),
+        lr_scale=float(lr_scale),
         colmap_init_target_points=int(colmap_init_target_points),
         rgb_weight=float(novel_rgb_weight),
         enable_densification=bool(enable_densification),
@@ -163,19 +161,19 @@ def run_phase7(
         "model_path": str(model_path),
     })
 
-    with open(obj_dir / "model" / "scratch_object.json", "w", encoding="utf-8") as f:
+    with open(obj_dir / "model" / "object_model.json", "w", encoding="utf-8") as f:
         json.dump({
             "object_id": int(object_label_id),
-            "mode": "scratch_object_training",
+            "mode": "object_training",
             "n_parent_obj_anchors": int(n_parent_obj_anchors),
             "n_final_anchors": int(summary.get("n_final_anchors", 0)),
         }, f, indent=2)
-    with open(obj_dir / "scratch_training_summary.json", "w", encoding="utf-8") as f:
+    with open(obj_dir / "training_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     logger.info(
-        "Phase 7 complete for obj %d: scratch anchors=%d final_loss=%.5f",
+        "Phase 7 complete for obj %d: anchors=%d final_loss=%.5f",
         object_label_id, int(summary.get("n_final_anchors", 0)), float(summary.get("final_loss", 0.0)),
     )
-    summary["_scratch_gaussians"] = scratch["gaussians"]
+    summary["_gaussians"] = scratch["gaussians"]
     return summary
