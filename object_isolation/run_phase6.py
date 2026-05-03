@@ -74,6 +74,11 @@ def run(
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
+    hallucination_rgb_scale: float = 1.0,
+    depth_weight: float = 0.1,
+    depth_start_iter: int = 100,
+    depth_front_weight: float = 1.0,
+    depth_back_weight: float = 0.15,
     fov_y_deg: float = 50.0,
     colmap_init_target_points: int = 8000,
     enable_densification: bool = False,
@@ -83,15 +88,6 @@ def run(
     n_compare_views: int = 8,
     skip_compare: bool = False,
     debug: bool = False,
-    enable_depth_supervision: bool = True,
-    depth_weight: float = 0.5,
-    depth_alpha_threshold: float = 0.5,
-    depth_start_iter_frac: float = 0.0,
-    halluc_decay_start_frac: float = 0.6,
-    halluc_weight_floor: float = 0.3,
-    alpha_weight: float = 2.0,
-    outside_alpha_weight: float = 2.0,
-    scale_drift_weight: float = 0.05,
 ) -> dict:
     """Run Phases 6/7/8 for every requested object_id."""
     output_root = Path(output_root)
@@ -168,21 +164,17 @@ def run(
                 hallucination_weight=float(hallucination_weight),
                 real_weight=float(real_weight),
                 novel_rgb_weight=float(novel_rgb_weight),
+                hallucination_rgb_scale=float(hallucination_rgb_scale),
+                depth_weight=float(depth_weight),
+                depth_start_iter=int(depth_start_iter),
+                depth_front_weight=float(depth_front_weight),
+                depth_back_weight=float(depth_back_weight),
                 fov_y_deg=float(fov_y_deg),
                 colmap_init_target_points=int(colmap_init_target_points),
                 enable_densification=bool(enable_densification),
                 max_anchor_count=int(max_anchor_count),
                 densify_grad_threshold=float(densify_grad_threshold),
                 densify_extra_ratio=float(densify_extra_ratio),
-                enable_depth_supervision=bool(enable_depth_supervision),
-                depth_weight=float(depth_weight),
-                depth_alpha_threshold=float(depth_alpha_threshold),
-                depth_start_iter_frac=float(depth_start_iter_frac),
-                halluc_decay_start_frac=float(halluc_decay_start_frac),
-                halluc_weight_floor=float(halluc_weight_floor),
-                alpha_weight=float(alpha_weight),
-                outside_alpha_weight=float(outside_alpha_weight),
-                scale_drift_weight=float(scale_drift_weight),
             )
             obj_gaussians = summary.pop("_gaussians", None)
         except Exception as e:
@@ -266,6 +258,11 @@ def run(
                 hallucination_weight=float(hallucination_weight),
                 real_weight=float(real_weight),
                 novel_rgb_weight=float(novel_rgb_weight),
+                hallucination_rgb_scale=float(hallucination_rgb_scale),
+                depth_weight=float(depth_weight),
+                depth_start_iter=int(depth_start_iter),
+                depth_front_weight=float(depth_front_weight),
+                depth_back_weight=float(depth_back_weight),
                 fov_y_deg=float(fov_y_deg),
                 colmap_init_target_points=int(colmap_init_target_points),
                 enable_densification=bool(enable_densification),
@@ -292,6 +289,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--hallucination_weight", type=float, default=1.0)
     p.add_argument("--real_weight", type=float, default=1.0)
     p.add_argument("--novel_rgb_weight", type=float, default=1.0)
+    p.add_argument("--hallucination_rgb_scale", type=float, default=1.0,
+                   help="Extra RGB-loss scale for hallucinated views; masks/alpha still train shape.")
+    p.add_argument("--depth_weight", type=float, default=0.1,
+                   help="Asymmetric depth regularization weight for reliable real views only.")
+    p.add_argument("--depth_start_iter", type=int, default=100,
+                   help="First iteration where real-view depth regularization is active.")
+    p.add_argument("--depth_front_weight", type=float, default=1.0,
+                   help="Penalty scale when the object renders in front of reliable real depth.")
+    p.add_argument("--depth_back_weight", type=float, default=0.15,
+                   help="Penalty scale when the object renders behind reliable real depth.")
     p.add_argument("--fov_y_deg", type=float, default=50.0,
                    help="Vertical FOV used for SV3D outputs (must match Phase-5 setting).")
     p.add_argument("--colmap_init_target_points", type=int, default=8000,
@@ -307,24 +314,6 @@ def _parse_args() -> argparse.Namespace:
                    help="Skip before/after orbit rendering.")
     p.add_argument("--debug", action="store_true",
                    help="Build debug visuals under obj_<id>/debug/ immediately after training.")
-    p.add_argument("--disable_depth_supervision", action="store_true",
-                   help="Disable parent-rendered depth supervision on real views.")
-    p.add_argument("--depth_weight", type=float, default=0.5,
-                   help="Weight on the asymmetric depth L1 loss (real views only).")
-    p.add_argument("--depth_alpha_threshold", type=float, default=0.5,
-                   help="Parent alpha threshold for trusting rendered depth at a pixel.")
-    p.add_argument("--depth_start_iter_frac", type=float, default=0.0,
-                   help="Fraction of total iterations to wait before applying depth loss.")
-    p.add_argument("--halluc_decay_start_frac", type=float, default=0.6,
-                   help="Fraction of training after which hallucinated weight starts decaying.")
-    p.add_argument("--halluc_weight_floor", type=float, default=0.3,
-                   help="Final fraction of hallucinated weight at end of training.")
-    p.add_argument("--alpha_weight", type=float, default=2.0,
-                   help="Weight pushing alpha toward 1 inside the foreground mask.")
-    p.add_argument("--outside_alpha_weight", type=float, default=2.0,
-                   help="Weight pushing alpha toward 0 outside the foreground mask.")
-    p.add_argument("--scale_drift_weight", type=float, default=0.05,
-                   help="Penalty on per-anchor scale drift from initialization.")
     p.add_argument("--log_level", default="INFO")
     return p.parse_args()
 
@@ -342,6 +331,11 @@ def main():
         hallucination_weight=args.hallucination_weight,
         real_weight=args.real_weight,
         novel_rgb_weight=args.novel_rgb_weight,
+        hallucination_rgb_scale=args.hallucination_rgb_scale,
+        depth_weight=args.depth_weight,
+        depth_start_iter=args.depth_start_iter,
+        depth_front_weight=args.depth_front_weight,
+        depth_back_weight=args.depth_back_weight,
         fov_y_deg=args.fov_y_deg,
         colmap_init_target_points=args.colmap_init_target_points,
         enable_densification=args.enable_densification,
@@ -351,15 +345,6 @@ def main():
         n_compare_views=args.n_compare_views,
         skip_compare=args.skip_compare,
         debug=args.debug,
-        enable_depth_supervision=not bool(args.disable_depth_supervision),
-        depth_weight=args.depth_weight,
-        depth_alpha_threshold=args.depth_alpha_threshold,
-        depth_start_iter_frac=args.depth_start_iter_frac,
-        halluc_decay_start_frac=args.halluc_decay_start_frac,
-        halluc_weight_floor=args.halluc_weight_floor,
-        alpha_weight=args.alpha_weight,
-        outside_alpha_weight=args.outside_alpha_weight,
-        scale_drift_weight=args.scale_drift_weight,
     )
 
 
