@@ -331,6 +331,73 @@ def _save_aligned_rgba(rgb: np.ndarray, mask: np.ndarray, out_path: Path) -> Non
     cv2.imwrite(str(out_path), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
 
 
+def _compute_aabb_world_scale_px(
+    aabb_min: np.ndarray,
+    aabb_max: np.ndarray,
+    R_w2c: np.ndarray,
+    T_w2c: np.ndarray,
+    K: np.ndarray,
+    sv3d_fill_frac: float = 0.85,
+    target_size: int = 576,
+) -> float:
+    """Return world_bbox_px / sv3d_normalized_px for a given camera.
+
+    Phase 5 normalises both the SV3D output and the ObjectGS reference renders
+    so the object fills ``sv3d_fill_frac`` of the target resolution.  Phase 6
+    training cameras use the real focal length, so the same object appears
+    ~2-3× smaller in the ObjectGS render than in the SV3D supervision image.
+    This function computes the scale factor needed to shrink the SV3D image
+    back to world-camera scale before training.
+    """
+    xs = [float(aabb_min[0]), float(aabb_max[0])]
+    ys = [float(aabb_min[1]), float(aabb_max[1])]
+    zs = [float(aabb_min[2]), float(aabb_max[2])]
+    corners = np.array([[x, y, z] for x in xs for y in ys for z in zs], dtype=np.float64)
+    pts_cam = (R_w2c.astype(np.float64) @ corners.T).T + T_w2c.astype(np.float64)
+    in_front = pts_cam[:, 2] > 1e-3
+    if int(in_front.sum()) < 2:
+        return 1.0
+    pts_f = pts_cam[in_front]
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    u = pts_f[:, 0] / pts_f[:, 2] * fx + cx
+    v = pts_f[:, 1] / pts_f[:, 2] * fy + cy
+    world_px = float(max(u.max() - u.min(), v.max() - v.min()))
+    sv3d_px = sv3d_fill_frac * float(target_size)
+    return float(np.clip(world_px / max(sv3d_px, 1.0), 0.05, 2.0))
+
+
+def _denormalize_to_world_scale(
+    rgb: np.ndarray,
+    mask: np.ndarray,
+    world_scale: float,
+    target_size: int = 576,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Shrink an SV3D-normalised supervision image to world-camera scale.
+
+    Resizes the image by ``world_scale`` and embeds it centred in a black
+    ``target_size × target_size`` background (alpha = 0 outside the object).
+    """
+    if abs(world_scale - 1.0) < 0.02:
+        return rgb, mask
+    H, W = rgb.shape[:2]
+    new_H = max(1, int(round(H * world_scale)))
+    new_W = max(1, int(round(W * world_scale)))
+    interp = cv2.INTER_AREA if world_scale < 1.0 else cv2.INTER_LINEAR
+    rgb_s = cv2.resize(rgb, (new_W, new_H), interpolation=interp)
+    mask_s = (cv2.resize(mask.astype(np.uint8), (new_W, new_H),
+                         interpolation=cv2.INTER_NEAREST) > 0)
+    out_rgb = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+    out_mask = np.zeros((target_size, target_size), dtype=bool)
+    y0 = max(0, (target_size - new_H) // 2)
+    x0 = max(0, (target_size - new_W) // 2)
+    y1 = min(target_size, y0 + new_H)
+    x1 = min(target_size, x0 + new_W)
+    out_rgb[y0:y1, x0:x1] = rgb_s[:y1 - y0, :x1 - x0]
+    out_mask[y0:y1, x0:x1] = mask_s[:y1 - y0, :x1 - x0]
+    return out_rgb, out_mask
+
+
 def _recover_hallucination_alignment(
     rgb: np.ndarray,
     mask: np.ndarray,
@@ -483,6 +550,9 @@ def build_hallucinated_supervision_views(
     min_alignment_area_ratio: float = 0.65,
     max_alignment_area_ratio: float = 1.45,
     alignment_audit_path: str | Path | None = None,
+    aabb_min_W: Optional[np.ndarray] = None,
+    aabb_max_W: Optional[np.ndarray] = None,
+    sv3d_fill_frac: float = 0.85,
 ) -> List[dict]:
     """Read a Phase-5 hallucination manifest and return hallucinated views.
 
@@ -623,6 +693,24 @@ def build_hallucinated_supervision_views(
             up = up / max(np.linalg.norm(up), 1e-9)
             R_w2c, T_w2c = look_at_w2c(np.asarray(C_W, dtype=np.float64), centroid_W, up)
 
+        # Undo Phase-5 normalisation: both the SV3D output and the ObjectGS
+        # reference renders are cropped so the object fills sv3d_fill_frac of
+        # the frame.  Training cameras use the real focal length where the
+        # object is much smaller — without this correction the supervision
+        # image shows a ~2-3× oversized banana, driving splats to grow and
+        # producing the blue-disk artifact.
+        if aabb_min_W is not None and aabb_max_W is not None:
+            ws = _compute_aabb_world_scale_px(
+                np.asarray(aabb_min_W, dtype=np.float64),
+                np.asarray(aabb_max_W, dtype=np.float64),
+                np.asarray(R_w2c, dtype=np.float64),
+                np.asarray(T_w2c, dtype=np.float64),
+                K.astype(np.float64),
+                sv3d_fill_frac=float(sv3d_fill_frac),
+                target_size=int(res),
+            )
+            rgb, mask = _denormalize_to_world_scale(rgb, mask, ws, target_size=int(res))
+
         views.append({
             "source": "hallucinated",
             "rgb": rgb,
@@ -754,6 +842,8 @@ def build_joint_supervision_views(
     up_W_override: Optional[np.ndarray] = None,
     include_conditioning: bool = True,
     min_hallucination_alignment_iou: float = 0.55,
+    min_halluc_area_ratio: float = 0.65,
+    max_halluc_area_ratio: float = 1.45,
     hallucination_alignment_audit_path: str | Path | None = None,
 ) -> List[dict]:
     """Build one aligned training set containing real and hallucinated views."""
@@ -763,6 +853,8 @@ def build_joint_supervision_views(
         weight=real_weight,
         target_long_edge=real_target_long_edge,
     )
+    _aabb_min = np.asarray(scope.aabb_min_W, dtype=np.float64) if scope is not None else None
+    _aabb_max = np.asarray(scope.aabb_max_W, dtype=np.float64) if scope is not None else None
     hallucinated_views = build_hallucinated_supervision_views(
         halluc_index_path=halluc_index_path,
         local_sv3d=local_sv3d,
@@ -772,6 +864,10 @@ def build_joint_supervision_views(
         up_W_override=up_W_override,
         include_conditioning=include_conditioning,
         min_alignment_iou=float(min_hallucination_alignment_iou),
+        min_alignment_area_ratio=float(min_halluc_area_ratio),
+        max_alignment_area_ratio=float(max_halluc_area_ratio),
+        aabb_min_W=_aabb_min,
+        aabb_max_W=_aabb_max,
         alignment_audit_path=hallucination_alignment_audit_path,
     )
     views = real_views + hallucinated_views

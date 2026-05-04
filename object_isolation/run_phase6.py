@@ -85,6 +85,15 @@ def run(
     max_anchor_count: int = 20000,
     densify_grad_threshold: float = 0.00005,
     densify_extra_ratio: float = 0.08,
+    max_splat_world_size: float = 0.15,
+    densify_real_views_only: bool = True,
+    densify_warmup_frac: float = 0.15,
+    densify_stop_frac: float = 0.60,
+    halluc_decay_start_frac: float = 0.5,
+    halluc_weight_floor: float = 0.25,
+    min_halluc_iou: float = 0.55,
+    min_halluc_area_ratio: float = 0.65,
+    max_halluc_area_ratio: float = 1.45,
     n_compare_views: int = 8,
     skip_compare: bool = False,
     debug: bool = False,
@@ -175,6 +184,15 @@ def run(
                 max_anchor_count=int(max_anchor_count),
                 densify_grad_threshold=float(densify_grad_threshold),
                 densify_extra_ratio=float(densify_extra_ratio),
+                max_splat_world_size=float(max_splat_world_size),
+                densify_real_views_only=bool(densify_real_views_only),
+                densify_warmup_frac=float(densify_warmup_frac),
+                densify_stop_frac=float(densify_stop_frac),
+                halluc_decay_start_frac=float(halluc_decay_start_frac),
+                halluc_weight_floor=float(halluc_weight_floor),
+                min_halluc_iou=float(min_halluc_iou),
+                min_halluc_area_ratio=float(min_halluc_area_ratio),
+                max_halluc_area_ratio=float(max_halluc_area_ratio),
             )
             obj_gaussians = summary.pop("_gaussians", None)
         except Exception as e:
@@ -309,6 +327,25 @@ def _parse_args() -> argparse.Namespace:
                    help="Stop densification once this anchor count is reached.")
     p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
     p.add_argument("--densify_extra_ratio", type=float, default=0.08)
+    p.add_argument("--max_splat_world_size", type=float, default=0.15,
+                   help="Max splat world size as fraction of spatial_extent (log-space cap).")
+    p.add_argument("--no_densify_real_views_only", action="store_true",
+                   help="Accumulate densification stats from all views (default: real views only).")
+    p.add_argument("--densify_warmup_frac", type=float, default=0.15,
+                   help="Fraction of iterations before densification starts.")
+    p.add_argument("--densify_stop_frac", type=float, default=0.60,
+                   help="Fraction of iterations after which densification is locked off.")
+    p.add_argument("--halluc_decay_start_frac", type=float, default=0.5,
+                   help="Fraction of iterations after which hallucination RGB weight decays.")
+    p.add_argument("--halluc_weight_floor", type=float, default=0.25,
+                   help="Minimum hallucination weight multiplier at end of decay.")
+    p.add_argument("--min_halluc_iou", type=float, default=0.55,
+                   help="Min mask-IoU for hallucinated-view alignment audit. "
+                        "Lower values accept more back/side views (e.g. 0.10).")
+    p.add_argument("--min_halluc_area_ratio", type=float, default=0.65,
+                   help="Min SV3D/reference mask area ratio (lower = more lenient).")
+    p.add_argument("--max_halluc_area_ratio", type=float, default=1.45,
+                   help="Max SV3D/reference mask area ratio (higher = more lenient).")
     p.add_argument("--n_compare_views", type=int, default=8)
     p.add_argument("--skip_compare", action="store_true",
                    help="Skip before/after orbit rendering.")
@@ -342,6 +379,15 @@ def main():
         max_anchor_count=args.max_anchor_count,
         densify_grad_threshold=args.densify_grad_threshold,
         densify_extra_ratio=args.densify_extra_ratio,
+        max_splat_world_size=args.max_splat_world_size,
+        densify_real_views_only=not args.no_densify_real_views_only,
+        densify_warmup_frac=args.densify_warmup_frac,
+        densify_stop_frac=args.densify_stop_frac,
+        halluc_decay_start_frac=args.halluc_decay_start_frac,
+        halluc_weight_floor=args.halluc_weight_floor,
+        min_halluc_iou=args.min_halluc_iou,
+        min_halluc_area_ratio=args.min_halluc_area_ratio,
+        max_halluc_area_ratio=args.max_halluc_area_ratio,
         n_compare_views=args.n_compare_views,
         skip_compare=args.skip_compare,
         debug=args.debug,
