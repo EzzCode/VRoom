@@ -142,6 +142,8 @@ for label_id in sorted_labels:
     # Step A & B: Create masked depth maps and find object's 3D bounding box
     masked_depths = []
     masked_colors = []
+    active_intrinsics = []
+    active_extrinsics = []
     all_world_pts = []
     
     for i in range(num_cams):
@@ -149,10 +151,16 @@ for label_id in sorted_labels:
         # Compute mask once per camera
         mask = (semantic_maps[i] == label_id) & (d > 0) & (d < BBOX_DEPTH_TRUNC)
         
+        # If the object isn't visible in this camera, skip it completely
+        if not np.any(mask):
+            continue
+            
         # Step A: Mask depth maps
         d[~mask] = 0  # zero out non-object pixels and far depths
         masked_depths.append(d)
         masked_colors.append(color_images_raw[i])  # color stays full, filtering depth is enough to gate TSDF
+        active_intrinsics.append(intrinsics_list[i])
+        active_extrinsics.append(extrinsics_list[i])
 
         # Step B: Find 3D points for bounding box
         pts = unproject_to_3d(depth_maps_raw[i], mask, intrinsics_list[i], extrinsics_list[i])
@@ -194,11 +202,11 @@ for label_id in sorted_labels:
     print(f"  Grid: {N}^3, voxel={voxel_size:.4f} units, trunc={trunc_margin:.4f} units")
 
     # Step D: Run TSDF fusion
-    print(f"  Fusing...")
+    print(f"  Fusing using {len(masked_depths)} valid cameras (skipped {num_cams - len(masked_depths)} empty)...")
     t0 = time.time()
     # Fused grid represents voxels corners
     fused_grid, fused_colors, obs_count = fuse_tsdf(
-        masked_depths, intrinsics_list, extrinsics_list,
+        masked_depths, active_intrinsics, active_extrinsics,
         grid_shape=(N, N, N),
         voxel_size=voxel_size,
         trunc_margin=trunc_margin,
