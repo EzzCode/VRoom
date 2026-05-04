@@ -16,7 +16,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
-import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -151,42 +150,6 @@ def _render_parent_object_depth_target(
         return depth.detach(), valid.detach()
 
 
-def _prune_oversized_anchors(gaussians, max_abs_scale: float) -> int:
-    """Remove anchors whose maximum log-scale exceeds *max_abs_scale*."""
-    with torch.no_grad():
-        s = gaussians._scaling
-        if s.ndim < 2:
-            return 0
-        max_scale_per_anchor = s.max(dim=1).values
-        prune_mask = max_scale_per_anchor > max_abs_scale
-        n_prune = int(prune_mask.sum().item())
-        if n_prune > 0:
-            gaussians.prune_anchor(prune_mask)
-    return n_prune
-
-
-def _prune_aabb_outliers(
-    gaussians,
-    aabb_min: torch.Tensor,
-    aabb_max: torch.Tensor,
-    margin: float = 0.3,
-) -> int:
-    """Remove anchors that fall outside the AABB expanded by *margin* fraction."""
-    with torch.no_grad():
-        span = (aabb_max - aabb_min).clamp_min(1e-6)
-        lo = aabb_min - margin * span
-        hi = aabb_max + margin * span
-        pos = gaussians._anchor  # (N, 3)
-        outside = (
-            (pos < lo.unsqueeze(0)).any(dim=1)
-            | (pos > hi.unsqueeze(0)).any(dim=1)
-        )
-        n_prune = int(outside.sum().item())
-        if n_prune > 0:
-            gaussians.prune_anchor(outside)
-    return n_prune
-
-
 def _training_options(
     iterations: int,
     lr_scale: float,
@@ -273,12 +236,6 @@ def train_object(
     densify_extra_ratio: float = 0.08,
     max_scale_growth: float = 1.35,
     max_offset_abs: float = 0.45,
-    max_splat_world_size: float = 0.05,
-    densify_real_views_only: bool = True,
-    densify_warmup_frac: float = 0.15,
-    densify_stop_frac: float = 0.60,
-    halluc_decay_start_frac: float = 0.5,
-    halluc_weight_floor: float = 0.25,
 ) -> dict:
     """Train a fresh object-only ObjectGS model from COLMAP seed points."""
     if not supervision_views:
@@ -339,22 +296,6 @@ def train_object(
     spatial_extent = max(float(scope.radius), float(np.linalg.norm(scope.aabb_max_W - scope.aabb_min_W)))
     gaussians.create_from_pcd(pcd, spatial_extent, "", logger)
 
-    # Scale cap: anchor to actual COLMAP initial scale distribution, not spatial_extent.
-    # spatial_extent for room scenes is 2-3m; 15% of that is 30-45cm per splat — way too loose.
-    # Use 95th-percentile of initial log-scales + log(3) as the primary cap,
-    # with an absolute world-unit ceiling as a safety net.
-    initial_scaling_pre = gaussians._scaling.detach()
-    p95_init_scale = float(torch.quantile(initial_scaling_pre, 0.95).item())
-    abs_world_cap = math.log(max(float(max_splat_world_size) * float(spatial_extent), 1e-6))
-    max_abs_scale = min(p95_init_scale + math.log(3.0), abs_world_cap)
-    max_splat_ws = float(max_splat_world_size) * float(spatial_extent)  # world-space scale limit
-    aabb_min_t = torch.tensor(np.asarray(scope.aabb_min_W, dtype=np.float32), device="cuda")
-    aabb_max_t = torch.tensor(np.asarray(scope.aabb_max_W, dtype=np.float32), device="cuda")
-    # Initial AABB prune — discard seed points that fall well outside the object bbox
-    n_aabb_init = _prune_aabb_outliers(gaussians, aabb_min_t, aabb_max_t, margin=0.5)
-    if n_aabb_init > 0:
-        logger.debug("Initial AABB prune removed %d anchors", n_aabb_init)
-
     opt = _training_options(
         int(n_iterations),
         float(lr_scale),
@@ -365,9 +306,6 @@ def train_object(
     gaussians.training_setup(opt)
     initial_scaling = gaussians._scaling.detach().clone()
     initial_anchor_count = int(gaussians._anchor.shape[0])
-    # Staged densification window: warmup → active → locked
-    densify_warmup_iter = max(opt.update_from, int(float(densify_warmup_frac) * n_iterations))
-    densify_stop_iter = max(densify_warmup_iter + 1, int(float(densify_stop_frac) * n_iterations))
 
     pipe = pipe_config or SimpleNamespace(add_prefilter=True)
     if not hasattr(pipe, "add_prefilter"):
@@ -398,17 +336,7 @@ def train_object(
         mask = entry["gt_mask"]
         weight = float(entry["weight"])
         is_real = entry["source"] == "real"
-        if not is_real:
-            decay_start = int(float(halluc_decay_start_frac) * n_iterations)
-            if iteration > decay_start and float(halluc_decay_start_frac) < 1.0:
-                t = min(1.0, (iteration - decay_start) / max(1, n_iterations - decay_start))
-                rgb_scale = float(hallucination_rgb_scale) * (
-                    1.0 - t * (1.0 - float(halluc_weight_floor))
-                )
-            else:
-                rgb_scale = float(hallucination_rgb_scale)
-        else:
-            rgb_scale = 1.0
+        rgb_scale = float(hallucination_rgb_scale) if not is_real else 1.0
 
         gaussians.update_learning_rate(iteration)
         gaussians.set_anchor_mask(cam.camera_center, cam.resolution_scale)
@@ -429,18 +357,13 @@ def train_object(
         alpha_fg = (mask * (1.0 - alpha)).mean()
         alpha_bg = ((1.0 - mask) * alpha).mean()
         scale_reg = render_pkg["scaling"].prod(dim=1).mean() if render_pkg["scaling"].numel() else torch.tensor(0.0, device="cuda")
-        # Direct penalty on rendered Gaussian scales: catches cases where cov-MLP
-        # stretches splats even though _scaling is clamped.
-        scale_penalty = torch.tensor(0.0, device="cuda")
-        if render_pkg["scaling"].numel() > 0:
-            scale_penalty = F.relu(render_pkg["scaling"] - max_splat_ws).pow(2).mean()
         scale_drift = torch.tensor(0.0, device="cuda")
         if gaussians._scaling.shape == initial_scaling.shape:
             scale_drift = (gaussians._scaling - initial_scaling).pow(2).mean()
 
         total = weight * float(rgb_weight) * rgb_scale * (0.8 * rgb_fg + 0.2 * ssim_loss + 0.2 * rgb_bg)
         total = total + float(alpha_weight) * alpha_fg + float(outside_alpha_weight) * alpha_bg
-        total = total + float(opt.lambda_dreg) * scale_reg + 0.01 * scale_drift + 5.0 * scale_penalty
+        total = total + float(opt.lambda_dreg) * scale_reg + 0.01 * scale_drift
 
         depth_loss = torch.tensor(0.0, device="cuda")
         depth_target = entry.get("depth_target")
@@ -467,28 +390,18 @@ def train_object(
 
         with torch.no_grad():
             if iteration < opt.update_until and iteration > opt.start_stat:
-                # Gate gradient stats to real views only (avoids hallucination noise driving splits)
-                if not bool(densify_real_views_only) or is_real:
-                    gaussians.training_statis(opt, render_pkg, pred.shape[2], pred.shape[1])
+                gaussians.training_statis(opt, render_pkg, pred.shape[2], pred.shape[1])
                 densify_count += 1
                 if (
                     opt.densification
-                    and iteration > densify_warmup_iter
-                    and iteration <= densify_stop_iter
                     and densify_count % opt.update_interval == 0
                     and int(gaussians._anchor.shape[0]) < int(max_anchor_count)
                 ):
                     gaussians.run_densify(opt, iteration)
-                    # Hard pruning after each split — prevents runaway growth
-                    n_ov = _prune_oversized_anchors(gaussians, max_abs_scale)
-                    n_ab = _prune_aabb_outliers(gaussians, aabb_min_t, aabb_max_t, margin=0.4)
-                    if n_ov + n_ab > 0:
-                        logger.debug("iter %d: pruned %d oversized + %d AABB outliers",
-                                     iteration, n_ov, n_ab)
 
             gaussians.optimizer.step()
-            # Absolute scale cap — shape-agnostic, works after any number of densify rounds
-            gaussians._scaling.data.clamp_(max=max_abs_scale)
+            if gaussians._scaling.shape == initial_scaling.shape:
+                gaussians._scaling.data.clamp_(max=initial_scaling.max().item())
             gaussians._offset.data.clamp_(min=-float(max_offset_abs), max=float(max_offset_abs))
 
         loss_value = float(total.detach().item())
@@ -523,13 +436,7 @@ def train_object(
         "max_anchor_count": int(max_anchor_count),
         "densify_grad_threshold": float(densify_grad_threshold),
         "densify_extra_ratio": float(densify_extra_ratio),
-        "max_splat_world_size": float(max_splat_world_size),
-        "densify_real_views_only": bool(densify_real_views_only),
-        "densify_warmup_frac": float(densify_warmup_frac),
-        "densify_stop_frac": float(densify_stop_frac),
         "hallucination_rgb_scale": float(hallucination_rgb_scale),
-        "halluc_decay_start_frac": float(halluc_decay_start_frac),
-        "halluc_weight_floor": float(halluc_weight_floor),
         "depth_weight": float(depth_weight),
         "depth_start_iter": int(depth_start_iter),
         "depth_front_weight": float(depth_front_weight),

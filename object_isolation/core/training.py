@@ -56,12 +56,6 @@ def run_training(
     max_anchor_count: int = 20000,
     densify_grad_threshold: float = 0.00005,
     densify_extra_ratio: float = 0.08,
-    max_splat_world_size: float = 0.15,
-    densify_real_views_only: bool = True,
-    densify_warmup_frac: float = 0.15,
-    densify_stop_frac: float = 0.60,
-    halluc_decay_start_frac: float = 0.5,
-    halluc_weight_floor: float = 0.25,
     use_cond_cam_up: bool = True,
     fov_y_deg: float = 50.0,
     min_halluc_iou: float = 0.55,
@@ -171,12 +165,6 @@ def run_training(
         max_anchor_count=int(max_anchor_count),
         densify_grad_threshold=float(densify_grad_threshold),
         densify_extra_ratio=float(densify_extra_ratio),
-        max_splat_world_size=float(max_splat_world_size),
-        densify_real_views_only=bool(densify_real_views_only),
-        densify_warmup_frac=float(densify_warmup_frac),
-        densify_stop_frac=float(densify_stop_frac),
-        halluc_decay_start_frac=float(halluc_decay_start_frac),
-        halluc_weight_floor=float(halluc_weight_floor),
     )
     summary = dict(scratch["summary"])
     summary.update({
