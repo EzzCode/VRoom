@@ -85,14 +85,16 @@ def make_alignment_audit_strip(audit_path: Path, out_path: Path, tile: int = 180
     if not frames:
         return None
 
-    # 4 tiles per row: original | aligned | ref | overlap
+    # 5 tiles per row: original | aligned | ref | overlap | post-denorm
     row_h = tile + 42
     info_w = 340
-    n_tiles = 4
+    n_tiles = 5
     canvas = np.full((40 + row_h * len(frames), n_tiles * tile + info_w, 3), 245, dtype=np.uint8)
     _putlbl(canvas, "Phase 6 alignment audit", (10, 26), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
-    _putlbl(canvas, "before | after | ref | overlap   red=halluc-only  green=ref-only  yellow=both",
+    _putlbl(canvas, "before | after | ref | overlap | post-denorm   red=halluc-only  green=ref-only  yellow=both",
             (260, 26), fg=(70, 70, 70), bg=(255, 255, 255), scale=0.40)
+
+    post_denorm_dir = audit_path.parent / "post_denorm"
 
     for idx, fr in enumerate(frames):
         y0 = 40 + idx * row_h
@@ -135,6 +137,18 @@ def make_alignment_audit_strip(audit_path: Path, out_path: Path, tile: int = 180
         ref_mask = _mask_from_image(ref_path, size_wh=(mask.shape[1], mask.shape[0]) if mask is not None else None)
         canvas[y0:y0 + tile, 3 * tile:4 * tile] = _overlay_masks(mask, ref_mask, tile)
         _putlbl(canvas, "overlap", (3 * tile + 4, y0 + tile + 14),
+                fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
+
+        # column 4: post-denormalized training-ready image (saved by dataset_builder)
+        _pd_name = Path(str(aligned_path or "")).name
+        post_denorm_img = _read_bgr(post_denorm_dir / _pd_name) if _pd_name else None
+        col4 = _resize_tile(post_denorm_img, tile)
+        if post_denorm_img is None:
+            # grey placeholder with "N/A" when not available (rejected frame or no denorm)
+            cv2.putText(col4, "N/A", (tile // 2 - 16, tile // 2 + 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 140, 140), 1)
+        canvas[y0:y0 + tile, 4 * tile:5 * tile] = col4
+        _putlbl(canvas, "post-denorm", (4 * tile + 4, y0 + tile + 14),
                 fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
 
         # info column

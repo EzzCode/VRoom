@@ -369,7 +369,20 @@ def run(
     xyz_W = np.asarray(pcd.points, dtype=np.float32)
     print(f"  Loaded {xyz_W.shape[0]} seed points  (source: {metadata.get('init_source')})")
 
-    # ── Load supervision views ────────────────────────────────────────────
+    # ── Read conditioning-camera up vector (matches training exactly) ─────
+    cond_cam_up_W: np.ndarray | None = None
+    try:
+        with open(halluc_index) as _f:
+            _manifest = json.load(_f)
+        _cam_idx = int(_manifest.get("conditioning", {}).get("cam_index", -1))
+        if 0 <= _cam_idx < len(scope.cameras):
+            _R_cond = np.asarray(scope.cameras[_cam_idx]["R"], dtype=np.float64)
+            cond_cam_up_W = -_R_cond[1]
+            print(f"  Using cond cam {_cam_idx} up vector for up_W_override.")
+    except Exception as _e:
+        print(f"  Could not read cond cam up ({_e}); using scope.up_W.")
+
+    # ── Load supervision views (mirrors training call exactly) ────────────
     print(f"Building supervision views ...")
     supervision_views = build_joint_supervision_views(
         halluc_index_path=halluc_index,
@@ -381,6 +394,8 @@ def run(
         fov_y_deg=50.0,
         hallucination_resolution=576,
         real_target_long_edge=576,
+        up_W_override=cond_cam_up_W,
+        seed_points_W=xyz_W,
     )
     print(f"  {len(supervision_views)} supervision views built.")
 

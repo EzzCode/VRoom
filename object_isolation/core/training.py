@@ -1,4 +1,4 @@
-"""Phases 6–7 — Supervision alignment and object training.
+"""Phase 7 — Object training using aligned real + SV3D supervision.
 
 Uses ONLY ``object_isolation`` internals — no dependency on
 ``target_replenishment``.
@@ -31,7 +31,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def run_pipeline(
+def run_training(
     *,
     model_path: str,
     object_label_id: int,
@@ -70,7 +70,7 @@ def run_pipeline(
     Returns a summary dict (also written to disk).
     """
     from .dataset_builder import build_joint_supervision_views, save_supervision_manifest
-    from .object_scope import discover_object_scope
+    from .scope import discover_object_scope
     from .trainer import train_object
 
     out_dir = Path(output_dir)

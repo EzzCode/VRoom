@@ -336,13 +336,18 @@ def _compute_aabb_world_scale_px(
     K: np.ndarray,
     sv3d_fill_frac: float = 0.85,
     target_size: int = 576,
+    seed_points_W: Optional[np.ndarray] = None,
 ) -> tuple[float, tuple[float, float]]:
     """Return (scale_factor, (cx_px, cy_px)) for a given camera.
 
     scale_factor = world_bbox_px / sv3d_normalized_px — shrinks the SV3D
     supervision image back to match the world-camera projection scale.
-    (cx_px, cy_px) = projected pixel position of the AABB centroid, used
+    (cx_px, cy_px) = projected pixel position of the object centroid, used
     to correctly place the rescaled content instead of blindly centering it.
+
+    When ``seed_points_W`` is provided (COLMAP object points), the projected
+    p2–p98 extent and median centroid of those points are used instead of the
+    loose scope AABB corners, giving a tighter and more accurate estimate.
     """
     R = R_w2c.astype(np.float64)
     T = T_w2c.astype(np.float64).reshape(3)
@@ -350,7 +355,28 @@ def _compute_aabb_world_scale_px(
     fx, fy = float(K64[0, 0]), float(K64[1, 1])
     cx_k, cy_k = float(K64[0, 2]), float(K64[1, 2])
     fallback_center = (float(target_size) / 2.0, float(target_size) / 2.0)
+    sv3d_px = sv3d_fill_frac * float(target_size)
 
+    # ── Robust path: projected COLMAP seed points (p2-p98 extent, median centroid) ─
+    if seed_points_W is not None and len(seed_points_W) > 0:
+        pts = np.asarray(seed_points_W, dtype=np.float64)
+        pts_cam = (R @ pts.T).T + T
+        in_front = pts_cam[:, 2] > 0.1
+        if in_front.sum() >= 20:
+            pts_f = pts_cam[in_front]
+            u_all = pts_f[:, 0] / pts_f[:, 2] * fx + cx_k
+            v_all = pts_f[:, 1] / pts_f[:, 2] * fy + cy_k
+            u_lo = float(np.percentile(u_all, 2))
+            u_hi = float(np.percentile(u_all, 98))
+            v_lo = float(np.percentile(v_all, 2))
+            v_hi = float(np.percentile(v_all, 98))
+            world_px = float(max(u_hi - u_lo, v_hi - v_lo))
+            scale = float(np.clip(world_px / max(sv3d_px, 1.0), 0.05, 2.0))
+            cx_px = float(np.median(u_all))
+            cy_px = float(np.median(v_all))
+            return scale, (cx_px, cy_px)
+
+    # ── Fallback: project scope AABB corners ─────────────────────────────
     xs = [float(aabb_min[0]), float(aabb_max[0])]
     ys = [float(aabb_min[1]), float(aabb_max[1])]
     zs = [float(aabb_min[2]), float(aabb_max[2])]
@@ -363,7 +389,6 @@ def _compute_aabb_world_scale_px(
     u = pts_f[:, 0] / pts_f[:, 2] * fx + cx_k
     v = pts_f[:, 1] / pts_f[:, 2] * fy + cy_k
     world_px = float(max(u.max() - u.min(), v.max() - v.min()))
-    sv3d_px = sv3d_fill_frac * float(target_size)
     scale = float(np.clip(world_px / max(sv3d_px, 1.0), 0.05, 2.0))
 
     # Project the AABB centroid to get the placement anchor
@@ -519,17 +544,37 @@ def _recover_hallucination_alignment(
 
     original_audit = candidates[0][2]
     accepted_candidates = [c for c in candidates if c[2].get("accepted", False)]
-    if original_audit.get("accepted", False):
-        best_rgb, best_mask, best_audit = candidates[0]
-    elif accepted_candidates:
+
+    def _transform_cost(audit: dict) -> float:
+        """Penalty subtracted from IoU score when ranking accepted candidates.
+
+        Flips break pose consistency and anisotropic bbox warps can distort
+        object shape; they must win by a clear margin to be preferred.
+        """
+        t = str(audit.get("alignment_transform", "identity"))
+        cost = 0.0
+        if "flip" in t:
+            cost += 0.025   # flip must improve mask IoU by >0.025 to win
+        if "bbox" in t:
+            cost += 0.010   # anisotropic warp must improve by >0.01 to win
+        return cost
+
+    if accepted_candidates:
         best_rgb, best_mask, best_audit = max(
             accepted_candidates,
             key=lambda item: (
-                item[2].get("mask_iou", 0.0),
+                item[2].get("mask_iou", 0.0) - _transform_cost(item[2]),
                 item[2].get("bbox_iou", 0.0),
                 -item[2].get("centroid_distance_norm", 1.0),
             ),
         )
+        chosen_t = str(best_audit.get("alignment_transform", "identity"))
+        if "flip" in chosen_t:
+            logger.warning(
+                "Alignment selected a flip transform (%s); IoU=%.3f vs identity=%.3f. "
+                "Re-run Phase 5 if this is unexpected.",
+                chosen_t, best_audit.get("mask_iou", 0.0), original_audit.get("mask_iou", 0.0),
+            )
     else:
         best_rgb, best_mask, best_audit = rgb, mask, original_audit
 
@@ -571,6 +616,7 @@ def build_hallucinated_supervision_views(
     aabb_min_W: Optional[np.ndarray] = None,
     aabb_max_W: Optional[np.ndarray] = None,
     sv3d_fill_frac: float = 0.85,
+    seed_points_W: Optional[np.ndarray] = None,
 ) -> list[dict]:
     """Read a Phase-5 hallucination manifest and return hallucinated views.
 
@@ -586,6 +632,9 @@ def build_hallucinated_supervision_views(
         include_conditioning: if False, skip the cond frame (frame index n-1
             in SV3D's orbit). Default True since the cond frame is the
             highest-confidence supervision signal.
+        seed_points_W: COLMAP object seed points in world space.  When
+            supplied, scale and centroid placement use the projected p2–p98
+            extent of these points instead of the loose scope AABB corners.
     """
     halluc_index_path = Path(halluc_index_path)
     if not halluc_index_path.exists():
@@ -717,6 +766,11 @@ def build_hallucinated_supervision_views(
         # object is much smaller — without this correction the supervision
         # image shows a ~2-3× oversized banana, driving splats to grow and
         # producing the blue-disk artifact.
+        # K for the supervision view — may be updated below if denorm is applied.
+        # After _denormalize_to_world_scale the effective intrinsics change:
+        #   u_out = ws*(fx*X/Z + cx - cx) + cx_uv  = ws*fx*X/Z + cx_uv
+        # so K_eff = [[ws*fx, 0, cx_uv], [0, ws*fy, cy_uv], [0, 0, 1]].
+        K_view = K.copy()
         if aabb_min_W is not None and aabb_max_W is not None:
             ws, centroid_uv = _compute_aabb_world_scale_px(
                 np.asarray(aabb_min_W, dtype=np.float64),
@@ -726,8 +780,23 @@ def build_hallucinated_supervision_views(
                 K.astype(np.float64),
                 sv3d_fill_frac=sv3d_fill_frac,
                 target_size=res,
+                seed_points_W=seed_points_W,
             )
             rgb, mask = _denormalize_to_world_scale(rgb, mask, ws, target_size=res, center_uv=centroid_uv)
+            # Update K: focal length is unchanged (ws·z ≈ 1 by self-consistency of the
+            # denorm w.r.t. K_sv3d; see pixel-transform chain derivation in session notes).
+            # Only the principal point shifts to match where _denormalize_to_world_scale
+            # placed the image content on the canvas.
+            K_view = np.array([
+                [float(K[0, 0]), 0.0, float(centroid_uv[0])],
+                [0.0, float(K[1, 1]), float(centroid_uv[1])],
+                [0.0, 0.0, 1.0],
+            ], dtype=np.float32)
+            # Save post-denormalized image for alignment_audit_strip column 5
+            if alignment_audit_path is not None:
+                _pd_dir = Path(alignment_audit_path).parent / "post_denorm"
+                _pd_dir.mkdir(parents=True, exist_ok=True)
+                _save_aligned_rgba(rgb, mask, _pd_dir / Path(str(rgba_path)).name)
 
         views.append({
             "source": "hallucinated",
@@ -738,7 +807,7 @@ def build_hallucinated_supervision_views(
             "camera": {
                 "R": np.asarray(R_w2c, dtype=np.float32),
                 "T": np.asarray(T_w2c, dtype=np.float32),
-                "K": K.copy(),
+                "K": K_view,
                 "width": res,
                 "height": res,
                 "position": np.asarray(C_W, dtype=np.float32),
@@ -819,6 +888,29 @@ def build_real_supervision_views(
             rgb, mask, K, target_long_edge=target_long_edge
         )
 
+        # Square-pad to match hallucinated view shape (target_long_edge × target_long_edge).
+        # Real COLMAP images are landscape (e.g. 576×432 after resize); letterbox with white.
+        if int(height) != int(width):
+            side = max(int(height), int(width))
+            pad_top = (side - int(height)) // 2
+            pad_bot = side - int(height) - pad_top
+            pad_left = (side - int(width)) // 2
+            pad_right = side - int(width) - pad_left
+            rgb = cv2.copyMakeBorder(
+                rgb, pad_top, pad_bot, pad_left, pad_right,
+                cv2.BORDER_CONSTANT, value=(255, 255, 255),
+            )
+            mask_u8 = mask.astype(np.uint8)
+            mask = cv2.copyMakeBorder(
+                mask_u8, pad_top, pad_bot, pad_left, pad_right,
+                cv2.BORDER_CONSTANT, value=0,
+            ).astype(bool)
+            K = K.copy()
+            K[0, 2] += float(pad_left)
+            K[1, 2] += float(pad_top)
+            width = side
+            height = side
+
         views.append({
             "source": "real",
             "rgb": rgb,
@@ -863,6 +955,7 @@ def build_joint_supervision_views(
     min_halluc_area_ratio: float = 0.65,
     max_halluc_area_ratio: float = 1.45,
     hallucination_alignment_audit_path: str | Path | None = None,
+    seed_points_W: Optional[np.ndarray] = None,
 ) -> list[dict]:
     """Build one aligned training set containing real and hallucinated views."""
     real_views = build_real_supervision_views(
@@ -887,6 +980,7 @@ def build_joint_supervision_views(
         aabb_min_W=aabb_min,
         aabb_max_W=aabb_max,
         alignment_audit_path=hallucination_alignment_audit_path,
+        seed_points_W=seed_points_W,
     )
     views = real_views + hallucinated_views
     logger.info(
