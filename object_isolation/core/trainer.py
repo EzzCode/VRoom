@@ -311,11 +311,10 @@ def train_object(
     if not hasattr(pipe, "add_prefilter"):
         pipe.add_prefilter = True
 
-    # Black background: object-only training — areas with zero alpha should render black
-    # (not white). White background creates conflicting gradients when SV3D images have
-    # a dark background: rgb_bg would push the model toward a colored splat to satisfy both
-    # alpha_bg and the rgb difference against white compositing.
-    background = torch.zeros(3, dtype=torch.float32, device="cuda")
+    # White background: object-only training. Supervision images (both real ObjectGS renders
+    # and denormalized SV3D hallucinations) have white background for non-object pixels.
+    # rgb_bg loss then correctly penalizes any alpha > 0 outside the object mask.
+    background = torch.ones(3, dtype=torch.float32, device="cuda")
     loss_history: list[float] = []
     depth_loss_history: list[float] = []
     source_counts: dict[str, int] = {}

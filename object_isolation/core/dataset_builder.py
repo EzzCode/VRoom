@@ -339,32 +339,45 @@ def _compute_aabb_world_scale_px(
     K: np.ndarray,
     sv3d_fill_frac: float = 0.85,
     target_size: int = 576,
-) -> float:
-    """Return world_bbox_px / sv3d_normalized_px for a given camera.
+) -> tuple[float, tuple[float, float]]:
+    """Return (scale_factor, (cx_px, cy_px)) for a given camera.
 
-    Phase 5 normalises both the SV3D output and the ObjectGS reference renders
-    so the object fills ``sv3d_fill_frac`` of the target resolution.  Phase 6
-    training cameras use the real focal length, so the same object appears
-    ~2-3× smaller in the ObjectGS render than in the SV3D supervision image.
-    This function computes the scale factor needed to shrink the SV3D image
-    back to world-camera scale before training.
+    scale_factor = world_bbox_px / sv3d_normalized_px — shrinks the SV3D
+    supervision image back to match the world-camera projection scale.
+    (cx_px, cy_px) = projected pixel position of the AABB centroid, used
+    to correctly place the rescaled content instead of blindly centering it.
     """
+    R = R_w2c.astype(np.float64)
+    T = T_w2c.astype(np.float64).reshape(3)
+    K64 = K.astype(np.float64)
+    fx, fy = float(K64[0, 0]), float(K64[1, 1])
+    cx_k, cy_k = float(K64[0, 2]), float(K64[1, 2])
+    fallback_center = (float(target_size) / 2.0, float(target_size) / 2.0)
+
     xs = [float(aabb_min[0]), float(aabb_max[0])]
     ys = [float(aabb_min[1]), float(aabb_max[1])]
     zs = [float(aabb_min[2]), float(aabb_max[2])]
     corners = np.array([[x, y, z] for x in xs for y in ys for z in zs], dtype=np.float64)
-    pts_cam = (R_w2c.astype(np.float64) @ corners.T).T + T_w2c.astype(np.float64)
+    pts_cam = (R @ corners.T).T + T
     in_front = pts_cam[:, 2] > 1e-3
     if int(in_front.sum()) < 2:
-        return 1.0
+        return 1.0, fallback_center
     pts_f = pts_cam[in_front]
-    fx, fy = float(K[0, 0]), float(K[1, 1])
-    cx, cy = float(K[0, 2]), float(K[1, 2])
-    u = pts_f[:, 0] / pts_f[:, 2] * fx + cx
-    v = pts_f[:, 1] / pts_f[:, 2] * fy + cy
+    u = pts_f[:, 0] / pts_f[:, 2] * fx + cx_k
+    v = pts_f[:, 1] / pts_f[:, 2] * fy + cy_k
     world_px = float(max(u.max() - u.min(), v.max() - v.min()))
     sv3d_px = sv3d_fill_frac * float(target_size)
-    return float(np.clip(world_px / max(sv3d_px, 1.0), 0.05, 2.0))
+    scale = float(np.clip(world_px / max(sv3d_px, 1.0), 0.05, 2.0))
+
+    # Project the AABB centroid to get the placement anchor
+    centroid_W = (np.asarray(aabb_min, np.float64) + np.asarray(aabb_max, np.float64)) / 2.0
+    pt_cam = R @ centroid_W + T
+    if pt_cam[2] > 1e-3:
+        cx_px = float(pt_cam[0] / pt_cam[2] * fx + cx_k)
+        cy_px = float(pt_cam[1] / pt_cam[2] * fy + cy_k)
+    else:
+        cx_px, cy_px = fallback_center
+    return scale, (cx_px, cy_px)
 
 
 def _denormalize_to_world_scale(
@@ -372,14 +385,15 @@ def _denormalize_to_world_scale(
     mask: np.ndarray,
     world_scale: float,
     target_size: int = 576,
+    center_uv: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Shrink an SV3D-normalised supervision image to world-camera scale.
 
-    Resizes the image by ``world_scale`` and embeds it centred in a black
-    ``target_size × target_size`` background (alpha = 0 outside the object).
+    Resizes the image by ``world_scale`` and embeds it in a black
+    ``target_size × target_size`` background.  When ``center_uv`` is given
+    (projected pixel position of the AABB centroid), the scaled content is
+    placed so its centre lands at that position instead of the canvas centre.
     """
-    if abs(world_scale - 1.0) < 0.02:
-        return rgb, mask
     H, W = rgb.shape[:2]
     new_H = max(1, int(round(H * world_scale)))
     new_W = max(1, int(round(W * world_scale)))
@@ -387,14 +401,25 @@ def _denormalize_to_world_scale(
     rgb_s = cv2.resize(rgb, (new_W, new_H), interpolation=interp)
     mask_s = (cv2.resize(mask.astype(np.uint8), (new_W, new_H),
                          interpolation=cv2.INTER_NEAREST) > 0)
-    out_rgb = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+    if center_uv is not None:
+        x0 = int(round(float(center_uv[0]) - new_W / 2.0))
+        y0 = int(round(float(center_uv[1]) - new_H / 2.0))
+    else:
+        x0 = (target_size - new_W) // 2
+        y0 = (target_size - new_H) // 2
+    out_rgb = np.full((target_size, target_size, 3), 255, dtype=np.uint8)
     out_mask = np.zeros((target_size, target_size), dtype=bool)
-    y0 = max(0, (target_size - new_H) // 2)
-    x0 = max(0, (target_size - new_W) // 2)
-    y1 = min(target_size, y0 + new_H)
-    x1 = min(target_size, x0 + new_W)
-    out_rgb[y0:y1, x0:x1] = rgb_s[:y1 - y0, :x1 - x0]
-    out_mask[y0:y1, x0:x1] = mask_s[:y1 - y0, :x1 - x0]
+    src_x0 = max(0, -x0)
+    src_y0 = max(0, -y0)
+    dst_x0 = max(0, x0)
+    dst_y0 = max(0, y0)
+    dst_x1 = min(target_size, x0 + new_W)
+    dst_y1 = min(target_size, y0 + new_H)
+    w = dst_x1 - dst_x0
+    h = dst_y1 - dst_y0
+    if w > 0 and h > 0:
+        out_rgb[dst_y0:dst_y1, dst_x0:dst_x1] = rgb_s[src_y0:src_y0 + h, src_x0:src_x0 + w]
+        out_mask[dst_y0:dst_y1, dst_x0:dst_x1] = mask_s[src_y0:src_y0 + h, src_x0:src_x0 + w]
     return out_rgb, out_mask
 
 
@@ -700,7 +725,7 @@ def build_hallucinated_supervision_views(
         # image shows a ~2-3× oversized banana, driving splats to grow and
         # producing the blue-disk artifact.
         if aabb_min_W is not None and aabb_max_W is not None:
-            ws = _compute_aabb_world_scale_px(
+            ws, centroid_uv = _compute_aabb_world_scale_px(
                 np.asarray(aabb_min_W, dtype=np.float64),
                 np.asarray(aabb_max_W, dtype=np.float64),
                 np.asarray(R_w2c, dtype=np.float64),
@@ -709,7 +734,9 @@ def build_hallucinated_supervision_views(
                 sv3d_fill_frac=float(sv3d_fill_frac),
                 target_size=int(res),
             )
-            rgb, mask = _denormalize_to_world_scale(rgb, mask, ws, target_size=int(res))
+            rgb, mask = _denormalize_to_world_scale(
+                rgb, mask, ws, target_size=int(res), center_uv=centroid_uv,
+            )
 
         views.append({
             "source": "hallucinated",

@@ -74,38 +74,34 @@ def run_training(
     from .trainer import train_object
 
     out_dir = Path(output_dir)
-    obj_dir = out_dir / f"obj_{int(object_label_id)}"
+    obj_id = int(object_label_id)
+    obj_dir = out_dir / f"obj_{obj_id}"
     (obj_dir / "model").mkdir(parents=True, exist_ok=True)
 
     # ── Load (or reuse) parent model + scope ──────────────────────────────
     if gaussians is None or pipe_config is None or scope is None or local_sv3d is None:
-        logger.info("Phase 7: rediscovering scope for obj %d at %s",
-                    object_label_id, model_path)
+        logger.info("Rediscovering scope for obj %d at %s", obj_id, model_path)
         scope, _world_local, local_sv3d, gaussians, pipe_config = discover_object_scope(
-            model_path, int(object_label_id),
+            model_path, obj_id,
         )
 
     # ── Pull cond cam up (matches Phase 5 reference renders) ──────────────
     cond_cam_up_W: Optional[np.ndarray] = None
-    cond_cam_idx: Optional[int] = None
     try:
         with open(halluc_index_path) as f:
             manifest = json.load(f)
-        cond_cam_idx = int(manifest.get("conditioning", {}).get("cam_index", -1))
-        if use_cond_cam_up and cond_cam_idx >= 0 and cond_cam_idx < len(scope.cameras):
-            R_cond = np.asarray(scope.cameras[cond_cam_idx]["R"], dtype=np.float64)
+        cam_idx = int(manifest.get("conditioning", {}).get("cam_index", -1))
+        if use_cond_cam_up and 0 <= cam_idx < len(scope.cameras):
+            R_cond = np.asarray(scope.cameras[cam_idx]["R"], dtype=np.float64)
             cond_cam_up_W = -R_cond[1]  # camera up in world = -row1 of R_w2c
             ang = float(np.degrees(np.arccos(np.clip(
                 cond_cam_up_W @ scope.up_W /
                 (np.linalg.norm(cond_cam_up_W) * max(np.linalg.norm(scope.up_W), 1e-9)),
                 -1.0, 1.0,
             ))))
-            logger.info("Phase 7: using cond cam %d up (%.2f deg from scope.up_W).",
-                        cond_cam_idx, ang)
+            logger.info("Cond cam %d up vector (%.2f° from scope.up_W).", cam_idx, ang)
     except Exception as e:
-        logger.warning("Could not read cond cam up from halluc_index (%s); "
-                       "falling back to scope.up_W.", e)
-        cond_cam_up_W = None
+        logger.warning("Could not read cond cam up from halluc_index (%s); using scope.up_W.", e)
 
     extraction_index_path = Path(halluc_index_path).parents[1] / "phase3" / "extraction_index.json"
 
@@ -121,57 +117,57 @@ def run_training(
         hallucination_resolution=576,
         real_target_long_edge=576,
         up_W_override=cond_cam_up_W,
-        min_hallucination_alignment_iou=float(min_halluc_iou),
-        min_halluc_area_ratio=float(min_halluc_area_ratio),
-        max_halluc_area_ratio=float(max_halluc_area_ratio),
+        min_hallucination_alignment_iou=min_halluc_iou,
+        min_halluc_area_ratio=min_halluc_area_ratio,
+        max_halluc_area_ratio=max_halluc_area_ratio,
         hallucination_alignment_audit_path=obj_dir / "alignment_audit.json",
     )
     if not supervision_views:
-        raise RuntimeError(f"Phase 6 produced no joint supervision views for obj {object_label_id}.")
+        raise RuntimeError(f"No supervision views produced for obj {obj_id}.")
 
     save_supervision_manifest(supervision_views, obj_dir / "supervision_manifest.json")
     n_real = sum(1 for v in supervision_views if v.get("source") == "real")
-    n_hall = sum(1 for v in supervision_views if v.get("source") == "hallucinated")
-    logger.info("Phase 7: %d supervision views queued for obj %d (real=%d hallucinated=%d).",
-                len(supervision_views), object_label_id, n_real, n_hall)
+    n_hall = len(supervision_views) - n_real
+    logger.info("%d supervision views for obj %d (real=%d hallucinated=%d).",
+                len(supervision_views), obj_id, n_real, n_hall)
 
-    labels = gaussians.label_ids.squeeze(-1).cpu().numpy() if gaussians is not None else np.array([])
-    n_parent_anchors = int(gaussians._anchor.shape[0]) if gaussians is not None else 0
-    n_parent_obj_anchors = int((labels == int(object_label_id)).sum()) if labels.size else 0
+    if gaussians is not None:
+        labels = gaussians.label_ids.squeeze(-1).cpu().numpy()
+        n_parent_anchors = int(gaussians._anchor.shape[0])
+        n_parent_obj_anchors = int((labels == obj_id).sum())
+    else:
+        n_parent_anchors = n_parent_obj_anchors = 0
 
-    logger.info(
-        "Phase 7: training obj %d for %d iters from COLMAP seed points and aligned views (no parent anchors).",
-        object_label_id, int(iterations),
-    )
+    logger.info("Training obj %d for %d iters from COLMAP seed points.", obj_id, iterations)
     scratch = train_object(
         supervision_views=supervision_views,
         scope=scope,
-        object_id=int(object_label_id),
+        object_id=obj_id,
         model_path=model_path,
         output_dir=obj_dir,
-        n_iterations=int(iterations),
+        n_iterations=iterations,
         extraction_index_path=extraction_index_path,
         parent_gaussians=gaussians,
         pipe_config=pipe_config,
-        lr_scale=float(lr_scale),
-        colmap_init_target_points=int(colmap_init_target_points),
-        rgb_weight=float(novel_rgb_weight),
-        hallucination_rgb_scale=float(hallucination_rgb_scale),
-        depth_weight=float(depth_weight),
-        depth_start_iter=int(depth_start_iter),
-        depth_front_weight=float(depth_front_weight),
-        depth_back_weight=float(depth_back_weight),
-        enable_densification=bool(enable_densification),
-        max_anchor_count=int(max_anchor_count),
-        densify_grad_threshold=float(densify_grad_threshold),
-        densify_extra_ratio=float(densify_extra_ratio),
+        lr_scale=lr_scale,
+        colmap_init_target_points=colmap_init_target_points,
+        rgb_weight=novel_rgb_weight,
+        hallucination_rgb_scale=hallucination_rgb_scale,
+        depth_weight=depth_weight,
+        depth_start_iter=depth_start_iter,
+        depth_front_weight=depth_front_weight,
+        depth_back_weight=depth_back_weight,
+        enable_densification=enable_densification,
+        max_anchor_count=max_anchor_count,
+        densify_grad_threshold=densify_grad_threshold,
+        densify_extra_ratio=densify_extra_ratio,
     )
     summary = dict(scratch["summary"])
     summary.update({
-        "n_real_supervision_views": int(n_real),
-        "n_hallucinated_supervision_views": int(n_hall),
-        "n_parent_anchors": int(n_parent_anchors),
-        "n_parent_obj_anchors": int(n_parent_obj_anchors),
+        "n_real_supervision_views": n_real,
+        "n_hallucinated_supervision_views": n_hall,
+        "n_parent_anchors": n_parent_anchors,
+        "n_parent_obj_anchors": n_parent_obj_anchors,
         "halluc_index_path": str(halluc_index_path),
         "extraction_index_path": str(extraction_index_path),
         "model_path": str(model_path),
@@ -179,17 +175,17 @@ def run_training(
 
     with open(obj_dir / "model" / "object_model.json", "w", encoding="utf-8") as f:
         json.dump({
-            "object_id": int(object_label_id),
+            "object_id": obj_id,
             "mode": "object_training",
-            "n_parent_obj_anchors": int(n_parent_obj_anchors),
-            "n_final_anchors": int(summary.get("n_final_anchors", 0)),
+            "n_parent_obj_anchors": n_parent_obj_anchors,
+            "n_final_anchors": summary.get("n_final_anchors", 0),
         }, f, indent=2)
     with open(obj_dir / "training_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     logger.info(
-        "Phase 7 complete for obj %d: anchors=%d final_loss=%.5f",
-        object_label_id, int(summary.get("n_final_anchors", 0)), float(summary.get("final_loss", 0.0)),
+        "Phase 7 done: obj %d anchors=%d final_loss=%.5f",
+        obj_id, summary.get("n_final_anchors", 0), summary.get("final_loss", 0.0),
     )
     summary["_gaussians"] = scratch["gaussians"]
     return summary

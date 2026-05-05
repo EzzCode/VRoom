@@ -26,7 +26,6 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import List
 
 import numpy as np
 import torch
@@ -69,7 +68,7 @@ def run(
     *,
     model_path: str,
     output_root: str | Path,
-    object_ids: List[int],
+    object_ids: list[int],
     iterations: int = 1200,
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
@@ -105,11 +104,11 @@ def run(
         model_path, first_id,
     )
 
-    parent_label_counts_pre = label_anchor_counts(gaussians)
+    counts_pre = label_anchor_counts(gaussians)
     logger.info("Parent model anchor counts (pre): %s",
-                {k: v for k, v in sorted(parent_label_counts_pre.items())})
+                {k: v for k, v in sorted(counts_pre.items())})
 
-    per_object_summaries: List[dict] = []
+    per_object_summaries: list[dict] = []
 
     for idx, obj_id in enumerate(object_ids):
         obj_id = int(obj_id)
@@ -129,7 +128,7 @@ def run(
 
         # ── Build comparison cameras BEFORE training ───────────────────────
         compare_cams = None
-        before_obj_frames = before_full_frames = None
+        before_obj = before_full = None
         if not skip_compare:
             ref_cam_pos = scope.cam_centers_visible_W.mean(axis=0).astype(np.float32)
             object_half_size = float(np.linalg.norm(
@@ -142,12 +141,12 @@ def run(
                 orbit_radius=float(scope.radius),
                 up=np.asarray(scope.up_W, dtype=np.float32),
                 ref_cam_position=ref_cam_pos,
-                n_views=int(n_compare_views),
+                n_views=n_compare_views,
             )
-            before_obj_frames = render_with_orbit(
+            before_obj = render_with_orbit(
                 gaussians, pipe_config, compare_cams, object_label_id=obj_id,
             )
-            before_full_frames = render_with_orbit(
+            before_full = render_with_orbit(
                 gaussians, pipe_config, compare_cams, object_label_id=None,
             )
 
@@ -163,24 +162,24 @@ def run(
                 pipe_config=pipe_config,
                 scope=scope,
                 local_sv3d=local_sv3d,
-                iterations=int(iterations),
-                hallucination_weight=float(hallucination_weight),
-                real_weight=float(real_weight),
-                novel_rgb_weight=float(novel_rgb_weight),
-                hallucination_rgb_scale=float(hallucination_rgb_scale),
-                depth_weight=float(depth_weight),
-                depth_start_iter=int(depth_start_iter),
-                depth_front_weight=float(depth_front_weight),
-                depth_back_weight=float(depth_back_weight),
-                fov_y_deg=float(fov_y_deg),
-                colmap_init_target_points=int(colmap_init_target_points),
-                enable_densification=bool(enable_densification),
-                max_anchor_count=int(max_anchor_count),
-                densify_grad_threshold=float(densify_grad_threshold),
-                densify_extra_ratio=float(densify_extra_ratio),
-                min_halluc_iou=float(min_halluc_iou),
-                min_halluc_area_ratio=float(min_halluc_area_ratio),
-                max_halluc_area_ratio=float(max_halluc_area_ratio),
+                iterations=iterations,
+                hallucination_weight=hallucination_weight,
+                real_weight=real_weight,
+                novel_rgb_weight=novel_rgb_weight,
+                hallucination_rgb_scale=hallucination_rgb_scale,
+                depth_weight=depth_weight,
+                depth_start_iter=depth_start_iter,
+                depth_front_weight=depth_front_weight,
+                depth_back_weight=depth_back_weight,
+                fov_y_deg=fov_y_deg,
+                colmap_init_target_points=colmap_init_target_points,
+                enable_densification=enable_densification,
+                max_anchor_count=max_anchor_count,
+                densify_grad_threshold=densify_grad_threshold,
+                densify_extra_ratio=densify_extra_ratio,
+                min_halluc_iou=min_halluc_iou,
+                min_halluc_area_ratio=min_halluc_area_ratio,
+                max_halluc_area_ratio=max_halluc_area_ratio,
             )
             obj_gaussians = summary.pop("_gaussians", None)
         except Exception as e:
@@ -192,19 +191,19 @@ def run(
         # ── Phase 8: before/after renders ─────────────────────────────────
         if compare_cams is not None and not skip_compare and obj_gaussians is not None:
             try:
-                after_obj_frames = render_with_orbit(
+                after_obj = render_with_orbit(
                     obj_gaussians, pipe_config, compare_cams, object_label_id=None,
                 )
-                after_full_frames = render_composited_with_orbit(
+                after_full = render_composited_with_orbit(
                     gaussians, obj_gaussians, pipe_config, compare_cams, object_label_id=obj_id,
                 )
                 save_compare_grid(
-                    before_obj_frames, after_obj_frames,
+                    before_obj, after_obj,
                     renders_dir / "object_only",
                     prefix="obj",
                 )
                 save_compare_grid(
-                    before_full_frames, after_full_frames,
+                    before_full, after_full,
                     renders_dir / "full_scene",
                     prefix="scene",
                 )
@@ -213,10 +212,10 @@ def run(
                 logger.exception("Phase 8 compare-render failed for obj %d: %s", obj_id, e)
 
     # ── Final model export ────────────────────────────────────────────────
-    parent_label_counts_post = label_anchor_counts(gaussians)
+    counts_post = label_anchor_counts(gaussians)
     metadata = build_reintegration_metadata(
-        parent_label_counts_pre=parent_label_counts_pre,
-        parent_label_counts_post=parent_label_counts_post,
+        parent_label_counts_pre=counts_pre,
+        parent_label_counts_post=counts_post,
         per_object_summaries=per_object_summaries,
         reference_model_path=str(model_path),
     )
@@ -226,7 +225,7 @@ def run(
         # For a single object the scene package lives next to its model;
         # for multiple objects it aggregates at output_root/scene/.
         scene_out = (
-            output_root / f"obj_{int(object_ids[0])}"
+            output_root / f"obj_{object_ids[0]}"
             if len(object_ids) == 1
             else output_root
         )
@@ -255,28 +254,28 @@ def run(
 
     if debug:
         from object_isolation.debug.visualize_phase6 import run_debug
-        for obj_id in object_ids:
+        for oid in object_ids:
             run_debug(
                 model_path=model_path,
-                object_id=int(obj_id),
+                object_id=int(oid),
                 output_root=str(output_root),
-                iterations=int(iterations),
-                hallucination_weight=float(hallucination_weight),
-                real_weight=float(real_weight),
-                novel_rgb_weight=float(novel_rgb_weight),
-                hallucination_rgb_scale=float(hallucination_rgb_scale),
-                depth_weight=float(depth_weight),
-                depth_start_iter=int(depth_start_iter),
-                depth_front_weight=float(depth_front_weight),
-                depth_back_weight=float(depth_back_weight),
-                fov_y_deg=float(fov_y_deg),
-                colmap_init_target_points=int(colmap_init_target_points),
-                enable_densification=bool(enable_densification),
-                max_anchor_count=int(max_anchor_count),
-                densify_grad_threshold=float(densify_grad_threshold),
-                densify_extra_ratio=float(densify_extra_ratio),
-                n_compare_views=int(n_compare_views),
-                no_run=True,  # pipeline already ran above
+                iterations=iterations,
+                hallucination_weight=hallucination_weight,
+                real_weight=real_weight,
+                novel_rgb_weight=novel_rgb_weight,
+                hallucination_rgb_scale=hallucination_rgb_scale,
+                depth_weight=depth_weight,
+                depth_start_iter=depth_start_iter,
+                depth_front_weight=depth_front_weight,
+                depth_back_weight=depth_back_weight,
+                fov_y_deg=fov_y_deg,
+                colmap_init_target_points=colmap_init_target_points,
+                enable_densification=enable_densification,
+                max_anchor_count=max_anchor_count,
+                densify_grad_threshold=densify_grad_threshold,
+                densify_extra_ratio=densify_extra_ratio,
+                n_compare_views=n_compare_views,
+                no_run=True,
             )
 
     return metadata
