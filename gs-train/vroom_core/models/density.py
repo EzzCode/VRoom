@@ -16,11 +16,11 @@ import torch
 
 @dataclass
 class DensityState:
-    anchor_opacity: torch.Tensor
-    anchor_visits: torch.Tensor
+    anchor_opacity: torch.Tensor 
+    anchor_visits: torch.Tensor # counts how many times the anchor was drawn on the screen
     offset_gradients: torch.Tensor
-    offset_visits: torch.Tensor
-    offset_opacity: torch.Tensor
+    offset_visits: torch.Tensor # counts how many times and offeset was drawn on the screen
+    offset_opacity: torch.Tensor 
     max_radii: torch.Tensor
 
     @classmethod
@@ -54,31 +54,33 @@ class DensificationController:
         Supports both ``pruning_type in {'mean', 'max'}`` and
         ``growing_type in {'mean', 'max'}``.
         """
-        selection = render_pkg["selection_mask"]
-        visible = render_pkg["visible_mask"]
-        opacity = render_pkg["opacity"]
-        grad_points = render_pkg["viewspace_points"]
-        pixel_hits = render_pkg["visibility_filter"]
-        radii = render_pkg["radii"]
+        selection = render_pkg["selection_mask"] # a boolean mask indicating which child gaussians were selected for rendering. having opacity higher than a certain threshold. check decoder.py
+        visible = render_pkg["visible_mask"] # a boolean mask indicating which anchors were visible in the current frame.
+        opacity = render_pkg["opacity"] # children that survived the selection mask opacities
+        grad_points = render_pkg["viewspace_points"]  # 2D (x,y) tensor representin the center of where the 3D gaussian landed on the 2D screen. these have the .grad attribute attached tgat will be populated to tell us how to fix its physical position.
+        pixel_hits = render_pkg["visibility_filter"] # a boolean mask for children that survived after painting. after painting is completed some gaussian may end up not visible. or if its radii is small it doesn't cover a single pixel
+        radii = render_pkg["radii"] 
 
+        # if zero parent anchors are visible exit early
         if visible.numel() == 0:
             return
-        n_visible = int(visible.sum().item())
+       
+        n_visible = int(visible.sum().item()) # number of visible anchors
 
         # --- anchor-level opacity statistics ---
         per_offset_opacity = torch.zeros(
             (n_visible * self.n_offsets,), device=self.device
         )
-        per_offset_opacity[selection] = opacity.detach().view(-1)
-        opacity_matrix = per_offset_opacity.view(n_visible, self.n_offsets)
+        per_offset_opacity[selection] = opacity.detach().view(-1) # detach means we cut it from computation graph. we dont need to backprop through opacity
+        opacity_matrix = per_offset_opacity.view(n_visible, self.n_offsets) # matrix with visible anchors as rows and offsets as columns
 
-        pruning_mode = getattr(opt, "pruning_type", "mean")
-        if pruning_mode == "max":
+        pruning_mode = getattr(opt, "pruning_type", "mean") # default is mean mode
+        if pruning_mode == "max": # if using max mode 
             batch_score = torch.abs(opacity_matrix.sum(dim=1, keepdim=True))
             self.state.anchor_opacity[visible] = torch.maximum(
                 self.state.anchor_opacity[visible], batch_score
             )
-        else:
+        else: # if using mean mode
             active_counts = (
                 selection.view(n_visible, self.n_offsets)
                 .float()
@@ -96,7 +98,7 @@ class DensificationController:
         )
         offset_flags = torch.zeros_like(
             self.state.offset_gradients, dtype=torch.bool
-        ).squeeze(1)
+        ).squeeze(1) # repeat visible to the number of offsets 
         offset_flags[per_offset_visible] = selection
         temp = offset_flags.clone()
         offset_flags[temp] = pixel_hits
@@ -134,31 +136,31 @@ class DensificationController:
         growing_mode = getattr(opt, "growing_type", "mean")
         if growing_mode == "max":
             raw_grads = self.state.offset_gradients.nan_to_num(0.0).view(-1)
-            off_opacity = (
+            avg_offset_opacity = (
                 self.state.offset_opacity / self.state.offset_visits.clamp(min=1.0)
             ).nan_to_num(0.0).view(-1)
-            scores = raw_grads * self.state.max_radii * torch.pow(off_opacity, 0.2)
-            ready = (
+            scores = raw_grads * self.state.max_radii * torch.pow(avg_offset_opacity, 0.2)
+            commonly_visited_mask = (
                 self.state.offset_visits.view(-1) > opt.update_interval * opt.success_threshold * 0.5
             )
-            ready = torch.logical_and(ready, off_opacity > 0.15)
+            commonly_visited_mask = torch.logical_and(commonly_visited_mask, avg_offset_opacity > 0.15)
         else:
             scores = (
                 self.state.offset_gradients / self.state.offset_visits.clamp(min=1.0)
             ).nan_to_num(0.0).view(-1)
-            ready = (
+            commonly_visited_mask = (
                 self.state.offset_visits.view(-1) > opt.update_interval * opt.success_threshold * 0.5
             )
 
         # --- grow new anchors across multiple scales ---
-        added = self._hierarchical_grow(model, opt, scores, ready, iteration)
+        added = self._hierarchical_grow(model, opt, scores, commonly_visited_mask, iteration)
 
         # --- pad density state buffers after growing ---
-        self._pad_offset_buffers(model, opt, ready)
+        self._pad_offset_buffers(model, opt, commonly_visited_mask)
 
         # --- prune low-contribution anchors ---
-        # Note: _hierarchical_grow already extended anchor_opacity/visits for new
-        # anchors, so _compute_prune_mask already returns the correct total size.
+        # Note: _hierarchical_grow alcommonly_visited_mask extended anchor_opacity/visits for new
+        # anchors, so _compute_prune_mask alcommonly_visited_mask returns the correct total size.
         prune_mask = self._compute_prune_mask(opt)
         if prune_mask.any():
             model.prune_anchor(prune_mask)
@@ -191,7 +193,7 @@ class DensificationController:
     # ------------------------------------------------------------------
 
     def _hierarchical_grow(
-        self, model, opt, scores: torch.Tensor, ready: torch.Tensor, iteration: int
+        self, model, opt, scores: torch.Tensor, commonly_visited_mask: torch.Tensor, iteration: int
     ) -> int:
         """Grow anchors at ``update_depth`` progressively coarser scales.
 
@@ -214,7 +216,7 @@ class DensificationController:
 
             # --- threshold grows exponentially per level ---
             level_threshold = base_threshold * ((hierarchy_factor // 2) ** level)
-            above_threshold = (scores >= level_threshold) & ready
+            above_threshold = (scores >= level_threshold) & commonly_visited_mask
 
             # --- pad candidate mask to match current (possibly larger) field ---
             current_n_offsets = field.anchor.shape[0] * self.n_offsets
@@ -225,9 +227,12 @@ class DensificationController:
                     dim=0,
                 )
 
-            # --- stochastic thinning: fewer candidates at deeper levels ---
-            keep_prob = 1.0 - 0.5 ** (level + 1)
-            stochastic_filter = torch.rand_like(above_threshold.float()) > keep_prob
+            # --- stochastic thinning: survival rate *increases* with depth ---
+            # rand > 0.5**(level+1)
+            # level 0 → 50% survive, level 1 → 75%, level 2 → 87.5% …
+            # Deeper levels compensate for their stricter gradient threshold by
+            # keeping more of the candidates that did pass it.
+            stochastic_filter = torch.rand_like(above_threshold.float()) > (0.5 ** (level + 1))
             candidates = above_threshold & stochastic_filter.to(self.device)
 
             if not candidates.any():
@@ -395,14 +400,14 @@ class DensificationController:
     # Post-densification state management
     # ------------------------------------------------------------------
 
-    def _pad_offset_buffers(self, model, opt, ready: torch.Tensor) -> None:
+    def _pad_offset_buffers(self, model, opt, commonly_visited_mask: torch.Tensor) -> None:
         """Zero-out visited offset slots and pad buffers for newly grown anchors."""
         total_offsets = model.field.anchor.shape[0] * self.n_offsets
 
-        ready = ready[: self.state.offset_visits.shape[0]]
-        self.state.offset_visits[ready] = 0
-        self.state.offset_gradients[ready] = 0
-        self.state.offset_opacity[ready] = 0
+        commonly_visited_mask = commonly_visited_mask[: self.state.offset_visits.shape[0]]
+        self.state.offset_visits[commonly_visited_mask] = 0
+        self.state.offset_gradients[commonly_visited_mask] = 0
+        self.state.offset_opacity[commonly_visited_mask] = 0
 
         deficit = total_offsets - self.state.offset_visits.shape[0]
         if deficit > 0:
