@@ -35,7 +35,7 @@ import numpy as np
 
 from .coordinate_frames import LocalSV3D
 from .diffusion_priors.base import DiffusionPriorBackend, HallucinatedView
-from .scope import ObjectScope
+from .object_scope import ObjectScope
 
 logger = logging.getLogger(__name__)
 

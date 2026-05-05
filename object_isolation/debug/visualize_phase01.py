@@ -29,7 +29,7 @@ from target_replenishment.core.objectgs_bridge import (
 )
 from target_replenishment.core.diagnostics import overlay_aabb
 
-from object_isolation.core.scope import (
+from object_isolation.core.object_scope import (
     discover_object_scope, find_uncovered_azimuth_sectors,
 )
 from object_isolation.core.coordinate_frames import WorldLocal, LocalSV3D, R_LV

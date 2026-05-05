@@ -23,7 +23,7 @@ _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from object_isolation.core.scope import discover_object_scope
+from object_isolation.core.object_scope import discover_object_scope
 from object_isolation.core.frame_scoring import run_scoring, WEIGHTS
 
 logger = logging.getLogger(__name__)

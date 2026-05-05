@@ -1,4 +1,4 @@
-"""Phase 6 — Object isolation training pipeline.
+"""Phases 6–8 — Object isolation training pipeline.
 
 Assumes Phases 0–5 have already run (``obj_<id>/phase5/hallucination_index.json`` must exist).
 
@@ -9,14 +9,14 @@ Per object:
 
 Usage::
 
-    python -m object_isolation.run_phase6 \
+    python -m object_isolation.run_phases \
         --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \
         --output_root object_isolation/outputs \
         --object_ids 8 \
         --iterations 1200
 
     # Run then immediately build debug visuals:
-    python -m object_isolation.run_phase6 ... --debug
+    python -m object_isolation.run_phases ... --debug
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from object_isolation.core.scope import discover_object_scope
-from object_isolation.core.training import run_training
+from object_isolation.core.object_scope import discover_object_scope
+from object_isolation.core.pipeline import run_pipeline
 from object_isolation.core.reintegration import (
     build_orbit_cameras, render_with_orbit, save_compare_grid,
     save_final_model, save_scene_package, build_reintegration_metadata,
@@ -153,7 +153,7 @@ def run(
         # ── Phase 6/7: align hallucinations + train object model ───────────
         obj_gaussians = None
         try:
-            summary = run_training(
+            summary = run_pipeline(
                 model_path=model_path,
                 object_label_id=obj_id,
                 halluc_index_path=str(halluc_index),
@@ -250,10 +250,10 @@ def run(
             "metadata": metadata,
         }, f, indent=2)
 
-    logger.info("Phase 6 pipeline complete. Output -> %s", final_output)
+    logger.info("Phases 6–8 complete. Output -> %s", final_output)
 
     if debug:
-        from object_isolation.debug.visualize_phase6 import run_debug
+        from object_isolation.debug.visualize_phase06 import run_debug
         for oid in object_ids:
             run_debug(
                 model_path=model_path,
@@ -282,7 +282,7 @@ def run(
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Object-isolation Phase 6 pipeline orchestrator")
+    p = argparse.ArgumentParser(description="Object-isolation Phases 6–8 pipeline orchestrator")
     p.add_argument("--model_path", required=True,
                    help="Path to trained ObjectGS output dir (containing point_cloud/, cameras.json).")
     p.add_argument("--output_root", default="object_isolation/outputs",

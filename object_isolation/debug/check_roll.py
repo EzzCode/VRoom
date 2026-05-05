@@ -8,7 +8,7 @@ OUT = Path(r"d:\Engineering\CUFE\GP2\VRoom\object_isolation\outputs\obj_9\debug_
 OUT.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, ROOT)
 
-from object_isolation.core.scope import discover_object_scope
+from object_isolation.core.object_scope import discover_object_scope
 from object_isolation.core.coordinate_frames import look_at_w2c
 from target_replenishment.core.objectgs_bridge import render_view, create_virtual_camera
 

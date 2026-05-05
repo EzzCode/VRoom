@@ -21,7 +21,7 @@ _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from object_isolation.run_phase6 import run as _run_pipeline
+from object_isolation.run_phases import run as _run_pipeline
 
 logger = logging.getLogger(__name__)
 

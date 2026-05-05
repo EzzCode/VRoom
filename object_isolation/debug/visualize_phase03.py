@@ -26,7 +26,7 @@ from target_replenishment.core.objectgs_bridge import (
     create_virtual_camera, render_view,
 )
 
-from object_isolation.core.scope import discover_object_scope
+from object_isolation.core.object_scope import discover_object_scope
 from object_isolation.core.extraction import (
     run_extraction, _resolve_id_map_path, _find_image_file,
 )

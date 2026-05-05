@@ -34,7 +34,7 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -176,24 +176,24 @@ def _audit_mask_alignment(
         reasons.append("hallucination_mask_empty")
     if ref_area < 200:
         reasons.append("reference_mask_empty")
-    if iou < float(min_iou):
-        reasons.append(f"mask_iou_{iou:.3f}_lt_{float(min_iou):.3f}")
-    if bbox_iou < float(min_bbox_iou):
-        reasons.append(f"bbox_iou_{bbox_iou:.3f}_lt_{float(min_bbox_iou):.3f}")
-    if centroid_distance > float(max_centroid_distance):
-        reasons.append(f"centroid_dist_{centroid_distance:.3f}_gt_{float(max_centroid_distance):.3f}")
-    if area_ratio < float(min_area_ratio) or area_ratio > float(max_area_ratio):
-        reasons.append(f"area_ratio_{area_ratio:.3f}_outside_{float(min_area_ratio):.3f}_{float(max_area_ratio):.3f}")
+    if iou < min_iou:
+        reasons.append(f"mask_iou_{iou:.3f}_lt_{min_iou:.3f}")
+    if bbox_iou < min_bbox_iou:
+        reasons.append(f"bbox_iou_{bbox_iou:.3f}_lt_{min_bbox_iou:.3f}")
+    if centroid_distance > max_centroid_distance:
+        reasons.append(f"centroid_dist_{centroid_distance:.3f}_gt_{max_centroid_distance:.3f}")
+    if area_ratio < min_area_ratio or area_ratio > max_area_ratio:
+        reasons.append(f"area_ratio_{area_ratio:.3f}_outside_{min_area_ratio:.3f}_{max_area_ratio:.3f}")
 
     return {
         "accepted": not reasons,
         "reject_reasons": reasons,
-        "mask_iou": float(iou),
-        "bbox_iou": float(bbox_iou),
-        "centroid_distance_norm": float(centroid_distance),
-        "area_ratio": float(area_ratio),
-        "mask_pixels": int(mask_area),
-        "reference_pixels": int(ref_area),
+        "mask_iou": iou,
+        "bbox_iou": bbox_iou,
+        "centroid_distance_norm": centroid_distance,
+        "area_ratio": area_ratio,
+        "mask_pixels": mask_area,
+        "reference_pixels": ref_area,
     }
 
 
@@ -231,18 +231,18 @@ def _fit_bbox_warp(
     diag = float(np.hypot(mask.shape[1], mask.shape[0]))
     translation_norm = float(np.hypot(translate_x, translate_y) / max(diag, 1.0))
     reasonable = (
-        0.55 <= float(scale_x) <= 1.80
-        and 0.55 <= float(scale_y) <= 1.80
+        0.55 <= scale_x <= 1.80
+        and 0.55 <= scale_y <= 1.80
         and translation_norm <= 0.20
     )
     matrix = np.array([[scale_x, 0.0, translate_x], [0.0, scale_y, translate_y]], dtype=np.float32)
     return matrix, {
-        "bbox_warp_reasonable": bool(reasonable),
-        "bbox_warp_scale_x": float(scale_x),
-        "bbox_warp_scale_y": float(scale_y),
-        "bbox_warp_translate_x": float(translate_x),
-        "bbox_warp_translate_y": float(translate_y),
-        "bbox_warp_translation_norm": float(translation_norm),
+        "bbox_warp_reasonable": reasonable,
+        "bbox_warp_scale_x": scale_x,
+        "bbox_warp_scale_y": scale_y,
+        "bbox_warp_translate_x": translate_x,
+        "bbox_warp_translate_y": translate_y,
+        "bbox_warp_translation_norm": translation_norm,
     }
 
 
@@ -278,14 +278,15 @@ def _centroid_refine_warp(mask: np.ndarray, ref_mask: np.ndarray) -> tuple[np.nd
     if shift_norm > 0.08:
         return None, {
             "centroid_refine_applied": False,
-            "centroid_refine_shift_norm": float(shift_norm),
+            "centroid_refine_shift_norm": shift_norm,
         }
-    matrix = np.array([[1.0, 0.0, float(delta[0])], [0.0, 1.0, float(delta[1])]], dtype=np.float32)
+    dx, dy = float(delta[0]), float(delta[1])
+    matrix = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
     return matrix, {
         "centroid_refine_applied": True,
-        "centroid_refine_dx": float(delta[0]),
-        "centroid_refine_dy": float(delta[1]),
-        "centroid_refine_shift_norm": float(shift_norm),
+        "centroid_refine_dx": dx,
+        "centroid_refine_dy": dy,
+        "centroid_refine_shift_norm": shift_norm,
     }
 
 
@@ -302,25 +303,21 @@ def _similarity_centroid_warp(
     delta = ref_centroid - centroid
     diag = float(np.hypot(mask.shape[1], mask.shape[0]))
     shift_norm = float(np.linalg.norm(delta) / max(diag, 1.0))
-    if shift_norm > 0.08 or not (0.84 <= float(scale) <= 1.16):
+    if shift_norm > 0.08 or not (0.84 <= scale <= 1.16):
         return None, {
             "similarity_refine_applied": False,
-            "similarity_scale": float(scale),
-            "centroid_refine_shift_norm": float(shift_norm),
+            "similarity_scale": scale,
+            "centroid_refine_shift_norm": shift_norm,
         }
-    matrix = np.array(
-        [
-            [float(scale), 0.0, float(ref_centroid[0] - float(scale) * centroid[0])],
-            [0.0, float(scale), float(ref_centroid[1] - float(scale) * centroid[1])],
-        ],
-        dtype=np.float32,
-    )
+    cx0 = float(ref_centroid[0] - scale * centroid[0])
+    cy0 = float(ref_centroid[1] - scale * centroid[1])
+    matrix = np.array([[scale, 0.0, cx0], [0.0, scale, cy0]], dtype=np.float32)
     return matrix, {
         "similarity_refine_applied": True,
-        "similarity_scale": float(scale),
+        "similarity_scale": scale,
         "centroid_refine_dx": float(delta[0]),
         "centroid_refine_dy": float(delta[1]),
-        "centroid_refine_shift_norm": float(shift_norm),
+        "centroid_refine_shift_norm": shift_norm,
     }
 
 
@@ -482,7 +479,7 @@ def _recover_hallucination_alignment(
             candidates.append((centroid_rgb, centroid_mask, centroid_audit))
 
         for scale in (0.86, 0.90, 0.94, 0.96, 0.98, 1.02, 1.04, 1.06, 1.10, 1.14):
-            sim_matrix, sim_meta = _similarity_centroid_warp(flip_mask, ref_mask, scale=float(scale))
+            sim_matrix, sim_meta = _similarity_centroid_warp(flip_mask, ref_mask, scale=scale)
             if sim_matrix is None:
                 continue
             sim_rgb, sim_mask = _warp_rgb_mask(flip_rgb, flip_mask, sim_matrix)
@@ -496,7 +493,7 @@ def _recover_hallucination_alignment(
             candidates.append((sim_rgb, sim_mask, sim_audit))
 
         matrix, warp_meta = _fit_bbox_warp(flip_mask, ref_mask)
-        if matrix is None or not bool(warp_meta.get("bbox_warp_reasonable", False)):
+        if matrix is None or not warp_meta.get("bbox_warp_reasonable", False):
             continue
         warp_rgb, warp_mask = _warp_rgb_mask(flip_rgb, flip_mask, matrix)
         warp_audit = audit(warp_mask)
@@ -521,16 +518,16 @@ def _recover_hallucination_alignment(
             candidates.append((refined_rgb, refined_mask, refined_audit))
 
     original_audit = candidates[0][2]
-    accepted_candidates = [c for c in candidates if bool(c[2].get("accepted", False))]
-    if bool(original_audit.get("accepted", False)):
+    accepted_candidates = [c for c in candidates if c[2].get("accepted", False)]
+    if original_audit.get("accepted", False):
         best_rgb, best_mask, best_audit = candidates[0]
     elif accepted_candidates:
         best_rgb, best_mask, best_audit = max(
             accepted_candidates,
             key=lambda item: (
-                float(item[2].get("mask_iou", 0.0)),
-                float(item[2].get("bbox_iou", 0.0)),
-                -float(item[2].get("centroid_distance_norm", 1.0)),
+                item[2].get("mask_iou", 0.0),
+                item[2].get("bbox_iou", 0.0),
+                -item[2].get("centroid_distance_norm", 1.0),
             ),
         )
     else:
@@ -539,23 +536,19 @@ def _recover_hallucination_alignment(
     best_seen = max(
         candidates,
         key=lambda item: (
-            float(item[2].get("mask_iou", 0.0)),
-            float(item[2].get("bbox_iou", 0.0)),
-            -float(item[2].get("centroid_distance_norm", 1.0)),
+            item[2].get("mask_iou", 0.0),
+            item[2].get("bbox_iou", 0.0),
+            -item[2].get("centroid_distance_norm", 1.0),
         ),
     )[2]
     best_audit["original_alignment"] = {
-        "mask_iou": float(original_audit.get("mask_iou", 0.0)),
-        "bbox_iou": float(original_audit.get("bbox_iou", 0.0)),
-        "centroid_distance_norm": float(original_audit.get("centroid_distance_norm", 1.0)),
-        "area_ratio": float(original_audit.get("area_ratio", 0.0)),
+        k: original_audit.get(k, d)
+        for k, d in (("mask_iou", 0.0), ("bbox_iou", 0.0), ("centroid_distance_norm", 1.0), ("area_ratio", 0.0))
     }
     best_audit["best_rejected_candidate"] = {
         "alignment_transform": best_seen.get("alignment_transform", "identity"),
-        "mask_iou": float(best_seen.get("mask_iou", 0.0)),
-        "bbox_iou": float(best_seen.get("bbox_iou", 0.0)),
-        "centroid_distance_norm": float(best_seen.get("centroid_distance_norm", 1.0)),
-        "area_ratio": float(best_seen.get("area_ratio", 0.0)),
+        **{k: best_seen.get(k, d)
+           for k, d in (("mask_iou", 0.0), ("bbox_iou", 0.0), ("centroid_distance_norm", 1.0), ("area_ratio", 0.0))},
     }
     return best_rgb, best_mask.astype(bool), best_audit
 
@@ -578,7 +571,7 @@ def build_hallucinated_supervision_views(
     aabb_min_W: Optional[np.ndarray] = None,
     aabb_max_W: Optional[np.ndarray] = None,
     sv3d_fill_frac: float = 0.85,
-) -> List[dict]:
+) -> list[dict]:
     """Read a Phase-5 hallucination manifest and return hallucinated views.
 
     Args:
@@ -604,7 +597,7 @@ def build_hallucinated_supervision_views(
     frames = manifest.get("frames", [])
     candidates = list(frames)
     if not include_conditioning:
-        candidates = [fr for fr in candidates if not bool(fr.get("is_conditioning"))]
+        candidates = [fr for fr in candidates if not fr.get("is_conditioning")]
 
     if not candidates:
         raise RuntimeError(
@@ -620,7 +613,7 @@ def build_hallucinated_supervision_views(
 
     centroid_W = np.asarray(local_sv3d.world_local.centroid_W, dtype=np.float64)
 
-    views: List[dict] = []
+    views: list[dict] = []
     audits: list[dict] = []
     for fr in candidates:
         rgba_path = _resolve_path(fr["out_rgba_path"], manifest_dir=halluc_index_path.parent)
@@ -674,11 +667,11 @@ def build_hallucinated_supervision_views(
             rgb,
             mask,
             ref_mask,
-            min_iou=float(min_alignment_iou),
-            min_bbox_iou=float(min_alignment_bbox_iou),
-            max_centroid_distance=float(max_alignment_centroid_distance),
-            min_area_ratio=float(min_alignment_area_ratio),
-            max_area_ratio=float(max_alignment_area_ratio),
+            min_iou=min_alignment_iou,
+            min_bbox_iou=min_alignment_bbox_iou,
+            max_centroid_distance=max_alignment_centroid_distance,
+            min_area_ratio=min_alignment_area_ratio,
+            max_area_ratio=max_alignment_area_ratio,
         )
         original_rgba_path = rgba_path
         if audit["accepted"] and str(audit.get("alignment_transform", "identity")) != "identity":
@@ -691,7 +684,7 @@ def build_hallucinated_supervision_views(
             _save_aligned_rgba(rgb, mask, rgba_path)
         audit.update({
             "frame_index": int(fr.get("index", -1)),
-            "manifest_accepted": bool(fr.get("accepted", False)),
+            "manifest_accepted": fr.get("accepted", False),
             "manifest_iou": fr.get("iou_with_objgs"),
             "azimuth_V_deg": float(fr["azimuth_V_deg"]),
             "elevation_V_deg": float(fr["elevation_V_deg"]),
@@ -731,12 +724,10 @@ def build_hallucinated_supervision_views(
                 np.asarray(R_w2c, dtype=np.float64),
                 np.asarray(T_w2c, dtype=np.float64),
                 K.astype(np.float64),
-                sv3d_fill_frac=float(sv3d_fill_frac),
-                target_size=int(res),
+                sv3d_fill_frac=sv3d_fill_frac,
+                target_size=res,
             )
-            rgb, mask = _denormalize_to_world_scale(
-                rgb, mask, ws, target_size=int(res), center_uv=centroid_uv,
-            )
+            rgb, mask = _denormalize_to_world_scale(rgb, mask, ws, target_size=res, center_uv=centroid_uv)
 
         views.append({
             "source": "hallucinated",
@@ -754,7 +745,7 @@ def build_hallucinated_supervision_views(
                 "azimuth_offset_deg": az_V,
                 "elevation_offset_deg": el_V,
                 "azimuth_world_rad": float(np.deg2rad(az_V)),
-                "is_conditioning": bool(fr.get("is_conditioning", False)),
+                "is_conditioning": fr.get("is_conditioning", False),
                 "frame_index": int(fr.get("index", 0)),
                 "alignment_iou": audit["mask_iou"],
                 "alignment_bbox_iou": audit["bbox_iou"],
@@ -762,7 +753,7 @@ def build_hallucinated_supervision_views(
                 "alignment_area_ratio": audit["area_ratio"],
                 "alignment_transform": audit.get("alignment_transform", "identity"),
             },
-            "weight": float(weight),
+            "weight": weight,
         })
 
     if alignment_audit_path is not None:
@@ -796,7 +787,7 @@ def build_real_supervision_views(
     *,
     weight: float = 1.0,
     target_long_edge: int = 576,
-) -> List[dict]:
+) -> list[dict]:
     """Read Phase-3 real extractions as camera-aligned supervision views."""
     extraction_index_path = Path(extraction_index_path)
     if not extraction_index_path.exists():
@@ -806,7 +797,7 @@ def build_real_supervision_views(
     with open(extraction_index_path) as f:
         manifest = json.load(f)
 
-    views: List[dict] = []
+    views: list[dict] = []
     for fr in manifest.get("frames", []):
         cam_index = int(fr["cam_index"])
         if cam_index < 0 or cam_index >= len(scope.cameras):
@@ -825,7 +816,7 @@ def build_real_supervision_views(
         rgb, mask = _rgba_to_rgb_mask(rgba)
         K = np.asarray(cam_p["K"], dtype=np.float32)
         rgb, mask, K, width, height = _resize_rgb_mask_camera(
-            rgb, mask, K, target_long_edge=int(target_long_edge)
+            rgb, mask, K, target_long_edge=target_long_edge
         )
 
         views.append({
@@ -845,7 +836,7 @@ def build_real_supervision_views(
                 "is_conditioning": False,
                 "frame_index": cam_index,
             },
-            "weight": float(weight),
+            "weight": weight,
         })
 
     logger.info(
@@ -872,7 +863,7 @@ def build_joint_supervision_views(
     min_halluc_area_ratio: float = 0.65,
     max_halluc_area_ratio: float = 1.45,
     hallucination_alignment_audit_path: str | Path | None = None,
-) -> List[dict]:
+) -> list[dict]:
     """Build one aligned training set containing real and hallucinated views."""
     real_views = build_real_supervision_views(
         extraction_index_path=extraction_index_path,
@@ -880,8 +871,8 @@ def build_joint_supervision_views(
         weight=real_weight,
         target_long_edge=real_target_long_edge,
     )
-    _aabb_min = np.asarray(scope.aabb_min_W, dtype=np.float64) if scope is not None else None
-    _aabb_max = np.asarray(scope.aabb_max_W, dtype=np.float64) if scope is not None else None
+    aabb_min = np.asarray(scope.aabb_min_W, dtype=np.float64) if scope is not None else None
+    aabb_max = np.asarray(scope.aabb_max_W, dtype=np.float64) if scope is not None else None
     hallucinated_views = build_hallucinated_supervision_views(
         halluc_index_path=halluc_index_path,
         local_sv3d=local_sv3d,
@@ -890,11 +881,11 @@ def build_joint_supervision_views(
         target_resolution=hallucination_resolution,
         up_W_override=up_W_override,
         include_conditioning=include_conditioning,
-        min_alignment_iou=float(min_hallucination_alignment_iou),
-        min_alignment_area_ratio=float(min_halluc_area_ratio),
-        max_alignment_area_ratio=float(max_halluc_area_ratio),
-        aabb_min_W=_aabb_min,
-        aabb_max_W=_aabb_max,
+        min_alignment_iou=min_hallucination_alignment_iou,
+        min_alignment_area_ratio=min_halluc_area_ratio,
+        max_alignment_area_ratio=max_halluc_area_ratio,
+        aabb_min_W=aabb_min,
+        aabb_max_W=aabb_max,
         alignment_audit_path=hallucination_alignment_audit_path,
     )
     views = real_views + hallucinated_views
@@ -905,12 +896,12 @@ def build_joint_supervision_views(
     return views
 
 
-def build_supervision_views(*args, **kwargs) -> List[dict]:
+def build_supervision_views(*args, **kwargs) -> list[dict]:
     """Backward-compatible alias for hallucination-only callers."""
     return build_hallucinated_supervision_views(*args, **kwargs)
 
 
-def save_supervision_manifest(views: List[dict], output_path: str | Path) -> Path:
+def save_supervision_manifest(views: list[dict], output_path: str | Path) -> Path:
     """Persist a JSON-serialisable manifest of the in-memory supervision_views.
 
     Useful for debugging / re-running Phase 7 without rebuilding from raw
@@ -941,7 +932,7 @@ def save_supervision_manifest(views: List[dict], output_path: str | Path) -> Pat
             "C_W": cam["position"].tolist(),
             "width": cam["width"],
             "height": cam["height"],
-            "weight": float(v["weight"]),
+            "weight": v["weight"],
         })
 
     with open(output_path, "w", encoding="utf-8") as f:

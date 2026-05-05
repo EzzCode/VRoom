@@ -335,9 +335,9 @@ def run(
         datefmt="%H:%M:%S",
     )
 
-    from object_isolation.core.scope import discover_object_scope
+    from object_isolation.core.object_scope import discover_object_scope
     from object_isolation.core.colmap_init import load_colmap_object_point_cloud
-    from object_isolation.core.training import run_training   # noqa: just to warm imports
+    from object_isolation.core.pipeline import run_pipeline   # noqa: just to warm imports
     from object_isolation.core.dataset_builder import build_joint_supervision_views
 
     output_root_p = Path(output_root)

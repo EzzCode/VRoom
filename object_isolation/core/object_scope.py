@@ -9,7 +9,7 @@ import numpy as np
 
 
 from object_isolation.core.coordinate_frames import WorldLocal, LocalSV3D
-from object_isolation.core.objectgs_model import (
+from object_isolation.core.scene_loader import (
     build_perspective_graph,
     count_visible_anchors,
     estimate_scene_up_from_cameras,

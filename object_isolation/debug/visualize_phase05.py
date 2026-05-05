@@ -24,7 +24,7 @@ _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from object_isolation.core.scope import discover_object_scope
+from object_isolation.core.object_scope import discover_object_scope
 from object_isolation.core.hallucination import run_hallucination
 from object_isolation.core.diffusion_priors.sv3d import SV3DBackend
 
