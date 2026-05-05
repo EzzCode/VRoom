@@ -341,7 +341,7 @@ if __name__ == "__main__":
 	parser.add_argument("--sam_ckpt", default="Module-1/models/sam3.pt", help="Ultralytics SAM3 checkpoint name or .pt path")
 	parser.add_argument("--device", default="cuda", help="Device ('cuda' or 'cpu')")
 	parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
-	parser.add_argument("--text_prompts", nargs="+", default=["desk", "table", "chair", "couch", "sofa", "cabinet"], help="Open-vocabulary text prompts")
+	parser.add_argument("--text_prompts", nargs="+", default=["object"], help="Open-vocabulary text prompts")
 	parser.add_argument("--min_mask_area", type=int, default=120, help="Minimum kept mask area in pixels")
 	parser.add_argument("--max_area_ratio", type=float, default=0.50, help="Drop masks larger than this image area ratio")
 	parser.add_argument("--border_touch_threshold", type=float, default=0.35, help="Drop masks with high border-touch ratio")
