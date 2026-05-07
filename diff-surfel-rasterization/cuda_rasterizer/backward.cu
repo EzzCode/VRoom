@@ -1008,3 +1008,395 @@ void BACKWARD::render(
         break; // Should never reach here — Python pads to supported sizes
     }
 }
+
+// ===================================================================
+// renderCUDA_v2: Backward with gsplat-style tile_offsets + flatten_ids
+// Only the range-reading and point-list access differ from renderCUDA.
+// All gradient math is identical.
+// ===================================================================
+template <uint32_t C>
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+renderCUDA_v2(
+	const int32_t* __restrict__ tile_offsets,
+	const int32_t* __restrict__ flatten_ids,
+	const int n_isects,
+	int W, int H,
+	float focal_x, float focal_y,
+	const float* __restrict__ bg_color,
+	const float2* __restrict__ points_xy_image,
+	const float4* __restrict__ normal_opacity,
+	const float* __restrict__ transMats,
+	const float* __restrict__ colors,
+	const float* __restrict__ depths,
+	const float* __restrict__ final_Ts,
+	const uint32_t* __restrict__ n_contrib,
+	const float* __restrict__ dL_dpixels,
+	const float* __restrict__ dL_depths,
+	float * __restrict__ dL_dtransMat,
+	float3* __restrict__ dL_dmean2D,
+	float* __restrict__ dL_dnormal3D,
+	float* __restrict__ dL_dopacity,
+	float* __restrict__ dL_dcolors)
+{
+	auto block = cg::this_thread_block();
+	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	const uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	const uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	const uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	const uint32_t pix_id = W * pix.y + pix.x;
+	const float2 pixf = {(float)pix.x, (float)pix.y};
+
+	const bool inside = pix.x < W && pix.y < H;
+
+	// gsplat-style range lookup
+	uint32_t tile_id = block.group_index().y * horizontal_blocks + block.group_index().x;
+	uint32_t n_tiles = horizontal_blocks * ((H + BLOCK_Y - 1) / BLOCK_Y);
+	int32_t range_start = tile_offsets[tile_id];
+	int32_t range_end = (tile_id == n_tiles - 1) ? n_isects : tile_offsets[tile_id + 1];
+
+	const int rounds = ((range_end - range_start + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+	bool done = !inside;
+	int toDo = range_end - range_start;
+
+	__shared__ int collected_id[BLOCK_SIZE];
+	__shared__ float2 collected_xy[BLOCK_SIZE];
+	__shared__ float4 collected_normal_opacity[BLOCK_SIZE];
+	__shared__ float collected_colors[C * BLOCK_SIZE];
+	__shared__ float3 collected_Tu[BLOCK_SIZE];
+	__shared__ float3 collected_Tv[BLOCK_SIZE];
+	__shared__ float3 collected_Tw[BLOCK_SIZE];
+
+	const float T_final = inside ? final_Ts[pix_id] : 0;
+	float T = T_final;
+
+	uint32_t contributor = toDo;
+	const int last_contributor = inside ? n_contrib[pix_id] : 0;
+
+	cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+	const int warp_last_contributor = cg::reduce(warp, last_contributor, cg::greater<int>());
+
+	float accum_rec[C] = { 0 };
+	float dL_dpixel[C];
+
+#if RENDER_AXUTILITY
+	float dL_dreg;
+	float dL_ddepth;
+	float dL_daccum;
+	float dL_dnormal2D[3];
+	const int median_contributor = inside ? n_contrib[pix_id + H * W] : 0;
+	float dL_dmedian_depth;
+
+	if (inside) {
+		dL_ddepth = dL_depths[DEPTH_OFFSET * H * W + pix_id];
+		dL_daccum = dL_depths[ALPHA_OFFSET * H * W + pix_id];
+		dL_dreg = dL_depths[DISTORTION_OFFSET * H * W + pix_id];
+		for (int i = 0; i < 3; i++)
+			dL_dnormal2D[i] = dL_depths[(NORMAL_OFFSET + i) * H * W + pix_id];
+		dL_dmedian_depth = dL_depths[MIDDEPTH_OFFSET * H * W + pix_id];
+	}
+
+	float last_depth = 0;
+	float last_normal[3] = { 0 };
+	float accum_depth_rec = 0;
+	float accum_alpha_rec = 0;
+	float accum_normal_rec[3] = {0};
+	const float final_D = inside ? final_Ts[pix_id + H * W] : 0;
+	const float final_D2 = inside ? final_Ts[pix_id + 2 * H * W] : 0;
+	const float final_A = 1 - T_final;
+	float last_dL_dT = 0;
+#endif
+
+	if (inside){
+		for (int i = 0; i < C; i++)
+			dL_dpixel[i] = dL_dpixels[i * H * W + pix_id];
+	}
+
+	float last_alpha = 0;
+	float last_color[C] = { 0 };
+
+	const float ddelx_dx = 0.5 * W;
+	const float ddely_dy = 0.5 * H;
+
+	// Traverse all Gaussians (back-to-front via flatten_ids)
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	{
+		block.sync();
+		const int progress = i * BLOCK_SIZE + block.thread_rank();
+		if (range_start + progress < range_end)
+		{
+			// Read in REVERSE order (back-to-front), using flatten_ids
+			const int coll_id = flatten_ids[range_end - progress - 1];
+			collected_id[block.thread_rank()] = coll_id;
+			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			collected_normal_opacity[block.thread_rank()] = normal_opacity[coll_id];
+			collected_Tu[block.thread_rank()] = {transMats[9 * coll_id+0], transMats[9 * coll_id+1], transMats[9 * coll_id+2]};
+			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
+			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
+			for (int ii = 0; ii < C; ii++)
+				collected_colors[ii * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + ii];
+		}
+		block.sync();
+
+		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
+		{
+			contributor--;
+
+			if (contributor >= (uint32_t)warp_last_contributor)
+				continue;
+
+			bool valid = inside && (contributor < (uint32_t)last_contributor);
+
+			// Compute ray-splat intersection (identical to original)
+			float2 xy, d;
+			float3 Tu, Tv, Tw, k, l, p;
+			float2 s;
+			float rho3d, rho2d, rho, c_d;
+			float4 nor_o;
+			float normal[3];
+			float opa, power, G, alpha;
+
+			if (valid) {
+				xy = collected_xy[j];
+				Tu = collected_Tu[j];
+				Tv = collected_Tv[j];
+				Tw = collected_Tw[j];
+				k = pix.x * Tw - Tu;
+				l = pix.y * Tw - Tv;
+				p = cross(k, l);
+				if (p.z == 0.0) valid = false;
+			}
+			if (valid) {
+				s = {p.x / p.z, p.y / p.z};
+				rho3d = (s.x * s.x + s.y * s.y);
+				d = {xy.x - pixf.x, xy.y - pixf.y};
+				rho2d = FilterInvSquare * (d.x * d.x + d.y * d.y);
+				rho = min(rho3d, rho2d);
+				c_d = (s.x * Tw.x + s.y * Tw.y) + Tw.z;
+				if (c_d < near_n) valid = false;
+			}
+			if (valid) {
+				nor_o = collected_normal_opacity[j];
+				for (int ch = 0; ch < 3; ch++) normal[ch] = ((float*)&nor_o)[ch];
+				opa = nor_o.w;
+				power = -0.5f * rho;
+				if (power > 0.0f) valid = false;
+			}
+			if (valid) {
+				G = exp(power);
+				alpha = min(0.99f, opa * G);
+				if (alpha < 1.0f / 255.0f) valid = false;
+			}
+
+			if (warp.all(!valid))
+				continue;
+
+			float v_colors[C] = {0};
+			float v_normal3D[3] = {0};
+			float v_transMat[9] = {0};
+			float v_mean2D_x = 0;
+			float v_mean2D_y = 0;
+			float v_opacity = 0;
+
+			if (valid) {
+				const float dL_dalpha = 0.0f; // will be accumulated below
+				float ra = 1.0f / (1.0f - alpha);
+				T *= ra;
+				float fac = alpha * T;
+
+				// Gradient of colors
+				for (int ch = 0; ch < C; ch++)
+					v_colors[ch] = fac * dL_dpixel[ch];
+
+				// Gradient of alpha
+				float dL_dalpha_acc = 0.0f;
+				for (int ch = 0; ch < C; ch++)
+					dL_dalpha_acc += (collected_colors[ch * BLOCK_SIZE + j] * T - accum_rec[ch] * ra) * dL_dpixel[ch];
+
+#if RENDER_AXUTILITY
+				// Normal gradient contribution to alpha
+				for (int ch = 0; ch < 3; ch++) {
+					v_normal3D[ch] = fac * dL_dnormal2D[ch];
+					dL_dalpha_acc += (normal[ch] * T - accum_normal_rec[ch] * ra) * dL_dnormal2D[ch];
+				}
+
+				// Alpha accumulation gradient
+				dL_dalpha_acc += T_final * ra * dL_daccum;
+
+				// Depth gradient
+				float dL_dz = fac * dL_ddepth;
+
+				// Distortion gradient
+				const float m = far_n / (far_n - near_n) * (1 - near_n / c_d);
+				const float dL_dm = 2.0 * (T * dL_dreg) * (m * final_A + final_D2 - m * 2 * final_D);
+				dL_dalpha_acc += dL_dm;
+
+				// Depth-dependent gradient
+				float dL_dmd = fac * dL_dreg * 2.0 * (final_D2 - m * final_A);
+				dL_dz += dL_dmd * far_n * near_n / ((far_n - near_n) * c_d * c_d);
+
+				// Median depth
+				if (contributor == median_contributor - 1) {
+					dL_dz += dL_dmedian_depth;
+				}
+
+				last_dL_dT = dL_dalpha_acc * (-ra);
+				last_alpha = alpha;
+#else
+				dL_dalpha_acc += T_final * ra * 0; // no alpha loss
+#endif
+
+				// Chain through gaussian
+				const float dL_dG = opa * dL_dalpha_acc;
+
+				if (rho3d <= rho2d) {
+					// 3D intersection branch
+					const float2 dL_ds = {dL_dG * (-G * s.x) + dL_dz * Tw.x, dL_dG * (-G * s.y) + dL_dz * Tw.y};
+					const float dL_dpz = -(dL_ds.x * s.x + dL_ds.y * s.y) / p.z;
+					const float dL_dpx = dL_ds.x / p.z;
+					const float dL_dpy = dL_ds.y / p.z;
+					const float3 dL_dp = {dL_dpx, dL_dpy, dL_dpz};
+					const float3 dL_dk = cross(l, dL_dp);
+					const float3 dL_dl = cross(dL_dp, k);
+					const float3 dz_dTw = {s.x, s.y, 1.0};
+					const float3 dL_dTu = {-dL_dk.x, -dL_dk.y, -dL_dk.z};
+					const float3 dL_dTv = {-dL_dl.x, -dL_dl.y, -dL_dl.z};
+					const float3 dL_dTw = {
+						pixf.x * dL_dk.x + pixf.y * dL_dl.x + dL_dz * dz_dTw.x,
+						pixf.x * dL_dk.y + pixf.y * dL_dl.y + dL_dz * dz_dTw.y,
+						pixf.x * dL_dk.z + pixf.y * dL_dl.z + dL_dz * dz_dTw.z};
+					v_transMat[0] = dL_dTu.x; v_transMat[1] = dL_dTu.y; v_transMat[2] = dL_dTu.z;
+					v_transMat[3] = dL_dTv.x; v_transMat[4] = dL_dTv.y; v_transMat[5] = dL_dTv.z;
+					v_transMat[6] = dL_dTw.x; v_transMat[7] = dL_dTw.y; v_transMat[8] = dL_dTw.z;
+				} else {
+					const float dG_ddelx = -G * FilterInvSquare * d.x;
+					const float dG_ddely = -G * FilterInvSquare * d.y;
+					v_mean2D_x = dL_dG * dG_ddelx;
+					v_mean2D_y = dL_dG * dG_ddely;
+					v_transMat[6] = s.x * dL_dz;
+					v_transMat[7] = s.y * dL_dz;
+					v_transMat[8] = dL_dz;
+				}
+
+				v_opacity = G * dL_dalpha_acc;
+
+				// Update running sums for future Gaussians' alpha gradients
+				for (int ch = 0; ch < C; ch++)
+					accum_rec[ch] = last_alpha * accum_rec[ch] + fac * collected_colors[ch * BLOCK_SIZE + j];
+
+#if RENDER_AXUTILITY
+				for (int ch = 0; ch < 3; ch++)
+					accum_normal_rec[ch] = last_alpha * accum_normal_rec[ch] + fac * normal[ch];
+				accum_depth_rec = last_alpha * accum_depth_rec + fac * c_d;
+				accum_alpha_rec = last_alpha * accum_alpha_rec + fac;
+#endif
+			}
+
+			// Warp-level reduction
+			for (int ch = 0; ch < C; ch++)
+				v_colors[ch] = cg::reduce(warp, v_colors[ch], cg::plus<float>());
+			for (int kk = 0; kk < 9; kk++)
+				v_transMat[kk] = cg::reduce(warp, v_transMat[kk], cg::plus<float>());
+			v_mean2D_x = cg::reduce(warp, v_mean2D_x, cg::plus<float>());
+			v_mean2D_y = cg::reduce(warp, v_mean2D_y, cg::plus<float>());
+			for (int ch = 0; ch < 3; ch++)
+				v_normal3D[ch] = cg::reduce(warp, v_normal3D[ch], cg::plus<float>());
+			v_opacity = cg::reduce(warp, v_opacity, cg::plus<float>());
+
+			if (warp.thread_rank() == 0) {
+				const int global_id = collected_id[j];
+				for (int ch = 0; ch < C; ch++)
+					atomicAdd(&(dL_dcolors[global_id * C + ch]), v_colors[ch]);
+				for (int kk = 0; kk < 9; kk++)
+					atomicAdd(&dL_dtransMat[global_id * 9 + kk], v_transMat[kk]);
+				if (v_mean2D_x != 0 || v_mean2D_y != 0) {
+					atomicAdd(&dL_dmean2D[global_id].x, v_mean2D_x);
+					atomicAdd(&dL_dmean2D[global_id].y, v_mean2D_y);
+				}
+				for (int ch = 0; ch < 3; ch++)
+					atomicAdd(&dL_dnormal3D[global_id * 3 + ch], v_normal3D[ch]);
+				atomicAdd(&(dL_dopacity[global_id]), v_opacity);
+			}
+		}
+	}
+}
+
+
+void BACKWARD::render_v2(
+    const dim3 grid, const dim3 block,
+    const int32_t *tile_offsets,
+    const int32_t *flatten_ids,
+    int n_isects,
+    int W, int H,
+    float focal_x, float focal_y,
+    int num_color_feat_channels,
+    const float *bg_color,
+    const float2 *means2D,
+    const float4 *normal_opacity,
+    const float *transMats,
+    const float *colors,
+    const float *depths,
+    const float *final_Ts,
+    const uint32_t *n_contrib,
+    const float *dL_dpixels,
+    const float *dL_depths,
+    float *dL_dtransMat,
+    float3 *dL_dmean2D,
+    float *dL_dnormal3D,
+    float *dL_dopacity,
+    float *dL_dcolors)
+{
+    switch (num_color_feat_channels)
+    {
+    case 1:
+        renderCUDA_v2<1><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y, bg_color, means2D, normal_opacity,
+            transMats, colors, depths, final_Ts, n_contrib,
+            dL_dpixels, dL_depths, dL_dtransMat, dL_dmean2D,
+            dL_dnormal3D, dL_dopacity, dL_dcolors);
+        break;
+    case 3:
+        renderCUDA_v2<3><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y, bg_color, means2D, normal_opacity,
+            transMats, colors, depths, final_Ts, n_contrib,
+            dL_dpixels, dL_depths, dL_dtransMat, dL_dmean2D,
+            dL_dnormal3D, dL_dopacity, dL_dcolors);
+        break;
+    case 4:
+        renderCUDA_v2<4><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y, bg_color, means2D, normal_opacity,
+            transMats, colors, depths, final_Ts, n_contrib,
+            dL_dpixels, dL_depths, dL_dtransMat, dL_dmean2D,
+            dL_dnormal3D, dL_dopacity, dL_dcolors);
+        break;
+    case 8:
+        renderCUDA_v2<8><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y, bg_color, means2D, normal_opacity,
+            transMats, colors, depths, final_Ts, n_contrib,
+            dL_dpixels, dL_depths, dL_dtransMat, dL_dmean2D,
+            dL_dnormal3D, dL_dopacity, dL_dcolors);
+        break;
+    case 16:
+        renderCUDA_v2<16><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y, bg_color, means2D, normal_opacity,
+            transMats, colors, depths, final_Ts, n_contrib,
+            dL_dpixels, dL_depths, dL_dtransMat, dL_dmean2D,
+            dL_dnormal3D, dL_dopacity, dL_dcolors);
+        break;
+    case 32:
+        renderCUDA_v2<32><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y, bg_color, means2D, normal_opacity,
+            transMats, colors, depths, final_Ts, n_contrib,
+            dL_dpixels, dL_depths, dL_dtransMat, dL_dmean2D,
+            dL_dnormal3D, dL_dopacity, dL_dcolors);
+        break;
+    default:
+        break;
+    }
+}

@@ -784,3 +784,253 @@ void FORWARD::preprocess(int P, int D, int M,
         break; // Should never reach here - Python pads to supported sizes
     }
 }
+
+// ===================================================================
+// renderCUDA_v2: gsplat-style rendering with tile_offsets + flatten_ids
+// Identical alpha-compositing math to renderCUDA, but uses:
+//   - int32_t tile_offsets[n_tiles] instead of uint2 ranges[n_tiles]
+//   - int32_t flatten_ids[n_isects] instead of uint32_t point_list[n_rendered]
+// ===================================================================
+template <uint32_t CHANNELS>
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+renderCUDA_v2(
+	const int32_t* __restrict__ tile_offsets,
+	const int32_t* __restrict__ flatten_ids,
+	const int n_isects,
+	int W, int H,
+	float focal_x, float focal_y,
+	const float2* __restrict__ points_xy_image,
+	const float* __restrict__ features,
+	const float* __restrict__ transMats,
+	const float* __restrict__ depths,
+	const float4* __restrict__ normal_opacity,
+	float* __restrict__ final_T,
+	uint32_t* __restrict__ n_contrib,
+	const float* __restrict__ bg_color,
+	float* __restrict__ out_color,
+	float* __restrict__ out_others)
+{
+	// Identify current tile and associated min/max pixel range.
+	auto block = cg::this_thread_block();
+	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	uint32_t pix_id = W * pix.y + pix.x;
+	float2 pixf = { (float)pix.x, (float)pix.y};
+
+	bool inside = pix.x < W && pix.y < H;
+	bool done = !inside;
+
+	// gsplat-style range: offsets[tile_id] to offsets[tile_id+1]
+	uint32_t tile_id = block.group_index().y * horizontal_blocks + block.group_index().x;
+	uint32_t n_tiles = horizontal_blocks * ((H + BLOCK_Y - 1) / BLOCK_Y);
+	int32_t range_start = tile_offsets[tile_id];
+	int32_t range_end = (tile_id == n_tiles - 1) ? n_isects : tile_offsets[tile_id + 1];
+
+	const int rounds = ((range_end - range_start + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	int toDo = range_end - range_start;
+
+	// Allocate storage for batches of collectively fetched data.
+	__shared__ int collected_id[BLOCK_SIZE];
+	__shared__ float2 collected_xy[BLOCK_SIZE];
+	__shared__ float4 collected_normal_opacity[BLOCK_SIZE];
+	__shared__ float3 collected_Tu[BLOCK_SIZE];
+	__shared__ float3 collected_Tv[BLOCK_SIZE];
+	__shared__ float3 collected_Tw[BLOCK_SIZE];
+
+	// Initialize helper variables
+	float T = 1.0f;
+	uint32_t contributor = 0;
+	uint32_t last_contributor = 0;
+	float C[CHANNELS] = { 0 };
+
+	// Warp-level optimization for early exit
+	cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+
+#if RENDER_AXUTILITY
+	float N[3] = {0};
+	float D = { 0 };
+	float M1 = {0};
+	float M2 = {0};
+	float distortion = {0};
+	float median_depth = {0};
+	float median_contributor = {-1};
+#endif
+
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	{
+		int num_done = __syncthreads_count(done);
+		if (num_done == BLOCK_SIZE)
+			break;
+
+		int progress = i * BLOCK_SIZE + block.thread_rank();
+		if (range_start + progress < range_end)
+		{
+			// Use flatten_ids (int32_t) instead of point_list (uint32_t)
+			int coll_id = flatten_ids[range_start + progress];
+			collected_id[block.thread_rank()] = coll_id;
+			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			collected_normal_opacity[block.thread_rank()] = normal_opacity[coll_id];
+			collected_Tu[block.thread_rank()] = {transMats[9 * coll_id+0], transMats[9 * coll_id+1], transMats[9 * coll_id+2]};
+			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
+			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
+		}
+		block.sync();
+
+		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
+		{
+			if (warp.all(done))
+				continue;
+			if (done)
+				continue;
+
+			contributor++;
+
+			const float2 xy = collected_xy[j];
+			const float3 Tu = collected_Tu[j];
+			const float3 Tv = collected_Tv[j];
+			const float3 Tw = collected_Tw[j];
+
+			float3 k = pix.x * Tw - Tu;
+			float3 l = pix.y * Tw - Tv;
+			float3 p = cross(k, l);
+			if (p.z == 0.0) continue;
+
+			float2 s = {p.x / p.z, p.y / p.z};
+			float rho3d = (s.x * s.x + s.y * s.y);
+			float2 d = {xy.x - pixf.x, xy.y - pixf.y};
+			float rho2d = FilterInvSquare * (d.x * d.x + d.y * d.y);
+			float rho = min(rho3d, rho2d);
+
+			float depth = (s.x * Tw.x + s.y * Tw.y) + Tw.z;
+			if (depth < near_n) continue;
+
+			float4 nor_o = collected_normal_opacity[j];
+			float normal[3] = {nor_o.x, nor_o.y, nor_o.z};
+			float opa = nor_o.w;
+
+			float power = -0.5f * rho;
+			if (power > 0.0f)
+				continue;
+
+			float alpha = min(0.99f, opa * exp(power));
+			if (alpha < 1.0f / 255.0f)
+				continue;
+			float test_T = T * (1 - alpha);
+			if (test_T < 0.0001f)
+			{
+				done = true;
+				continue;
+			}
+
+			float w = alpha * T;
+#if RENDER_AXUTILITY
+			float A = 1-T;
+			float m = far_n / (far_n - near_n) * (1 - near_n / depth);
+			distortion += (m * m * A + M2 - 2 * m * M1) * w;
+			D  += depth * w;
+			M1 += m * w;
+			M2 += m * m * w;
+
+			if (T > 0.5) {
+				median_depth = depth;
+				median_contributor = contributor;
+			}
+			for (int ch=0; ch<3; ch++) N[ch] += normal[ch] * w;
+#endif
+
+			for (int ch = 0; ch < CHANNELS; ch++)
+				C[ch] += features[collected_id[j] * CHANNELS + ch] * w;
+			T = test_T;
+			last_contributor = contributor;
+		}
+	}
+
+	if (inside)
+	{
+		final_T[pix_id] = T;
+		n_contrib[pix_id] = last_contributor;
+		for (int ch = 0; ch < CHANNELS; ch++)
+			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+
+#if RENDER_AXUTILITY
+		n_contrib[pix_id + H * W] = median_contributor;
+		final_T[pix_id + H * W] = M1;
+		final_T[pix_id + 2 * H * W] = M2;
+		out_others[pix_id + DEPTH_OFFSET * H * W] = D;
+		out_others[pix_id + ALPHA_OFFSET * H * W] = 1 - T;
+		for (int ch=0; ch<3; ch++) out_others[pix_id + (NORMAL_OFFSET+ch) * H * W] = N[ch];
+		out_others[pix_id + MIDDEPTH_OFFSET * H * W] = median_depth;
+		out_others[pix_id + DISTORTION_OFFSET * H * W] = distortion;
+#endif
+	}
+}
+
+void FORWARD::render_v2(
+    const dim3 grid, dim3 block,
+    const int32_t *tile_offsets,
+    const int32_t *flatten_ids,
+    int n_isects,
+    int W, int H,
+    float focal_x, float focal_y,
+    int num_color_feat_channels,
+    const float2 *means2D,
+    const float *colors,
+    const float *transMats,
+    const float *depths,
+    const float4 *normal_opacity,
+    float *final_T,
+    uint32_t *n_contrib,
+    const float *bg_color,
+    float *out_color,
+    float *out_others)
+{
+    switch (num_color_feat_channels)
+    {
+    case 1:
+        renderCUDA_v2<1><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y,
+            means2D, colors, transMats, depths, normal_opacity,
+            final_T, n_contrib, bg_color, out_color, out_others);
+        break;
+    case 3:
+        renderCUDA_v2<3><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y,
+            means2D, colors, transMats, depths, normal_opacity,
+            final_T, n_contrib, bg_color, out_color, out_others);
+        break;
+    case 4:
+        renderCUDA_v2<4><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y,
+            means2D, colors, transMats, depths, normal_opacity,
+            final_T, n_contrib, bg_color, out_color, out_others);
+        break;
+    case 8:
+        renderCUDA_v2<8><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y,
+            means2D, colors, transMats, depths, normal_opacity,
+            final_T, n_contrib, bg_color, out_color, out_others);
+        break;
+    case 16:
+        renderCUDA_v2<16><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y,
+            means2D, colors, transMats, depths, normal_opacity,
+            final_T, n_contrib, bg_color, out_color, out_others);
+        break;
+    case 32:
+        renderCUDA_v2<32><<<grid, block>>>(
+            tile_offsets, flatten_ids, n_isects,
+            W, H, focal_x, focal_y,
+            means2D, colors, transMats, depths, normal_opacity,
+            final_T, n_contrib, bg_color, out_color, out_others);
+        break;
+    default:
+        break;
+    }
+}
