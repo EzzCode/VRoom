@@ -1,265 +1,167 @@
 import numpy as np
+import torch
 
-def generate_tsdf_single_camera(depth_map, intrinsics, extrinsics, grid_shape, voxel_size, trunc_margin, color_image=None, grid_origin=None, depth_trunc=None, world_points_h=None):
+def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_shape, voxel_size, trunc_margin, color_image_t=None, depth_trunc=None, world_points_h_t=None):
     """
-    Improved TSDF generation with:
-    1. Bilinear Interpolation for smoother surfaces
-    2. Euclidean Ray Distance instead of Z-depth difference
-    3. Depth-dependent weight calculation
-    
-    Project a 3D voxel grid onto a 2D depth map to calculate TSDF.
+    GPU-Accelerated TSDF generation using PyTorch.
     
     Inputs:
-    - depth_map: 2D array of depth values from the camera.
-    - intrinsics: 3x3 Camera lens matrix.
-    - extrinsics: 4x4 Camera pose matrix (World-to-Camera).
-    - grid_shape: Tuple (N, N, N) for the grid size.
+    - depth_map_t: 2D PyTorch tensor of depth values from the camera.
+    - intrinsics_t: 3x3 Camera lens matrix (PyTorch tensor).
+    - extrinsics_t: 4x4 Camera pose matrix (World-to-Camera, PyTorch tensor).
+    - grid_shape: Tuple (Nx, Ny, Nz) for the grid size.
     - voxel_size: Physical size of one voxel in coordinate units.
     - trunc_margin: The maximum +/- distance to cap the SDF (the "T" in TSDF).
-    - color_image: (optional) (H, W, 3) RGB image from the same camera. If provided,
-      colors are sampled at the same pixel coordinates as depth.
-    - grid_origin: (optional) (3,) array, the world-space corner where the grid starts.
-      Defaults to (0, 0, 0).
+    - color_image_t: (optional) (H, W, 3) RGB image tensor from the same camera.
     - depth_trunc: (optional) Maximum depth value to consider. Pixels with depth beyond
       this are ignored, preventing noisy far-away surfaces from corrupting the TSDF.
-    - world_points_h: (optional) Pre-computed (N³, 4) homogeneous world-point matrix.
-      If provided, skips the meshgrid + hstack computation (saves time when the same
-      grid is used across multiple cameras).
+    - world_points_h_t: (optional) Pre-computed (N³, 4) homogeneous world-point matrix.
+      If provided, skips computation (saves time when the same grid is used across multiple cameras)
+      
+    Returns:
+    - final_grid: (Nx, Ny, Nz) PyTorch tensor containing the TSDF values for each voxel.
+    - color_grid: (Nx, Ny, Nz, 3) PyTorch tensor containing the sampled RGB colors, or None.
+    - final_weights: (Nx, Ny, Nz) PyTorch tensor containing the dynamic weights for each voxel.
     """
-    if grid_origin is None:
-        grid_origin = np.array([0.0, 0.0, 0.0])
-    
-    # =====================================================================
-    # Step 1: Create the 3D Grid
-    # Generate the (X, Y, Z) physical coordinates for the 3D grid.
-    # Note: Because we are using Marching Cubes, these coordinates represent 
-    # the exact corners of the voxels, not the voxels themselves. 
-    # A grid of N=64 corners will generate 63x63x63 hollow voxel spaces.
-    # =====================================================================
-    
-    N = grid_shape[0] # number of corners (vertices)
+    device = world_points_h_t.device
 
-    # =====================================================================
-    # Step 1: Create the 3D Grid (or reuse pre-computed one)
-    # =====================================================================
-    # If world_points_h was pre-computed and passed in, skip the expensive
-    # meshgrid + hstack. This saves a lot of time when fusing multiple cameras
-    # that all use the same grid (which is the common case).
-    if world_points_h is None:
-        coords_x = np.arange(grid_shape[0]) * voxel_size + grid_origin[0]
-        coords_y = np.arange(grid_shape[1]) * voxel_size + grid_origin[1]
-        coords_z = np.arange(grid_shape[2]) * voxel_size + grid_origin[2]
-        x, y, z = np.meshgrid(coords_x, coords_y, coords_z, indexing='ij') # 3D grid of coordinates
+    # Step 1: Extrinsics (World Space to Camera Space)
+    # world_points_h_t shape: (N^3, 4)
+    # extrinsics_t shape: (4, 4) 
+    cam_points = torch.matmul(world_points_h_t, extrinsics_t.T)[:, :3]  # (N³, 3)
+    corner_depths = cam_points[:, 2]  # z-values                          (N³,) 
 
-        # ==========================================================================================
-        # np.meshgrid created 3 separate 3D cubes of numbers (an X-cube, a Y-cube, and a Z-cube).
-        # if x cube was a dict:
-        # (example with N=3, voxel_size=0.5)
-        # x_cube_dictionary = {
-        # KEY (The 3D Grid Index)   :  VALUE (The Physical X Measurement)
-        # "(Floor 0, Row 0, Col 0)"   :  0.0, 
-        # "(Floor 0, Row 0, Col 1)"   :  0.5,
-        # "(Floor 0, Row 0, Col 2)"   :  1.0,
-        
-        # "(Floor 1, Row 0, Col 0)"   :  0.0, 
-        # "(Floor 1, Row 0, Col 1)"   :  0.5,
-        # "(Floor 1, Row 0, Col 2)"   :  1.0,
-        # ... all 262,144 spots ...
-        # }
-        # ==========================================================================================
-        # Flatten the 3d grid for gpu matrix math
-        # np.stack([x, y, z], axis=-1):
-        # stack() grabs those 3 cubes and glues them together at the deepest level (axis=-1).
-        # by deepest level, we mean the last dimension.
-        # so instead of 3 separate arrays, we have one solid 3D block where every single spot 
-        # holds a [X, Y, Z] coordinate package. Shape becomes (N, N, N, 3).
-        # ==========================================================================================
+    # Step 2: Intrinsics (Camera Space to Image Space)
+    # cam_points shape: (N³, 3)
+    # intrinsics_t shape: (3, 3)
+    image_points = torch.matmul(cam_points, intrinsics_t.T)             # (N³, 3)
 
-        world_points = np.stack([x, y, z], axis=-1).reshape(-1, 3)
-
-        # ==========================================================================================
-        # flattened world_points array:
-        # (example with N=64, voxel_size=0.05)
-        # Shape: (262144, 3) -> A flat list where every row is exactly one [X, Y, Z] coordinate.
-        # index         [   X,      Y,      Z   ]    Physical Location in the Box
-        # --------      -------------------------    -------------------------------------------
-        # [0]           [ 0.00,   0.00,   0.00 ]  <- Bottom, Front, Left corner (Origin)
-        # [1]           [ 0.05,   0.00,   0.00 ]  <- Moving right along the X-axis...
-        # [2]           [ 0.10,   0.00,   0.00 ]  
-        # ...
-        # [63]          [ 3.15,   0.00,   0.00 ]  <- Hit the right wall. Time to step back on Y-axis.
-        # [64]          [ 0.00,   0.05,   0.00 ]  <- Start of Row 2 (X resets to 0, Y moves back)
-        # [65]          [ 0.05,   0.05,   0.00 ]  
-        # ...
-        # [4095]        [ 3.15,   3.15,   0.00 ]  <- Finished the entire Floor 0. Time to step up.
-        # [4096]        [ 0.00,   0.00,   0.05 ]  <- Start of Floor 1 (Z moves up)
-        # ...
-        # [262143]      [ 3.15,   3.15,   3.15 ]  <- The last dot: Top, Back, Right corner.
-        # ==========================================================================================
-        
-        # =====================================================================
-        # Step 2a: Add a column of 1s to make [X, Y, Z] -> [X, Y, Z, 1] (homogeneous coordinates)
-        # This lets the 4x4 matrix apply both rotation AND translation in one multiplication.
-        ones = np.ones((world_points.shape[0], 1))           # shape: (N³, 1)
-        world_points_h = np.hstack([world_points, ones])     # shape: (N³, 4)
-
-    # Extract world_points (first 3 cols) for later use if needed
-    world_points = world_points_h[:, :3]
-
-    # =====================================================================
-    # Step 2: World Space to Camera Space (Extrinsics)
-    # Move the points from the global world into the camera's local view.
-    # =====================================================================
-
-    # Step 2b: Multiply by the extrinsics matrix (4x4) to transform into camera space.
-    # extrinsics is (4, 4), world_points_h.T is (4, N³) -> result is (4, N³) -> transpose to (N³, 4)
-    # We only keep the first 3 rows (X, Y, Z in camera space), discard the homogeneous row.
-    cam_points = (extrinsics @ world_points_h.T).T[:, :3]  # shape: (N³, 3)
-
-    # The Z-coordinate in camera space = how far each point is along the camera's viewing direction.
-    corner_depths = cam_points[:, 2]                        # shape: (N³,) 
-
-    # =====================================================================
-    # Step 3: Camera Space to Image Space (Intrinsics)
-    # Smash the 3D points onto the 2D image plane.
-
-    # =====================================================================
-    # Multiply the 3x3 intrinsics matrix by the camera-space points to get the pixel coordinates.
-    # intrinsics is (3, 3), cam_points.T is (3, N³) -> result is (3, N³) -> transpose to (N³, 3)
-    image_points = (intrinsics @ cam_points.T).T  # shape: (N³, 3)
-
-    # Keep as floats for bilinear interpolation
-    # Perspective Divide: divide X and Y by Z to project onto the 2D image plane.
-    # This is what makes faraway things look smaller, just like a real camera.
+    # Divide by depth (Z) to perform perspective projection.
+    # This projects the 3D camera-space points onto the 2D image plane,
+    # giving the exact (u, v) pixel coordinates where each voxel lands.
     pixel_u = image_points[:, 0] / image_points[:, 2]
     pixel_v = image_points[:, 1] / image_points[:, 2]
 
-    # =====================================================================
-    # Step 4: Filter out the blind spots
-    # Some voxels will project outside the photograph (e.g., pixel_u = -50).
-    # Create a boolean mask to filter out points that fall outside the 
-    # depth_map's width/height, or have a voxel_depth <= 0 (behind the camera).
-    # =====================================================================
-    H, W = depth_map.shape  # height & width of the depth image (in pixels)
+    # Step 3: Filter out blind spots
+    H, W = depth_map_t.shape
 
-    # Strict bounds for bilinear interpolation (need to access u+1, v+1 safely)
+    # We subtract 1 to avoid errors in bilinear interpolation
+    # if pixel coordinates are on the boundary of the image.
     bounds_mask = (
         (pixel_u >= 0) & (pixel_u < W - 1) &
         (pixel_v >= 0) & (pixel_v < H - 1) &
         (corner_depths > 0)
     )
 
-    # --- IMPROVEMENT 3: Bilinear Interpolation ---
+    # Bilinear Interpolation
     u_valid = pixel_u[bounds_mask]
     v_valid = pixel_v[bounds_mask]
 
-    u0 = np.floor(u_valid).astype(int)
-    v0 = np.floor(v_valid).astype(int)
+    # Calculate the 4 surrounding pixel indices
+    # Clamp to prevent any out-of-bounds CUDA errors (extra safety)
+    u0 = torch.clamp(torch.floor(u_valid).long(), 0, W - 2)
+    v0 = torch.clamp(torch.floor(v_valid).long(), 0, H - 2)
     u1 = u0 + 1
     v1 = v0 + 1
 
-    # Interp weights
-    wa = (u1 - u_valid) * (v1 - v_valid)
-    wb = (u_valid - u0) * (v1 - v_valid)
-    wc = (u1 - u_valid) * (v_valid - v0)
-    wd = (u_valid - u0) * (v_valid - v0)
+    # Interpolation weights
+    wa = (u1.double() - u_valid) * (v1.double() - v_valid)
+    wb = (u_valid - u0.double()) * (v1.double() - v_valid)
+    wc = (u1.double() - u_valid) * (v_valid - v0.double())
+    wd = (u_valid - u0.double()) * (v_valid - v0.double())
 
-    # Gather 4 corners
-    d00 = depth_map[v0, u0]
-    d01 = depth_map[v0, u1]
-    d10 = depth_map[v1, u0]
-    d11 = depth_map[v1, u1]
+    d00 = depth_map_t[v0, u0]
+    d01 = depth_map_t[v0, u1]
+    d10 = depth_map_t[v1, u0]
+    d11 = depth_map_t[v1, u1]
 
-    # Only keep points where ALL 4 neighbors have valid depth
+    # Check if all 4 surrounding pixels have valid depth values
     depth_check = (d00 > 0) & (d01 > 0) & (d10 > 0) & (d11 > 0)
     if depth_trunc is not None:
         depth_check &= (d00 < depth_trunc) & (d01 < depth_trunc) & (d10 < depth_trunc) & (d11 < depth_trunc)
 
-    # Interpolate depth
     sampled_depths = wa * d00 + wb * d01 + wc * d10 + wd * d11
 
-    valid_mask = np.zeros(world_points.shape[0], dtype=bool)
+    valid_mask = bounds_mask.clone()
     valid_mask[bounds_mask] = depth_check
 
-    # =====================================================================
-    # Step 5: The Core Math (SDF Calculation)
-    # For the valid pixels, look up their depth in the actual depth_map.
-    # Calculate: SDF = (Surface Depth from Image) - (Voxel Depth)
-    # =====================================================================
-    # --- IMPROVEMENT 2: Euclidean Ray Distance ---
-    # Find directional cosine of the camera ray for each valid voxel
+    # Step 4: SDF Calculation
+    # Compare the distance to voxel vs the depth camera's measurement.
     valid_cam_points = cam_points[valid_mask]
-    ray_lengths = np.linalg.norm(valid_cam_points, axis=1)
+    
+    # Calculate the actual straight-line distance from the camera to the voxel (the laser ray)
+    ray_lengths = torch.linalg.norm(valid_cam_points, dim=1)
+    
+    # Depth cameras measure "Z-depth" (straight forward parallel to the lens), not diagonal ray length.
+    # The directional cosine converts the diagonal ray distance back into flat Z-depth,
+    # ensuring flat surfaces look flat and not curved.
     directional_cosine = corner_depths[valid_mask] / ray_lengths
 
-    # Initialize with large positive values to mark as "unseen / uninitialized"
-    sdf_values = np.ones(world_points.shape[0]) * 999.0
+    # Initialize all voxels with a dummy "empty space" value (1e6)
+    # This guarantees that even with a huge trunc_margin, unseen voxels will always normalize to exactly 1.0 TSDF.
+    sdf_values = torch.ones(world_points_h_t.shape[0], device=device, dtype=torch.float64) * 1e6
 
-    # Calculate precise Euclidean TSDF
+    # SDF = Camera's Measurement - Voxel's actual depth
+    # Positive SDF: Voxel is in empty space (in front of the surface).
+    # Zero SDF: Voxel is exactly on the surface.
+    # Negative SDF: Voxel is buried inside the solid object.
     final_sampled_depths = sampled_depths[depth_check]
     sdf_values[valid_mask] = (final_sampled_depths - corner_depths[valid_mask]) * directional_cosine
 
-    # =====================================================================
-    # Step 6: Truncation
-    # Cap the sdf_values between +trunc_margin and -trunc_margin.
-    # Then, divide by trunc_margin so the final values sit neatly between -1.0 and 1.0.
-    # =====================================================================
-    # Truncate to [-1, 1]
-    # We clip the computed values, but keep the "999" (unseen) values intact temporarily
+    # Step 5: Truncation
     valid_sdf = sdf_values[valid_mask]
-    tsdf_valid = np.clip(valid_sdf, -trunc_margin, trunc_margin) / trunc_margin
-    
-    tsdf_values = np.ones(world_points.shape[0]) # Default to +1.0
+    # Clamp the SDF values to the truncation margin 
+    # and divide by the truncation margin to normalize them.
+    # This ensures that the TSDF values are always between -1 and 1.
+    tsdf_valid = torch.clamp(valid_sdf, -trunc_margin, trunc_margin) / trunc_margin
+
+    tsdf_values = torch.ones(world_points_h_t.shape[0], device=device, dtype=torch.float64)
     tsdf_values[valid_mask] = tsdf_valid
 
-    # --- IMPROVEMENT 4: Dynamic Weighting (Depth-Dependent) ---
-    weights = np.zeros(world_points.shape[0])
+    # Dynamic Weighting
+    # We assign higher confidence (weight) to measurements taken close to the camera.
+    weights = torch.zeros(world_points_h_t.shape[0], device=device, dtype=torch.float64)
     
-    # Weight is > 0 ONLY for valid mask points that are NOT truncated behind the surface (-1)
-    # This enables IMPROVEMENT 1: Free space carving (points with tsdf == +1.0 in front of surface get weight)
+    # Carving Mask: We only assign weight to empty space (>0) or surface (~0). 
+    # We ignore deep interior (-1) because cameras cannot see through solid walls
     carving_mask = valid_mask & (tsdf_values > -0.99)
+    
+    # Inverse-Square Law: Depth cameras are exponentially less accurate far away.
+    # A camera 1m away gets a weight of 1.0. A camera 4m away gets a weight of 0.06.
+    # The +1e-5 prevents divide-by-zero crashes.
     weights[carving_mask] = 1.0 / (corner_depths[carving_mask] ** 2 + 1e-5)
 
-    # =====================================================================
-    # Step 7: Reshape and Return
-    # Take flat list of calculations and reshape it back into the 
-    # original 3D grid shape (N, N, N).
-    # =====================================================================
-    final_grid = tsdf_values.reshape(grid_shape)  # (N³,) -> (N, N, N)
-    final_weights = weights.reshape(grid_shape)
+    # Reshape and Return
+    final_grid = tsdf_values.view(grid_shape)
+    final_weights = weights.view(grid_shape)
 
-    # =====================================================================
-    # Step 8: Sample Colors (optional)
-    # If a color image was provided, look up the RGB color for each valid corner
-    # at the same pixel (v, u) used for depth. Unseen corners get black (0, 0, 0).
-    # black shouldn't cause problem because weighting is used
-    # =====================================================================
-    # Bilinear Interpolate Colors (Optional)
     color_grid = None
-    if color_image is not None:
-        color_values = np.zeros((world_points.shape[0], 3))
+    if color_image_t is not None:
+        color_values = torch.zeros((world_points_h_t.shape[0], 3), device=device, dtype=torch.float64)
         
-        c00 = color_image[v0, u0]
-        c01 = color_image[v0, u1]
-        c10 = color_image[v1, u0]
-        c11 = color_image[v1, u1]
+        c00 = color_image_t[v0, u0]
+        c01 = color_image_t[v0, u1]
+        c10 = color_image_t[v1, u0]
+        c11 = color_image_t[v1, u1]
         
+        # unsqueeze(-1) allows multiplying the weights by the color values (3 channels)
         sampled_colors = (
-            c00 * wa[:, np.newaxis] + 
-            c01 * wb[:, np.newaxis] + 
-            c10 * wc[:, np.newaxis] + 
-            c11 * wd[:, np.newaxis]
+            c00 * wa.unsqueeze(-1) + 
+            c01 * wb.unsqueeze(-1) + 
+            c10 * wc.unsqueeze(-1) + 
+            c11 * wd.unsqueeze(-1)
         )
         
         color_values[valid_mask] = sampled_colors[depth_check]
-        color_grid = color_values.reshape(*grid_shape, 3)
+        color_grid = color_values.view(*grid_shape, 3)
 
     return final_grid, color_grid, final_weights
 
 
 def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_size, trunc_margin, color_images=None, grid_origin=None, depth_trunc=None):
     """
-    Improved multi-camera fusion using the generated grids and dynamic weights.
+    GPU-Accelerated multi-camera fusion using PyTorch.
+    Inputs and outputs remain as standard NumPy arrays for compatibility with the rest of the pipeline.
     
     Each camera only sees part of the scene. Fusion combines all views so that
     voxels seen by multiple cameras get averaged, producing a more complete and
@@ -269,7 +171,7 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
     - depth_maps: list of 2D depth arrays, one per camera.
     - intrinsics_list: list of 3x3 intrinsics matrices, one per camera.
     - extrinsics_list: list of 4x4 extrinsics matrices, one per camera.
-    - grid_shape: Tuple (N, N, N) for the grid size.
+    - grid_shape: Tuple (Nx, Ny, Nz) for the grid size.
     - voxel_size: Physical size of one voxel in coordinate units.
     - trunc_margin: The maximum +/- distance to cap the SDF.
     - color_images: (optional) list of (H, W, 3) RGB images, one per camera.
@@ -277,63 +179,79 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
     - depth_trunc: (optional) Maximum depth to consider per camera.
     
     Returns:
-    - fused_tsdf: (N, N, N) numpy array of fused TSDF values.
-    - fused_colors: (N, N, N, 3) numpy array of fused RGB colors, or None.
+    - fused_tsdf: (Nx, Ny, Nz) numpy array of fused TSDF values.
+    - fused_colors: (Nx, Ny, Nz, 3) numpy array of fused RGB colors, or None.
+    - obs_count: (Nx, Ny, Nz) numpy array counting how many cameras observed each voxel.
     """
-    # Accumulators: sum of TSDF values and count of how many cameras saw each corner.
-    tsdf_sum = np.zeros(grid_shape)
-    weight_sum = np.zeros(grid_shape)
-    obs_count = np.zeros(grid_shape, dtype=int)  # how many cameras observed each voxel
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"  [PyTorch TSDF] Accelerated on {device.type.upper()} (float64 precision)")
+
+    tsdf_sum = torch.zeros(grid_shape, device=device, dtype=torch.float64)
+    weight_sum = torch.zeros(grid_shape, device=device, dtype=torch.float64)
+    obs_count = torch.zeros(grid_shape, device=device, dtype=torch.int32)
+    
     if color_images is not None:
-        color_sum = np.zeros((*grid_shape, 3))
+        color_sum = torch.zeros((*grid_shape, 3), device=device, dtype=torch.float64)
 
     num_cameras = len(depth_maps)
 
-    # Pre-compute the world-point grid + homogeneous coords ONCE.
+    _grid_origin = grid_origin if grid_origin is not None else np.array([0.0, 0.0, 0.0])
+    
+    # Pre-compute the world-point grid + homogeneous coords once on the GPU.
     # All cameras share the same grid, so we avoid recomputing meshgrid + hstack
     # for every camera (saves N³ allocations per camera).
-    _grid_origin = grid_origin if grid_origin is not None else np.array([0.0, 0.0, 0.0])
-    coords_x = np.arange(grid_shape[0]) * voxel_size + _grid_origin[0]
-    coords_y = np.arange(grid_shape[1]) * voxel_size + _grid_origin[1]
-    coords_z = np.arange(grid_shape[2]) * voxel_size + _grid_origin[2]
-    gx, gy, gz = np.meshgrid(coords_x, coords_y, coords_z, indexing='ij')
-    world_points = np.stack([gx, gy, gz], axis=-1).reshape(-1, 3)
-    ones = np.ones((world_points.shape[0], 1))
-    precomputed_wph = np.hstack([world_points, ones])  # (N³, 4)
+    coords_x = torch.arange(grid_shape[0], device=device, dtype=torch.float64) * voxel_size + _grid_origin[0]
+    coords_y = torch.arange(grid_shape[1], device=device, dtype=torch.float64) * voxel_size + _grid_origin[1]
+    coords_z = torch.arange(grid_shape[2], device=device, dtype=torch.float64) * voxel_size + _grid_origin[2]
+    
+    gx, gy, gz = torch.meshgrid(coords_x, coords_y, coords_z, indexing='ij')
+
+    # dim = -1 because we stack the 3 coordinates [x, y, z] along the last dimension
+    # This makes the shape (Nx, Ny, Nz, 3), where each element is an [x, y, z] coordinate
+    world_points = torch.stack([gx, gy, gz], dim=-1).view(-1, 3)
+
+    # Add a column of 1s to make [x, y, z] -> [x, y, z, 1] (homogeneous coordinates)
+    ones = torch.ones((world_points.shape[0], 1), device=device, dtype=torch.float64)
+    # Precomputed world points homogeneous coordinates, shape (N³, 4)
+    precomputed_wph_t = torch.cat([world_points, ones], dim=1)
 
     for i in range(num_cameras):
-        print(f"  Processing camera {i + 1}/{num_cameras} (Improved)...")
+        # Move inputs to GPU
+        depth_t = torch.from_numpy(depth_maps[i]).to(device=device, dtype=torch.float64)
+        intrinsics_t = torch.from_numpy(intrinsics_list[i]).to(device=device, dtype=torch.float64)
+        extrinsics_t = torch.from_numpy(extrinsics_list[i]).to(device=device, dtype=torch.float64)
+        
+        colors_t = None
+        if color_images is not None:
+            colors_t = torch.from_numpy(color_images[i]).to(device=device, dtype=torch.float64)
 
-        color_img_i = color_images[i] if color_images is not None else None
         tsdf_i, color_i, weight_i = generate_tsdf_single_camera(
-            depth_maps[i], intrinsics_list[i], extrinsics_list[i],
-            grid_shape, voxel_size, trunc_margin, color_image=color_img_i,
-            grid_origin=grid_origin, depth_trunc=depth_trunc,
-            world_points_h=precomputed_wph
+            depth_t, intrinsics_t, extrinsics_t,
+            grid_shape, voxel_size, trunc_margin, color_image_t=colors_t,
+            depth_trunc=depth_trunc,
+            world_points_h_t=precomputed_wph_t
         )
 
-        # Uses the improved weights returned by the single camera generator
-        # Automatically handles Free Space Carving & Depth drop-off
-        tsdf_sum += tsdf_i * weight_i
-        weight_sum += weight_i
-        obs_count += (weight_i > 0).astype(int)
+        tsdf_sum += tsdf_i * weight_i # grid of sdf values
+        weight_sum += weight_i # grid of weights
+        obs_count += (weight_i > 0).to(torch.int32) # grid of observation counts
         
         if color_images is not None and color_i is not None:
-            color_sum += color_i * weight_i[..., np.newaxis]
+            color_sum += color_i * weight_i.unsqueeze(-1)
 
     # Average: for each corner, divide the accumulated TSDF by the sum of weights.
     # Corners seen by no camera stay at 1.0 (free space / no data).
     mask = weight_sum > 0
-    fused_tsdf = np.ones_like(tsdf_sum)
-    fused_tsdf[mask] = tsdf_sum[mask] / weight_sum[mask]
+    fused_tsdf = torch.ones_like(tsdf_sum)
+    fused_tsdf[mask] = tsdf_sum[mask] / weight_sum[mask] # weighted average of sdf values
 
-    # Average colors the same way
     fused_colors = None
     if color_images is not None:
-        fused_colors = np.zeros_like(color_sum)
-        fused_colors[mask] = color_sum[mask] / weight_sum[mask, np.newaxis]
+        fused_colors = torch.zeros_like(color_sum)
+        fused_colors[mask] = color_sum[mask] / weight_sum[mask].unsqueeze(-1) # weighted average of colors
 
     print(f"  Fusion complete. Corners observed by at least 1 camera: "
-          f"{np.sum(mask)} / {np.prod(grid_shape)}")
+          f"{mask.sum().item()} / {np.prod(grid_shape)}")
 
-    return fused_tsdf, fused_colors, obs_count
+    # Move results back to CPU as NumPy arrays
+    return fused_tsdf.cpu().numpy(), (fused_colors.cpu().numpy() if fused_colors is not None else None), obs_count.cpu().numpy()
