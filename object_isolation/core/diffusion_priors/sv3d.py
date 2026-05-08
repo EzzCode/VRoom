@@ -272,13 +272,12 @@ class SV3DBackend(DiffusionPriorBackend):
 
         views: List[HallucinatedView] = []
         for i, pim in enumerate(frames_pil):
-            # SV3D's orbit advances azimuth in the OPPOSITE direction to our
-            # V-frame convention (LocalSV3D measures az from +Z toward +X,
-            # CCW from above; SV3D rotates CW). Negate az_off so frame i is
-            # tagged with its true V-frame azimuth. The conditioning frame
-            # (last frame, az_off ≈ 0 or 360) still pins to cond_azimuth_deg.
-            az_off_signed = -float(az_off_deg[i])
-            az_abs = cond_azimuth_deg + az_off_signed
+            # SV3D's orbit and our V-frame both use the same convention:
+            # az=0 at +Z, increasing CW from above (toward +X at 90°).
+            # Verified numerically: 21/21 manifest azimuths match without
+            # negation; with negation only 1/21 matched (the conditioning
+            # frame at 360°≡0°).
+            az_abs = cond_azimuth_deg + float(az_off_deg[i])
             az_abs = ((az_abs + 180.0) % 360.0) - 180.0
             rgb = np.asarray(pim.convert("RGB"))
             views.append(HallucinatedView(

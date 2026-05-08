@@ -13,7 +13,7 @@ Output layout (per object_id)::
     <output_dir>/obj_<id>/
         supervision_manifest.json
         training_summary.json
-        alignment_audit.json
+
         model/
             point_cloud.ply
             color_mlp.pt  cov_mlp.pt  opacity_mlp.pt
@@ -58,9 +58,6 @@ def run_training(
     densify_extra_ratio: float = 0.08,
     use_cond_cam_up: bool = True,
     fov_y_deg: float = 50.0,
-    min_halluc_iou: float = 0.55,
-    min_halluc_area_ratio: float = 0.65,
-    max_halluc_area_ratio: float = 1.45,
 ) -> dict:
     """Train a fresh object-only ObjectGS model for one object.
 
@@ -105,23 +102,6 @@ def run_training(
 
     extraction_index_path = Path(halluc_index_path).parents[1] / "phase3" / "extraction_index.json"
 
-    # ── Load COLMAP seed points for robust scale/placement in denorm ─────
-    seed_points_W: Optional[np.ndarray] = None
-    try:
-        from .colmap_init import load_colmap_object_point_cloud
-        _pcd, _ = load_colmap_object_point_cloud(
-            model_path=model_path,
-            object_id=obj_id,
-            scope=scope,
-            extraction_index_path=extraction_index_path,
-            max_points=20000,
-            target_points=8000,
-        )
-        seed_points_W = np.asarray(_pcd.points, dtype=np.float32)
-        logger.info("Loaded %d COLMAP seed points for hallucination alignment.", len(seed_points_W))
-    except Exception as _e:
-        logger.warning("COLMAP seed load failed (%s); scale/placement will use scope AABB.", _e)
-
     # ── Phase 6: build real + hallucinated supervision views ─────────────
     supervision_views = build_joint_supervision_views(
         halluc_index_path=halluc_index_path,
@@ -134,11 +114,6 @@ def run_training(
         hallucination_resolution=576,
         real_target_long_edge=576,
         up_W_override=cond_cam_up_W,
-        min_hallucination_alignment_iou=min_halluc_iou,
-        min_halluc_area_ratio=min_halluc_area_ratio,
-        max_halluc_area_ratio=max_halluc_area_ratio,
-        hallucination_alignment_audit_path=obj_dir / "alignment_audit.json",
-        seed_points_W=seed_points_W,
     )
     if not supervision_views:
         raise RuntimeError(f"No supervision views produced for obj {obj_id}.")

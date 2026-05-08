@@ -192,8 +192,7 @@ def _load_sv3d_cache(out_raw: Path, cond_az: float, cond_el: float,
         bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         # Reproduce sv3d_p azimuth schedule: az_off = (i+1)*360/n.
-        # Negate to match the V-frame convention (see SV3DBackend.hallucinate).
-        az_off = -(((i + 1) * 360.0 / n) % 360.0)
+        az_off = (((i + 1) * 360.0 / n) % 360.0)
         az_abs = ((cond_az + az_off + 180.0) % 360.0) - 180.0
         views.append(HallucinatedView(
             rgb=rgb, azimuth_V_deg=float(az_abs),
