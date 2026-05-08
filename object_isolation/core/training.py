@@ -28,6 +28,10 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+# SV3D native output resolution (square).  Matches SV3DBackend.native_resolution.
+_SV3D_RESOLUTION: int = 576
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,8 +70,8 @@ def run_training(
 
     Returns a summary dict (also written to disk).
     """
-    from .dataset_builder import build_joint_supervision_views, save_supervision_manifest
-    from .scope import discover_object_scope
+    from .dataset_builder import build_joint_supervision_views, save_supervision_manifest, write_projection_overlays
+    from .object_scope import discover_object_scope
     from .trainer import train_object
 
     out_dir = Path(output_dir)
@@ -83,24 +87,41 @@ def run_training(
         )
 
     # ── Pull cond cam up (matches Phase 5 reference renders) ──────────────
-    cond_cam_up_W: Optional[np.ndarray] = None
-    try:
-        with open(halluc_index_path) as f:
-            manifest = json.load(f)
-        cam_idx = int(manifest.get("conditioning", {}).get("cam_index", -1))
-        if use_cond_cam_up and 0 <= cam_idx < len(scope.cameras):
-            R_cond = np.asarray(scope.cameras[cam_idx]["R"], dtype=np.float64)
-            cond_cam_up_W = -R_cond[1]  # camera up in world = -row1 of R_w2c
-            ang = float(np.degrees(np.arccos(np.clip(
-                cond_cam_up_W @ scope.up_W /
-                (np.linalg.norm(cond_cam_up_W) * max(np.linalg.norm(scope.up_W), 1e-9)),
-                -1.0, 1.0,
-            ))))
-            logger.info("Cond cam %d up vector (%.2f° from scope.up_W).", cam_idx, ang)
-    except Exception as e:
-        logger.warning("Could not read cond cam up from halluc_index (%s); using scope.up_W.", e)
+    with open(halluc_index_path) as f:
+        manifest = json.load(f)
+    cam_idx = int(manifest.get("conditioning", {}).get("cam_index", -1))
+    if cam_idx < 0 or cam_idx >= len(scope.cameras):
+        raise RuntimeError(
+            f"halluc_index 'conditioning.cam_index'={cam_idx} is out of range "
+            f"(scope has {len(scope.cameras)} cameras).  Re-run Phase 5."
+        )
+    cond_cam_up_W: np.ndarray
+    if use_cond_cam_up:
+        R_cond = np.asarray(scope.cameras[cam_idx]["R"], dtype=np.float64)
+        cond_cam_up_W = -R_cond[1]  # camera up in world = -row1 of R_w2c
+        ang = float(np.degrees(np.arccos(np.clip(
+            cond_cam_up_W @ scope.up_W /
+            (np.linalg.norm(cond_cam_up_W) * max(np.linalg.norm(scope.up_W), 1e-9)),
+            -1.0, 1.0,
+        ))))
+        logger.info("Cond cam %d up vector (%.2f\u00b0 from scope.up_W).", cam_idx, ang)
+    else:
+        cond_cam_up_W = np.asarray(scope.up_W, dtype=np.float64)
 
     extraction_index_path = Path(halluc_index_path).parents[1] / "phase3" / "extraction_index.json"
+
+    # Load COLMAP object points for accurate world-scale computation in Phase 6.
+    from .colmap_init import load_colmap_object_point_cloud
+    pcd, _meta = load_colmap_object_point_cloud(
+        model_path=model_path,
+        object_id=obj_id,
+        scope=scope,
+        extraction_index_path=extraction_index_path,
+        max_points=20000,
+        target_points=8000,
+    )
+    seed_points_W = np.asarray(pcd.points, dtype=np.float32)
+    logger.info("Loaded %d COLMAP seed points (obj %d).", len(seed_points_W), obj_id)
 
     # ── Phase 6: build real + hallucinated supervision views ─────────────
     supervision_views = build_joint_supervision_views(
@@ -111,15 +132,22 @@ def run_training(
         real_weight=real_weight,
         hallucination_weight=hallucination_weight,
         fov_y_deg=fov_y_deg,
-        hallucination_resolution=576,
-        real_target_long_edge=576,
+        hallucination_resolution=_SV3D_RESOLUTION,
+        real_target_long_edge=_SV3D_RESOLUTION,
         up_W_override=cond_cam_up_W,
-        seed_points_W=scope.anchor_xyz_W,
+        seed_points_W=seed_points_W,
     )
     if not supervision_views:
         raise RuntimeError(f"No supervision views produced for obj {obj_id}.")
 
     save_supervision_manifest(supervision_views, obj_dir / "supervision_manifest.json")
+    # Always write projection overlays immediately after building supervision views.
+    # If the red dots don't trace the object the camera coordinate frame is wrong.
+    write_projection_overlays(
+        seed_points_W,
+        supervision_views,
+        obj_dir / "phase6_projection_audit",
+    )
     n_real = sum(1 for v in supervision_views if v.get("source") == "real")
     n_hall = len(supervision_views) - n_real
     logger.info("%d supervision views for obj %d (real=%d hallucinated=%d).",

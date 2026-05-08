@@ -29,7 +29,6 @@ import logging
 import sys
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 # ── path setup ─────────────────────────────────────────────────────────────
@@ -46,32 +45,6 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # Pure-numpy projection (no ObjectGS, no torch, no magic)
 # ─────────────────────────────────────────────────────────────────────────────
-
-def project_points(
-    xyz_W: np.ndarray,   # (N, 3)  world-space points
-    R_w2c: np.ndarray,   # (3, 3)  world-to-camera rotation
-    T_w2c: np.ndarray,   # (3,)    world-to-camera translation
-    K: np.ndarray,       # (3, 3)  intrinsics
-    width: int,
-    height: int,
-    min_depth: float = 0.01,
-) -> np.ndarray:
-    """Return (M, 2) pixel coords of points in front of the camera."""
-    # Transform to camera space
-    pts_c = (R_w2c @ xyz_W.T).T + T_w2c.reshape(1, 3)   # (N, 3)
-    # Keep only points in front
-    in_front = pts_c[:, 2] > min_depth
-    pts_c = pts_c[in_front]
-    if pts_c.shape[0] == 0:
-        return np.zeros((0, 2), dtype=np.float32)
-    # Perspective divide + apply K
-    x = pts_c[:, 0] / pts_c[:, 2]
-    y = pts_c[:, 1] / pts_c[:, 2]
-    u = K[0, 0] * x + K[0, 2]
-    v = K[1, 1] * y + K[1, 2]
-    # Clip to image
-    valid = (u >= 0) & (u < width) & (v >= 0) & (v < height)
-    return np.stack([u[valid], v[valid]], axis=1).astype(np.float32)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,11 +77,17 @@ def test_point_cloud_geometry(
     print(f"  scope.aabb_max  : {np.asarray(scope.aabb_max_W)}")
 
     centroid_offset = np.linalg.norm(centroid - np.asarray(scope.centroid_W, dtype=np.float32))
-    print(f"\n  COLMAP centroid vs scope.centroid: {centroid_offset:.4f} world units")
-    if centroid_offset > radius * 0.2:
+    # Threshold: 50% of the orbit radius (median camera-to-object distance).
+    # scope.radius is O(camera_distance); COLMAP vs anchor centroid offset of a
+    # few percent of that is normal and does not affect K_view (cx/cy are fixed
+    # at image centre by the look_at construction).
+    _centroid_warn_thresh = scope.radius * 0.5
+    print(f"\n  COLMAP centroid vs scope.centroid: {centroid_offset:.4f} world units "
+          f"(warn > {_centroid_warn_thresh:.4f} = 0.5 × scope.radius {scope.radius:.4f})")
+    if centroid_offset > _centroid_warn_thresh:
         print("  *** WARNING: COLMAP seed centroid deviates from scope centroid by "
-              f"{centroid_offset:.4f} (>{radius * 0.2:.4f}). "
-              "Seed points may not be centred on the object! ***")
+              f"{centroid_offset:.4f}. "
+              "Seed points may be pulling in unrelated scene geometry. ***")
 
     # Spread check: are the points inside the scope AABB?
     aabb_min = np.asarray(scope.aabb_min_W, dtype=np.float32)
@@ -164,13 +143,21 @@ def test_projection_overlay(
     supervision_views: list[dict],
     output_dir: Path,
 ) -> list[dict]:
+    """Save projection overlay images and print a per-view text report.
+
+    Image saving is delegated to ``dataset_builder.write_projection_overlays``
+    (the same function called automatically after Phase 6).  This function adds
+    the detailed text table that is useful in the interactive audit context.
+    """
+    from object_isolation.core.dataset_builder import write_projection_overlays, _SEED_DEPTH_MIN
+
     overlay_dir = output_dir / "projection_overlay"
-    overlay_dir.mkdir(parents=True, exist_ok=True)
+    write_projection_overlays(xyz_W, supervision_views, overlay_dir)
 
     print("\n" + "=" * 65)
     print("TEST 1 — PROJECTION OVERLAY")
     print("=" * 65)
-    print(f"  Saving overlays to: {overlay_dir}")
+    print(f"  Overlays saved to: {overlay_dir}")
     print(f"  {'#':>3}  {'Source':<12} {'Az':>6} {'El':>6}  {'In-frame':>10}  {'Behind':>7}  Result")
     print("  " + "-" * 62)
 
@@ -183,90 +170,42 @@ def test_projection_overlay(
         W = int(cam["width"])
         H = int(cam["height"])
         source = view.get("source", "?")
+        az = cam.get("azimuth_offset_deg", 0.0)
+        el = cam.get("elevation_offset_deg", 0.0)
 
-        # ── Project ──────────────────────────────────────────────────────
         pts_c = (R @ xyz_W.T).T + T.reshape(1, 3)
-        in_front = pts_c[:, 2] > 0.01
+        in_front = pts_c[:, 2] > _SEED_DEPTH_MIN  # must match write_projection_overlays
         n_behind = int((~in_front).sum())
-        pts_c_front = pts_c[in_front]
+        pts_f = pts_c[in_front]
 
-        if pts_c_front.shape[0] == 0:
-            print(f"  {i:>3}  {source:<12} "
-                  f"{cam.get('azimuth_offset_deg',0):>6.1f} {cam.get('elevation_offset_deg',0):>6.1f}"
+        if pts_f.shape[0] == 0:
+            print(f"  {i:>3}  {source:<12} {az:>6.1f} {el:>6.1f}"
                   f"  {'0':>10}  {n_behind:>7}  *** ALL POINTS BEHIND CAMERA ***")
-            results.append({"view_idx": i, "source": source, "n_in_frame": 0, "n_behind": n_behind,
-                             "mean_depth": None, "depth_min": None, "depth_max": None})
+            results.append({"view_idx": i, "source": source, "n_in_frame": 0,
+                            "n_behind": n_behind, "mean_depth": None,
+                            "depth_min": None, "depth_max": None})
             continue
 
-        x = pts_c_front[:, 0] / pts_c_front[:, 2]
-        y = pts_c_front[:, 1] / pts_c_front[:, 2]
+        x = pts_f[:, 0] / pts_f[:, 2]
+        y = pts_f[:, 1] / pts_f[:, 2]
         u = K[0, 0] * x + K[0, 2]
         v = K[1, 1] * y + K[1, 2]
         valid_mask = (u >= 0) & (u < W) & (v >= 0) & (v < H)
         n_in_frame = int(valid_mask.sum())
-        depths = pts_c_front[valid_mask, 2]
+        depths = pts_f[valid_mask, 2]
         mean_depth = float(depths.mean()) if depths.size else 0.0
         depth_min = float(depths.min()) if depths.size else 0.0
         depth_max = float(depths.max()) if depths.size else 0.0
 
-        az = cam.get("azimuth_offset_deg", 0.0)
-        el = cam.get("elevation_offset_deg", 0.0)
         flag = "OK" if n_in_frame > 10 else "*** FEW POINTS IN FRAME ***"
         print(f"  {i:>3}  {source:<12} {az:>6.1f} {el:>6.1f}"
               f"  {n_in_frame:>10}  {n_behind:>7}  {flag}")
-
-        # ── Build overlay image ───────────────────────────────────────────
-        rgb = np.asarray(view["rgb"], dtype=np.uint8)
-        if rgb.shape[0] != H or rgb.shape[1] != W:
-            rgb = cv2.resize(rgb, (W, H))
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-
-        # Draw mask outline in green
-        mask_np = np.asarray(view["mask"], dtype=np.uint8) * 255
-        if mask_np.shape[0] != H or mask_np.shape[1] != W:
-            mask_np = cv2.resize(mask_np, (W, H), interpolation=cv2.INTER_NEAREST)
-        contours, _ = cv2.findContours(mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(bgr, contours, -1, (0, 255, 0), 2)
-
-        # Draw projected COLMAP points in red
-        u_valid = u[valid_mask].astype(np.int32)
-        v_valid = v[valid_mask].astype(np.int32)
-        for pu, pv in zip(u_valid, v_valid):
-            cv2.circle(bgr, (int(pu), int(pv)), 3, (0, 0, 255), -1)
-
-        # Depth-colorize to help diagnose flipped Z
-        # Draw a legend bar with depth range
-        if depths.size > 0:
-            d_norm = ((depths - depth_min) / max(depth_max - depth_min, 1e-6)).clip(0, 1)
-            cmap = cv2.applyColorMap((d_norm * 255).astype(np.uint8).reshape(-1, 1), cv2.COLORMAP_JET)
-            for j, (pu, pv) in enumerate(zip(u_valid, v_valid)):
-                col = tuple(int(c) for c in cmap[j, 0])
-                cv2.circle(bgr, (int(pu), int(pv)), 2, col, -1)
-
-        # Annotate
-        cv2.putText(bgr, f"{source} az={az:.0f} el={el:.0f}",
-                    (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-        cv2.putText(bgr, f"pts in-frame={n_in_frame} behind={n_behind}",
-                    (6, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-        cv2.putText(bgr, f"depth [{depth_min:.3f}, {depth_max:.3f}]  mean={mean_depth:.3f}",
-                    (6, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-
-        fname = f"{i:03d}_{source}_az{az:.0f}_el{el:.0f}.jpg"
-        cv2.imwrite(str(overlay_dir / fname), bgr)
-
         results.append({
-            "view_idx": i,
-            "source": source,
-            "azimuth": az,
-            "elevation": el,
-            "n_in_frame": n_in_frame,
-            "n_behind": n_behind,
-            "mean_depth": mean_depth,
-            "depth_min": depth_min,
-            "depth_max": depth_max,
+            "view_idx": i, "source": source, "azimuth": az, "elevation": el,
+            "n_in_frame": n_in_frame, "n_behind": n_behind,
+            "mean_depth": mean_depth, "depth_min": depth_min, "depth_max": depth_max,
         })
 
-    # ── Summarise ─────────────────────────────────────────────────────────
     n_ok = sum(1 for r in results if r["n_in_frame"] > 10)
     n_bad = len(results) - n_ok
     print(f"\n  Total views: {len(results)}   in-frame>10pts: {n_ok}   problematic: {n_bad}")
@@ -337,8 +276,8 @@ def run(
 
     from object_isolation.core.object_scope import discover_object_scope
     from object_isolation.core.colmap_init import load_colmap_object_point_cloud
-    from object_isolation.core.pipeline import run_pipeline   # noqa: just to warm imports
     from object_isolation.core.dataset_builder import build_joint_supervision_views
+    _SV3D_RESOLUTION: int = 576  # must match SV3DBackend.native_resolution
 
     output_root_p = Path(output_root)
     obj_dir = output_root_p / f"obj_{object_id}"
@@ -369,18 +308,19 @@ def run(
     xyz_W = np.asarray(pcd.points, dtype=np.float32)
     print(f"  Loaded {xyz_W.shape[0]} seed points  (source: {metadata.get('init_source')})")
 
-    # ── Read conditioning-camera up vector (matches training exactly) ─────
-    cond_cam_up_W: np.ndarray | None = None
-    try:
-        with open(halluc_index) as _f:
-            _manifest = json.load(_f)
-        _cam_idx = int(_manifest.get("conditioning", {}).get("cam_index", -1))
-        if 0 <= _cam_idx < len(scope.cameras):
-            _R_cond = np.asarray(scope.cameras[_cam_idx]["R"], dtype=np.float64)
-            cond_cam_up_W = -_R_cond[1]
-            print(f"  Using cond cam {_cam_idx} up vector for up_W_override.")
-    except Exception as _e:
-        print(f"  Could not read cond cam up ({_e}); using scope.up_W.")
+    # ── Read conditioning-camera up vector (must mirror training.py exactly) ──
+    with open(halluc_index) as _f:
+        _manifest = json.load(_f)
+    _cam_idx = int(_manifest.get("conditioning", {}).get("cam_index", -1))
+    if _cam_idx < 0 or _cam_idx >= len(scope.cameras):
+        raise RuntimeError(
+            f"hallucination_index 'conditioning.cam_index'={_cam_idx} is out of range "
+            f"(scope has {len(scope.cameras)} cameras).  Re-run Phase 5."
+        )
+    _R_cond = np.asarray(scope.cameras[_cam_idx]["R"], dtype=np.float64)
+    cond_cam_up_W = -_R_cond[1]  # camera up in world = -row1 of R_w2c
+    cond_cam_up_W = (cond_cam_up_W / np.linalg.norm(cond_cam_up_W)).astype(np.float64)
+    print(f"  Using cond cam {_cam_idx} up vector for up_W_override.")
 
     # ── Load supervision views (mirrors training call exactly) ────────────
     print(f"Building supervision views ...")
@@ -392,8 +332,8 @@ def run(
         real_weight=1.0,
         hallucination_weight=1.0,
         fov_y_deg=50.0,
-        hallucination_resolution=576,
-        real_target_long_edge=576,
+        hallucination_resolution=_SV3D_RESOLUTION,
+        real_target_long_edge=_SV3D_RESOLUTION,
         up_W_override=cond_cam_up_W,
         seed_points_W=xyz_W,
     )

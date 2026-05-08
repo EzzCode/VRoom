@@ -23,9 +23,6 @@ Critical design points:
 - Real views use the original training camera R/T/K and Phase-3 alpha mask.
 - Hallucinated views use the Phase-5 SV3D orbit camera and Phase-5 alpha mask.
 - If an image is resized, K is scaled by exactly the same x/y factors.
-- Hallucinated views may receive a small audited image-space correction
-    (flip and/or bbox scale/translate) only when the corrected image mask
-    passes the same reference-mask alignment thresholds used for acceptance.
 """
 
 from __future__ import annotations
@@ -44,6 +41,20 @@ from .coordinate_frames import LocalSV3D, look_at_w2c
 logger = logging.getLogger(__name__)
 
 _VROOM_ROOT = Path(__file__).resolve().parents[2]
+
+# ── Shared constants — must match hallucination.py exactly ────────────────────
+# SV3D conditioning and output properties
+_SV3D_FILL_FRAC: float = 0.85    # fraction of output resolution the object fills
+
+# Seed-point projection thresholds
+_SEED_DEPTH_MIN: float = 0.1     # minimum camera-space depth to treat a point as "in front"
+_SEED_MIN_IN_FRONT: int = 20     # minimum in-front points required to trust p2–p98 estimate
+_SEED_PERCENTILE_LO: float = 2   # lower percentile for outlier-robust extent
+_SEED_PERCENTILE_HI: float = 98  # upper percentile for outlier-robust extent
+
+# World-scale clamp: prevents absurd telephoto/wide-angle K adjustments
+_WS_CLIP_MIN: float = 0.05
+_WS_CLIP_MAX: float = 2.0
 
 
 def _resolve_path(path_value: str | Path, *, manifest_dir: Path) -> Path:
@@ -102,84 +113,85 @@ def _resize_rgb_mask_camera(
     return rgb, mask, K2, new_width, new_height
 
 
-def _compute_aabb_world_scale_px(
-    aabb_min: np.ndarray,
-    aabb_max: np.ndarray,
+def _compute_world_scale_px(
+    seed_points_W: np.ndarray,
     R_w2c: np.ndarray,
     T_w2c: np.ndarray,
     K: np.ndarray,
-    sv3d_fill_frac: float = 0.85,
-    target_size: int = 576,
-    seed_points_W: Optional[np.ndarray] = None,
-) -> tuple[float, tuple[float, float]]:
+    target_size: int,
+) -> float:
+    """Return ws from COLMAP seed point projection.
+
+    ws  — ratio of world object extent in K_sv3d pixels to sv3d_px
+          (= fill_frac * target_size).  K_view = K_sv3d / ws gives the
+          telephoto intrinsics that make the object span sv3d_px in the
+          supervision image.
+
+    The principal point is NOT part of the return because the camera is
+    constructed with look_at_w2c(C_W, scope.centroid_W, ...), which places
+    scope.centroid_W exactly on the optical axis.  scope.centroid_W therefore
+    always projects to (cx_sv3d, cy_sv3d) = (res/2, res/2) regardless of which
+    COLMAP seed points are used, so cx and cy of K_view must stay unchanged.
+
+    Raises RuntimeError if fewer than _SEED_MIN_IN_FRONT points are in
+    front of this camera (pathological case — signals a data problem).
+    """
     R = R_w2c.astype(np.float64)
     T = T_w2c.astype(np.float64).reshape(3)
     K64 = K.astype(np.float64)
     fx, fy = float(K64[0, 0]), float(K64[1, 1])
     cx_k, cy_k = float(K64[0, 2]), float(K64[1, 2])
-    fallback_center = (float(target_size) / 2.0, float(target_size) / 2.0)
-    sv3d_px = sv3d_fill_frac * float(target_size)
+    sv3d_px = _SV3D_FILL_FRAC * float(target_size)
 
-    if seed_points_W is not None and len(seed_points_W) > 0:
-        pts = np.asarray(seed_points_W, dtype=np.float64)
-        pts_cam = (R @ pts.T).T + T
-        in_front = pts_cam[:, 2] > 0.1
-        if in_front.sum() >= 20:
-            pts_f = pts_cam[in_front]
-            u_all = pts_f[:, 0] / pts_f[:, 2] * fx + cx_k
-            v_all = pts_f[:, 1] / pts_f[:, 2] * fy + cy_k
-            u_lo = float(np.percentile(u_all, 2))
-            u_hi = float(np.percentile(u_all, 98))
-            v_lo = float(np.percentile(v_all, 2))
-            v_hi = float(np.percentile(v_all, 98))
-            world_px = float(max(u_hi - u_lo, v_hi - v_lo))
-            scale = float(np.clip(world_px / max(sv3d_px, 1.0), 0.05, 2.0))
-            cx_px = float(np.median(u_all))
-            cy_px = float(np.median(v_all))
-            return scale, (cx_px, cy_px)
+    pts = np.asarray(seed_points_W, dtype=np.float64)
+    pts_cam = (R @ pts.T).T + T
+    in_front = pts_cam[:, 2] > _SEED_DEPTH_MIN
+    n_in_front = int(in_front.sum())
+    if n_in_front < _SEED_MIN_IN_FRONT:
+        raise RuntimeError(
+            f"Only {n_in_front} of {len(pts)} COLMAP seed points are in front of this camera "
+            f"(depth > {_SEED_DEPTH_MIN}).  Expected >= {_SEED_MIN_IN_FRONT}.  "
+            "Check that seed_points_W and the camera are in the same world frame."
+        )
 
-    xs = [float(aabb_min[0]), float(aabb_max[0])]
-    ys = [float(aabb_min[1]), float(aabb_max[1])]
-    zs = [float(aabb_min[2]), float(aabb_max[2])]
-    corners = np.array([[x, y, z] for x in xs for y in ys for z in zs], dtype=np.float64)
-    pts_cam = (R @ corners.T).T + T
-    in_front = pts_cam[:, 2] > 1e-3
-    if int(in_front.sum()) < 2:
-        return 1.0, fallback_center
     pts_f = pts_cam[in_front]
-    u = pts_f[:, 0] / pts_f[:, 2] * fx + cx_k
-    v = pts_f[:, 1] / pts_f[:, 2] * fy + cy_k
-    world_px = float(max(u.max() - u.min(), v.max() - v.min()))
-    scale = float(np.clip(world_px / max(sv3d_px, 1.0), 0.05, 2.0))
-
-    centroid_W = (np.asarray(aabb_min, np.float64) + np.asarray(aabb_max, np.float64)) / 2.0
-    pt_cam = R @ centroid_W + T
-    if pt_cam[2] > 1e-3:
-        cx_px = float(pt_cam[0] / pt_cam[2] * fx + cx_k)
-        cy_px = float(pt_cam[1] / pt_cam[2] * fy + cy_k)
-    else:
-        cx_px, cy_px = fallback_center
-    return scale, (cx_px, cy_px)
+    u_all = pts_f[:, 0] / pts_f[:, 2] * fx + cx_k
+    v_all = pts_f[:, 1] / pts_f[:, 2] * fy + cy_k
+    u_lo = float(np.percentile(u_all, _SEED_PERCENTILE_LO))
+    u_hi = float(np.percentile(u_all, _SEED_PERCENTILE_HI))
+    v_lo = float(np.percentile(v_all, _SEED_PERCENTILE_LO))
+    v_hi = float(np.percentile(v_all, _SEED_PERCENTILE_HI))
+    world_px = float(max(u_hi - u_lo, v_hi - v_lo))
+    ws = float(np.clip(world_px / max(sv3d_px, 1.0), _WS_CLIP_MIN, _WS_CLIP_MAX))
+    return ws
 
 
 def build_hallucinated_supervision_views(
     halluc_index_path: str | Path,
     local_sv3d: LocalSV3D,
     *,
+    seed_points_W: np.ndarray,
     weight: float = 0.10,
     fov_y_deg: float = 50.0,
     target_resolution: int = 576,
     up_W_override: Optional[np.ndarray] = None,
     include_conditioning: bool = True,
-    aabb_min_W: Optional[np.ndarray] = None,
-    aabb_max_W: Optional[np.ndarray] = None,
-    sv3d_fill_frac: float = 0.85,
-    seed_points_W: Optional[np.ndarray] = None,
 ) -> list[dict]:
+    """Build hallucinated supervision views from Phase-5 outputs.
+
+    seed_points_W is required — it is used to compute per-view telephoto
+    intrinsics (K_view) that make the object span _SV3D_FILL_FRAC of the
+    target image exactly as SV3D rendered it.
+    """
+    if seed_points_W is None or len(seed_points_W) == 0:
+        raise ValueError(
+            "seed_points_W must be a non-empty array of COLMAP seed points.  "
+            "They are required to compute per-view telephoto K_view."
+        )
+
     halluc_index_path = Path(halluc_index_path)
     if not halluc_index_path.exists():
-        logger.warning(f"Hallucination manifest not found: {halluc_index_path}")
-        return []
+        raise FileNotFoundError(f"Hallucination manifest not found: {halluc_index_path}")
 
     with open(halluc_index_path) as f:
         manifest = json.load(f)
@@ -202,17 +214,18 @@ def build_hallucinated_supervision_views(
     centroid_W = np.asarray(local_sv3d.world_local.centroid_W, dtype=np.float64)
 
     views: list[dict] = []
-    n_skipped = 0
     for fr in candidates:
         rgba_path = _resolve_path(fr["out_rgba_path"], manifest_dir=halluc_index_path.parent)
         if not rgba_path.exists():
-            n_skipped += 1
-            continue
+            raise FileNotFoundError(
+                f"Accepted hallucination RGBA missing: {rgba_path}\n"
+                f"  Frame: az={fr.get('azimuth_V_deg')} el={fr.get('elevation_V_deg')}\n"
+                "  Re-run Phase 5 or check the output directory."
+            )
 
         rgba = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
         if rgba is None:
-            n_skipped += 1
-            continue
+            raise RuntimeError(f"cv2.imread failed (returned None) for accepted frame: {rgba_path}")
 
         rgb, mask = _rgba_to_rgb_mask(rgba)
         if rgb.shape[0] != res or rgb.shape[1] != res:
@@ -228,23 +241,25 @@ def build_hallucinated_supervision_views(
             up = up / max(np.linalg.norm(up), 1e-9)
             R_w2c, T_w2c = look_at_w2c(np.asarray(C_W, dtype=np.float64), centroid_W, up)
 
+        # Compute telephoto intrinsics so the object spans _SV3D_FILL_FRAC of
+        # the image exactly as it does in the SV3D render.
+        # Only the focal length is scaled.  cx/cy are kept at (res/2, res/2)
+        # because the camera looks directly at scope.centroid_W, which the
+        # look_at_w2c construction places exactly on the optical axis →
+        # scope.centroid_W always projects to (cx_sv3d, cy_sv3d).  Shifting cx/cy
+        # to track the COLMAP seed centroid would mis-align the projection with
+        # the SV3D image content.
+        ws = _compute_world_scale_px(
+            seed_points_W=seed_points_W,
+            R_w2c=np.asarray(R_w2c, dtype=np.float64),
+            T_w2c=np.asarray(T_w2c, dtype=np.float64),
+            K=K_sv3d.astype(np.float64),
+            target_size=res,
+        )
         K_view = K_sv3d.copy()
-        if aabb_min_W is not None and aabb_max_W is not None:
-            ws, centroid_uv = _compute_aabb_world_scale_px(
-                np.asarray(aabb_min_W, dtype=np.float64),
-                np.asarray(aabb_max_W, dtype=np.float64),
-                np.asarray(R_w2c, dtype=np.float64),
-                np.asarray(T_w2c, dtype=np.float64),
-                K_sv3d.astype(np.float64),
-                sv3d_fill_frac=sv3d_fill_frac,
-                target_size=res,
-                seed_points_W=seed_points_W,
-            )
-            # Apply telephoto fix to avoid destroying the SV3D image resolution
-            K_view[0, 0] = float(K_sv3d[0, 0] / ws)
-            K_view[1, 1] = float(K_sv3d[1, 1] / ws)
-            K_view[0, 2] = float((K_sv3d[0, 2] - centroid_uv[0]) / ws + K_sv3d[0, 2])
-            K_view[1, 2] = float((K_sv3d[1, 2] - centroid_uv[1]) / ws + K_sv3d[1, 2])
+        K_view[0, 0] = float(K_sv3d[0, 0] / ws)
+        K_view[1, 1] = float(K_sv3d[1, 1] / ws)
+        # K_view[0, 2] and K_view[1, 2] intentionally unchanged.
 
         views.append({
             "source": "hallucinated",
@@ -266,9 +281,6 @@ def build_hallucinated_supervision_views(
             },
             "weight": weight,
         })
-
-    if n_skipped > 0:
-        logger.warning(f"Skipped {n_skipped} hallucinated frames.")
 
     return views
 
@@ -367,6 +379,7 @@ def build_joint_supervision_views(
     extraction_index_path: str | Path,
     scope,
     local_sv3d: LocalSV3D,
+    seed_points_W: np.ndarray,
     real_weight: float = 1.0,
     hallucination_weight: float = 1.0,
     fov_y_deg: float = 50.0,
@@ -374,7 +387,6 @@ def build_joint_supervision_views(
     real_target_long_edge: int = 576,
     up_W_override: Optional[np.ndarray] = None,
     include_conditioning: bool = True,
-    seed_points_W: Optional[np.ndarray] = None,
 ) -> list[dict]:
     """Build one aligned training set containing real and hallucinated views."""
     real_views = build_real_supervision_views(
@@ -383,19 +395,15 @@ def build_joint_supervision_views(
         weight=real_weight,
         target_long_edge=real_target_long_edge,
     )
-    aabb_min = np.asarray(scope.aabb_min_W, dtype=np.float64) if scope is not None else None
-    aabb_max = np.asarray(scope.aabb_max_W, dtype=np.float64) if scope is not None else None
     hallucinated_views = build_hallucinated_supervision_views(
         halluc_index_path=halluc_index_path,
         local_sv3d=local_sv3d,
+        seed_points_W=seed_points_W,
         weight=hallucination_weight,
         fov_y_deg=fov_y_deg,
         target_resolution=hallucination_resolution,
         up_W_override=up_W_override,
         include_conditioning=include_conditioning,
-        aabb_min_W=aabb_min,
-        aabb_max_W=aabb_max,
-        seed_points_W=seed_points_W,
     )
     views = real_views + hallucinated_views
     logger.info(
@@ -405,9 +413,97 @@ def build_joint_supervision_views(
     return views
 
 
-def build_supervision_views(*args, **kwargs) -> list[dict]:
-    """Backward-compatible alias for hallucination-only callers."""
-    return build_hallucinated_supervision_views(*args, **kwargs)
+def write_projection_overlays(
+    xyz_W: np.ndarray,
+    supervision_views: list[dict],
+    output_dir: str | Path,
+) -> None:
+    """Project COLMAP seed points onto every supervision view and save overlay images.
+
+    Called automatically after Phase 6 to verify coordinate-frame alignment.
+    Colour-codes each projected point by depth (JET colormap: blue=near, red=far).
+    Green contour = supervision mask.  Yellow text = source / az / el / stats.
+
+    If the dots DON'T trace the object silhouette the camera coordinate frame
+    is broken and Phase 7 training data is incorrect.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    xyz = np.asarray(xyz_W, dtype=np.float64)
+    for i, view in enumerate(supervision_views):
+        cam = view["camera"]
+        R = np.asarray(cam["R"], dtype=np.float64)
+        T = np.asarray(cam["T"], dtype=np.float64).flatten()
+        K = np.asarray(cam["K"], dtype=np.float64)
+        W, H = int(cam["width"]), int(cam["height"])
+        source = view.get("source", "?")
+        az = float(cam.get("azimuth_offset_deg", 0.0))
+        el = float(cam.get("elevation_offset_deg", 0.0))
+
+        # Project
+        pts_c = (R @ xyz.T).T + T.reshape(1, 3)
+        in_front = pts_c[:, 2] > _SEED_DEPTH_MIN
+        pts_f = pts_c[in_front]
+
+        # Build BGR overlay
+        rgb = np.asarray(view["rgb"], dtype=np.uint8)
+        if rgb.shape[0] != H or rgb.shape[1] != W:
+            rgb = cv2.resize(rgb, (W, H))
+        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+        # Green mask contour
+        mask_u8 = np.asarray(view["mask"], dtype=np.uint8) * 255
+        if mask_u8.shape[0] != H or mask_u8.shape[1] != W:
+            mask_u8 = cv2.resize(mask_u8, (W, H), interpolation=cv2.INTER_NEAREST)
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(bgr, contours, -1, (0, 255, 0), 2)
+
+        n_in_frame = 0
+        if pts_f.shape[0] > 0:
+            x = pts_f[:, 0] / pts_f[:, 2]
+            y = pts_f[:, 1] / pts_f[:, 2]
+            u = (K[0, 0] * x + K[0, 2]).astype(np.float32)
+            v = (K[1, 1] * y + K[1, 2]).astype(np.float32)
+            valid = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+            depths = pts_f[valid, 2]
+            u_v = u[valid].astype(np.int32)
+            v_v = v[valid].astype(np.int32)
+            n_in_frame = int(valid.sum())
+            if depths.size > 0:
+                d_lo, d_hi = float(depths.min()), float(depths.max())
+                d_norm = ((depths - d_lo) / max(d_hi - d_lo, 1e-6)).clip(0, 1)
+                cmap = cv2.applyColorMap(
+                    (d_norm * 255).astype(np.uint8).reshape(-1, 1), cv2.COLORMAP_JET
+                )
+                for j, (pu, pv) in enumerate(zip(u_v, v_v)):
+                    cv2.circle(bgr, (int(pu), int(pv)), 3, tuple(int(c) for c in cmap[j, 0]), -1)
+                cv2.putText(
+                    bgr,
+                    f"pts={n_in_frame}  d=[{d_lo:.2f},{d_hi:.2f}]",
+                    (6, H - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 0), 1,
+                )
+
+        cv2.putText(
+            bgr,
+            f"{source}  az={az:.0f}  el={el:.0f}",
+            (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1,
+        )
+
+        flag = "" if n_in_frame > 10 else "  *** FEW POINTS ***"
+        cv2.putText(
+            bgr,
+            f"in-frame={n_in_frame}  behind={int((~in_front).sum())}{flag}",
+            (6, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1,
+        )
+
+        fname = f"{i:03d}_{source}_az{az:.0f}_el{el:.0f}.jpg"
+        cv2.imwrite(str(output_dir / fname), bgr)
+
+    logger.info(
+        "Projection overlays: %d views saved to %s",
+        len(supervision_views), output_dir,
+    )
 
 
 def save_supervision_manifest(views: list[dict], output_path: str | Path) -> Path:

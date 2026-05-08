@@ -39,13 +39,25 @@ from .object_scope import ObjectScope
 
 logger = logging.getLogger(__name__)
 
+# ── Shared constants — must match dataset_builder.py exactly ──────────────────
+# Fraction of the SV3D native resolution that the object fills in conditioning
+# and reference renders.  Must match _SV3D_FILL_FRAC in dataset_builder.py.
+_SV3D_FILL_FRAC: float = 0.85
+
+# Alpha threshold used to binarise ObjectGS reference renders into a mask.
+_ALPHA_THRESHOLD: float = 0.4
+
+# Minimum number of foreground pixels in the SV3D output mask; frames below
+# this are treated as empty (no object visible) and rejected.
+_MIN_SV3D_MASK_PIXELS: int = 200
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Conditioning image prep
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _prepare_conditioning(rgba_path: Path, target_size: int = 576,
-                          fill_frac: float = 0.85,
+                          fill_frac: float = _SV3D_FILL_FRAC,
                           bg_value: int = 255) -> np.ndarray:
     """Crop tight on alpha, pad to square, composite on neutral bg."""
     rgba = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
@@ -109,7 +121,7 @@ def _alpha_from_white_bg(rgb: np.ndarray, sat_thresh: int = 12,
 
 
 def _normalize_framing(rgb: np.ndarray, alpha: np.ndarray,
-                       target_size: int, fill_frac: float = 0.85,
+                       target_size: int, fill_frac: float = _SV3D_FILL_FRAC,
                        bg_value: int = 255):
     """Tight-crop on alpha, square-pad to give ``fill_frac`` coverage, resize.
 
@@ -121,7 +133,7 @@ def _normalize_framing(rgb: np.ndarray, alpha: np.ndarray,
     if a01.max() > 1.5:
         a01 = a01 / 255.0
     a01 = np.clip(a01, 0.0, 1.0)
-    mask = a01 > 0.4
+    mask = a01 > _ALPHA_THRESHOLD
     # Drop floaters: keep only the largest connected component for the bbox.
     # (Stray Gaussians outside the object inflate the bbox and squash the
     # actual silhouette into a corner — visible as apparent mirror/flip on
@@ -253,7 +265,7 @@ def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
 
     # Normalize framing to match SV3D conditioning convention (≈85% fill, square).
     rgb_u8, alpha = _normalize_framing(rgb_u8, alpha, target_size=resolution,
-                                       fill_frac=0.85, bg_value=255)
+                                       fill_frac=_SV3D_FILL_FRAC, bg_value=255)
     return rgb_u8, alpha
 
 
@@ -332,18 +344,14 @@ def run_hallucination(
     # SV3D outputs inherit the cond image's roll; reference renders must use
     # the same up so the silhouettes align (otherwise scene-averaged up_W can
     # be tens of degrees off-axis from any individual camera).
-    cond_cam_up_W: Optional[np.ndarray] = None
-    try:
-        cond_cam_dict = scope.cameras[int(top1["cam_index"])]
-        R_cond = np.asarray(cond_cam_dict["R"], dtype=np.float64)  # already R_w2c
-        cond_cam_up_W = (-R_cond[1]).astype(np.float64)
-        cond_cam_up_W = cond_cam_up_W / max(np.linalg.norm(cond_cam_up_W), 1e-9)
-        ang_deg = float(np.degrees(np.arccos(np.clip(
-            cond_cam_up_W @ np.asarray(scope.up_W, dtype=np.float64), -1.0, 1.0))))
-        logger.info("Cond cam up_W=%s (∠ scope.up_W = %.1f°)",
-                    np.round(cond_cam_up_W, 3).tolist(), ang_deg)
-    except (IndexError, KeyError, ValueError) as e:
-        logger.warning("Could not extract cond cam up; falling back to scope.up_W (%s)", e)
+    cond_cam_dict = scope.cameras[int(top1["cam_index"])]
+    R_cond = np.asarray(cond_cam_dict["R"], dtype=np.float64)  # already R_w2c
+    cond_cam_up_W = (-R_cond[1]).astype(np.float64)
+    cond_cam_up_W = cond_cam_up_W / max(np.linalg.norm(cond_cam_up_W), 1e-9)
+    ang_deg = float(np.degrees(np.arccos(np.clip(
+        cond_cam_up_W @ np.asarray(scope.up_W, dtype=np.float64), -1.0, 1.0))))
+    logger.info("Cond cam up_W=%s (\u2220 scope.up_W = %.1f\u00b0)",
+                np.round(cond_cam_up_W, 3).tolist(), ang_deg)
 
     # Backend.
     if backend is None:
@@ -379,7 +387,7 @@ def run_hallucination(
             resolution=res, fov_y_deg=fov_y_deg,
             up_W_override=cond_cam_up_W,
         )
-        m_objgs = ref_alpha > 0.4
+        m_objgs = ref_alpha > _ALPHA_THRESHOLD
         m_sv3d = _alpha_from_white_bg(v.rgb)
 
         # Resize masks to common shape (should match res anyway).
@@ -394,7 +402,7 @@ def run_hallucination(
         # Accept logic.
         accepted = True
         reason = ""
-        if n_sv3d < 200:
+        if n_sv3d < _MIN_SV3D_MASK_PIXELS:
             accepted = False
             reason = "sv3d_empty"
         elif n_objgs < min_objgs_pixels:

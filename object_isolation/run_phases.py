@@ -84,9 +84,6 @@ def run(
     max_anchor_count: int = 20000,
     densify_grad_threshold: float = 0.00005,
     densify_extra_ratio: float = 0.08,
-    min_halluc_iou: float = 0.55,
-    min_halluc_area_ratio: float = 0.65,
-    max_halluc_area_ratio: float = 1.45,
     n_compare_views: int = 8,
     skip_compare: bool = False,
     debug: bool = False,
@@ -177,9 +174,6 @@ def run(
                 max_anchor_count=max_anchor_count,
                 densify_grad_threshold=densify_grad_threshold,
                 densify_extra_ratio=densify_extra_ratio,
-                min_halluc_iou=min_halluc_iou,
-                min_halluc_area_ratio=min_halluc_area_ratio,
-                max_halluc_area_ratio=max_halluc_area_ratio,
             )
             obj_gaussians = summary.pop("_gaussians", None)
         except Exception as e:
@@ -314,13 +308,6 @@ def _parse_args() -> argparse.Namespace:
                    help="Stop densification once this anchor count is reached.")
     p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
     p.add_argument("--densify_extra_ratio", type=float, default=0.08)
-    p.add_argument("--min_halluc_iou", type=float, default=0.55,
-                   help="Min mask-IoU for hallucinated-view alignment audit. "
-                        "Lower values accept more back/side views (e.g. 0.10).")
-    p.add_argument("--min_halluc_area_ratio", type=float, default=0.65,
-                   help="Min SV3D/reference mask area ratio (lower = more lenient).")
-    p.add_argument("--max_halluc_area_ratio", type=float, default=1.45,
-                   help="Max SV3D/reference mask area ratio (higher = more lenient).")
     p.add_argument("--n_compare_views", type=int, default=8)
     p.add_argument("--skip_compare", action="store_true",
                    help="Skip before/after orbit rendering.")
@@ -354,9 +341,6 @@ def main():
         max_anchor_count=args.max_anchor_count,
         densify_grad_threshold=args.densify_grad_threshold,
         densify_extra_ratio=args.densify_extra_ratio,
-        min_halluc_iou=args.min_halluc_iou,
-        min_halluc_area_ratio=args.min_halluc_area_ratio,
-        max_halluc_area_ratio=args.max_halluc_area_ratio,
         n_compare_views=args.n_compare_views,
         skip_compare=args.skip_compare,
         debug=args.debug,
