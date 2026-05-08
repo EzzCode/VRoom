@@ -1,9 +1,9 @@
 """
-VRoom Multi-Modal Tracking Pipeline
+VRoom Mask-Object Tracking Pipeline
 
-Loads pre-computed masks from mask_processor.py and performs Kalman + Hungarian
-tracking with temporal consensus refinement to generate ID-consistent masks
-for downstream 3D voting.
+Loads pre-computed masks from mask_processor.py
+and performs tracking to generate ID-consistent masks
+for downstream vote.py 3D voting.
 
 Usage:
 	python object_tracker.py --input_dir data/images --mask_dir data/sam_output/masks --output_dir Tracked
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_frame_masks(npz_path: Path) -> List[np.ndarray]:
-	"""Load boolean masks for one frame from compressed NPZ."""
+	"""Load boolean masks for a frame from compressed NPZ."""
 	if not npz_path.exists():
 		return []
 	with np.load(str(npz_path)) as data:
@@ -64,40 +64,90 @@ def mask_bbox(mask):
 
 def box_iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
 	"""Compute IoU between two XYXY boxes."""
-	ax1, ay1, ax2, ay2 = a
+	# Unpack boxs:
+	# (x1,y1) is top-left
+	# (x2,y2) is bottom-right
+	ax1, ay1, ax2, ay2 = a 
 	bx1, by1, bx2, by2 = b
-	ix1 = max(ax1, bx1)
-	iy1 = max(ay1, by1)
-	ix2 = min(ax2, bx2)
-	iy2 = min(ay2, by2)
-	iw = max(0.0, ix2 - ix1)
-	ih = max(0.0, iy2 - iy1)
-	inter = iw * ih
+	
+	# intersection box coordinates
+	ix1 = max(ax1, bx1)  # Intersection left edge (rightmost of two left edges)
+	iy1 = max(ay1, by1)  # Intersection top edge (bottommost of two top edges)
+	ix2 = min(ax2, bx2)  # Intersection right edge (leftmost of two right edges)
+	iy2 = min(ay2, by2)  # Intersection bottom edge (topmost of two bottom edges)
+	
+	# intersection area
+	iw = max(0.0, ix2 - ix1)  # Intersection width (0 if boxes don't overlap horizontally)
+	ih = max(0.0, iy2 - iy1)  # Intersection height (0 if boxes don't overlap vertically)
+	inter = iw * ih  # Intersection area
+	
+	# if no intersection, IoU is 0
 	if inter <= 0.0:
 		return 0.0
-	aa = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-	ab = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-	union = aa + ab - inter
+	
+	# Calculate areas of both boxes
+	areaA = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)  
+	areaB = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+	
+	# Calculate union area: sum of both areas minus intersection
+	union = areaA + areaB - inter
+	
+	# Return IoU = intersection / union
 	return 0.0 if union <= 0.0 else float(inter / union)
 
 
-def extract_lbp_hist(gray_u8, mask):
-	"""Extract normalized 8-neighbor LBP histogram over masked pixels."""
-	if gray_u8.shape != mask.shape:
+def extract_lbp_hist(gray, mask):
+	"""
+	Extract normalized 8-neighbor LBP histogram over masked pixels.
+
+	Parameters:
+		gray (np.ndarray): Grayscale image (2D array).
+		mask (np.ndarray): Binary mask (same shape as gray), selects pixels to include.
+
+	Returns:
+		hist (np.ndarray): 256x1 normalized histogram of LBP codes for masked pixels.
+	"""
+	# Ensure input image and mask have the same shape
+	if gray.shape != mask.shape:
 		raise ValueError("Gray image and mask must have identical shape for LBP extraction")
-	if gray_u8.shape[0] < 3 or gray_u8.shape[1] < 3:
+
+	# If image is too small for LBP (needs at least 3x3), return zero histogram
+	if gray.shape[0] < 3 or gray.shape[1] < 3:
 		return np.zeros((256, 1), dtype=np.float32)
 
-	center = gray_u8[1:-1, 1:-1]
+	# Center pixels (exclude border, since LBP needs 8 neighbors)
+	center = gray[1:-1, 1:-1]
+	# Prepare output array for LBP 
 	lbp = np.zeros_like(center, dtype=np.uint8)
-	neighbors = [(-1, -1, 1), (-1, 0, 2), (-1, 1, 4), (0, 1, 8), (1, 1, 16), (1, 0, 32), (1, -1, 64), (0, -1, 128)]
+
+	# Define 8 neighbors: (dy, dx, bit value)
+	neighbors = [
+		(-1, -1, 1),   # top-left
+		(-1,  0, 2),   # top
+		(-1,  1, 4),   # top-right
+		( 0,  1, 8),   # right
+		( 1,  1, 16),  # bottom-right
+		( 1,  0, 32),  # bottom
+		( 1, -1, 64),  # bottom-left
+		( 0, -1, 128)  # left
+	]
+
+	# Compute LBP code for each center pixel
 	for dy, dx, bit in neighbors:
-		neighbor = gray_u8[1 + dy:gray_u8.shape[0] - 1 + dy, 1 + dx:gray_u8.shape[1] - 1 + dx]
+		# Shifted neighbor region
+		neighbor = gray[1 + dy:gray.shape[0] - 1 + dy, 1 + dx:gray.shape[1] - 1 + dx]
+		# If neighbor >= center, set corresponding bit
 		lbp |= ((neighbor >= center).astype(np.uint8) * bit)
 
+	# Mask out border pixels (LBP is not defined there)
 	inner_mask = mask[1:-1, 1:-1]
+	# Get LBP values for masked pixels
 	values = lbp[inner_mask]
+
+	# Compute histogram of LBP codes (0 to 255)
 	hist = np.bincount(values, minlength=256).astype(np.float32).reshape(-1, 1)
+
+	# Normalize histogram to sum to 1 (if any pixels)
 	total = float(hist.sum())
 	if total > 0.0:
 		hist /= total
@@ -107,14 +157,53 @@ def extract_lbp_hist(gray_u8, mask):
 # ── Kalman filter ────────────────────────────────────────────────────────────
 
 def create_kalman_filter(cx, cy):
-	"""Create a constant-velocity Kalman filter for 2D centroid motion."""
+	"""
+	Create a constant-velocity Kalman filter for 2D centroid motion.
+	State vector: [x, y, vx, vy] (position and velocity)
+	Measurement: [x, y] (position only)
+	Args:
+		cx (float): Initial x position (centroid x)
+		cy (float): Initial y position (centroid y)
+	Returns:
+		cv2.KalmanFilter: Configured Kalman filter instance
+	"""
+	# Create Kalman filter with 4 dynamic params (x, y, vx, vy) and 2 measured params (x, y)
 	kf = cv2.KalmanFilter(4, 2)
-	kf.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float32)
-	kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
-	kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2
-	kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
+
+	# State transition matrix (models constant velocity)
+	kf.transitionMatrix = np.array([
+		[1, 0, 1, 0], # x' = x + vx
+		[0, 1, 0, 1], # y' = y + vy
+		[0, 0, 1, 0], # vx' = vx
+		[0, 0, 0, 1]  # vy' = vy
+	], dtype=np.float32)
+
+	# Measurement matrix
+	kf.measurementMatrix = np.array([
+		[1, 0, 0, 0], # measure x
+		[0, 1, 0, 0]  # measure y
+	], dtype=np.float32)
+
+	# Process noise covariance (model uncertainty)
+	# Small values: assume nearly constant velocity
+	kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2 	# more/less smoothing (higher = trust in measurements, less smoothing)
+
+	# Measurement noise covariance (sensor uncertainty)
+	# Larger value: measurements are noisy
+	kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1 # more/less responsive to measurements (higher = less trust in measurements, more smoothing)
+
+	# Posterior error covariance (initial state uncertainty) 
+	# start with uncertainty we only know initial position, not velocity
 	kf.errorCovPost = np.eye(4, dtype=np.float32)
-	kf.statePost = np.array([[cx], [cy], [0.0], [0.0]], dtype=np.float32)
+
+	# Initial state: [x, y, vx, vy] (start at given position, zero velocity)
+	kf.statePost = np.array([
+		[cx],
+		[cy],
+		[0.0],
+		[0.0]
+	], dtype=np.float32)
+
 	return kf
 
 
@@ -127,30 +216,51 @@ def identity_affine() -> np.ndarray:
 
 def estimate_camera_motion(prev_bgr, curr_bgr, curr_masks, max_corners=1200):
 	"""Estimate global camera motion from background optical flow."""
+	_MIN_FEATURES = 12  # Minimum features required to estimate motion; otherwise return identity
+	_MIN_TRACKED = 8     # Minimum successfully tracked features required; otherwise return identity
+	# If previous or current frame is missing, return identity (no motion)
 	if prev_bgr is None or curr_bgr is None:
 		return identity_affine()
 
+	# Convert both frames to grayscale for feature detection and tracking
 	prev_gray = cv2.cvtColor(prev_bgr, cv2.COLOR_BGR2GRAY)
 	curr_gray = cv2.cvtColor(curr_bgr, cv2.COLOR_BGR2GRAY)
 	h, w = curr_gray.shape[:2]
 
+	# Create a foreground mask (fg) of zeros 
 	fg = np.zeros((h, w), dtype=np.uint8)
+	# Mark foreground regions (moving objects) as 255 in the mask
 	for m in curr_masks:
 		if m.shape == fg.shape:
 			fg[m] = 255
 
+	# Dilate the foreground mask to cover more area around objects
 	if np.any(fg):
 		kernel = np.ones((5, 5), dtype=np.uint8)
 		fg = cv2.dilate(fg, kernel, iterations=2)
 
+	# Invert the foreground mask to get the background mask (bg)
 	bg = cv2.bitwise_not(fg)
+	# If not enough background pixels, return identity
 	if int(np.count_nonzero(bg)) < 200:
 		return identity_affine()
 
-	p0 = cv2.goodFeaturesToTrack(prev_gray, mask=bg, maxCorners=max_corners, qualityLevel=0.01, minDistance=7, blockSize=7)
-	if p0 is None or len(p0) < 12:
+	# Detect good features to track in the background regions of the previous frame
+	# Shi-Tomasi corner detection
+	p0 = cv2.goodFeaturesToTrack( 
+		prev_gray,
+		mask=bg,
+		maxCorners=max_corners,
+		qualityLevel=0.01,
+		minDistance=7,
+		blockSize=7
+	)
+	# If not enough features found, return identity
+	if p0 is None or len(p0) < _MIN_FEATURES:
 		return identity_affine()
 
+	# Track the detected features from previous to current frame using optical flow
+	# Lucas-Kanade optical flow
 	p1, st, _ = cv2.calcOpticalFlowPyrLK(
 		prev_gray,
 		curr_gray,
@@ -160,93 +270,153 @@ def estimate_camera_motion(prev_bgr, curr_bgr, curr_masks, max_corners=1200):
 		maxLevel=3,
 		criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
 	)
+	# If tracking failed, return identity
 	if p1 is None or st is None:
 		return identity_affine()
 
+	# Select only successfully tracked points
 	good_prev = p0[st.flatten() == 1]
 	good_curr = p1[st.flatten() == 1]
-	if len(good_prev) < 8:
+	# If not enough tracked points, return identity
+	if len(good_prev) < _MIN_TRACKED:
 		return identity_affine()
 
-	affine, _ = cv2.estimateAffinePartial2D(good_prev, good_curr, method=cv2.RANSAC, ransacReprojThreshold=3.0)
+	# Estimate affine transform (translation, rotation, scale, shear) using RANSAC
+	affine, _ = cv2.estimateAffinePartial2D(
+		good_prev,
+		good_curr,
+		method=cv2.RANSAC,
+		ransacReprojThreshold=3.0
+	)
+	# If estimation failed, return identity
 	if affine is None:
 		return identity_affine()
+	# Return the estimated affine matrix as float32
 	return affine.astype(np.float32)
 
 
 def apply_affine_to_kalman(kf, affine):
-	"""Warp Kalman position and velocity using affine transform."""
+	"""
+	Warp Kalman filter's position and velocity using an affine transform.
+	This updates both the posterior (statePost) and, if present, the prior (statePre) state vectors.
+	"""
+	# If Kalman filter object is None
 	if kf is None:
 		return
 
-	linear = affine[:, :2].astype(np.float32)
-	trans = affine[:, 2].astype(np.float32)
+	# Extract the linear (2x2) and translation (2,) parts of the affine matrix
+	linear = affine[:, :2].astype(np.float32)  # 2x2 matrix for rotation, scale, shear
+	trans = affine[:, 2].astype(np.float32)    # 2-vector for translation
 
 	def _warp_state(state_vec):
+		# Flatten the state vector to 1D
 		flat = state_vec.reshape(-1).astype(np.float32)
+		# Apply affine transform to position
 		pos = linear @ flat[:2] + trans
+		# Apply only the linear part to velocity (no translation)
 		vel = linear @ flat[2:4]
+		# Update the state vector with the warped position and velocity
 		flat[0], flat[1], flat[2], flat[3] = float(pos[0]), float(pos[1]), float(vel[0]), float(vel[1])
+		# Reshape back to column vector (4, 1)
 		return flat.reshape(4, 1)
 
+	# Warp the posterior state
 	kf.statePost = _warp_state(kf.statePost)
+	# If the prior state exists, warp it as well
 	if getattr(kf, "statePre", None) is not None:
 		kf.statePre = _warp_state(kf.statePre)
 
 
 def apply_affine_to_bbox(bbox, affine, frame_shape=None):
-	"""Warp XYXY bbox corners through affine and rebuild axis-aligned box."""
+	"""
+	Warp XYXY bbox corners through affine transformation and rebuild box.
+	Args:
+		bbox: [x1, y1, x2, y2] coordinates (top-left and bottom-right corners).
+		affine: 2x3 affine transformation matrix.
+		frame_shape: (height, width) tuple to clip the output box to frame boundaries.
+	Returns:
+		List of [wx1, wy1, wx2, wy2]: warped bounding box coordinates.
+	"""
 	x1, y1, x2, y2 = [float(v) for v in bbox]
+
+	# top-left, top-right, bottom-left, bottom-right
 	pts = np.array([[x1, y1], [x2, y1], [x1, y2], [x2, y2]], dtype=np.float32)
+	# Apply affine transformation to each corner
+	# affine[:, :2] is the 2x2 linear part, affine[:, 2] is the translation
 	warped = (affine[:, :2] @ pts.T).T + affine[:, 2]
+	# Find the new min/max x and y from the warped corners
 	wx1, wy1 = np.min(warped[:, 0]), np.min(warped[:, 1])
 	wx2, wy2 = np.max(warped[:, 0]), np.max(warped[:, 1])
 
+	# clip the coordinates to the frame boundaries
 	if frame_shape is not None:
 		h, w = frame_shape[:2]
-		wx1 = max(0.0, min(wx1, w - 1.0))
-		wy1 = max(0.0, min(wy1, h - 1.0))
-		wx2 = max(0.0, min(wx2, w - 1.0))
-		wy2 = max(0.0, min(wy2, h - 1.0))
+		wx1 = max(0.0, min(wx1, w - 1.0))  # wx1 to [0, w-1]
+		wy1 = max(0.0, min(wy1, h - 1.0))  # wy1 to [0, h-1]
+		wx2 = max(0.0, min(wx2, w - 1.0))  # wx2 to [0, w-1]
+		wy2 = max(0.0, min(wy2, h - 1.0))  # wy2 to [0, h-1]
 
+	# Return the warped bounding box
 	return [float(wx1), float(wy1), float(wx2), float(wy2)]
 
 
 # ── Temporal consensus matching ──────────────────────────────────────────────
 
 def compute_iou_vote(track_id, det_mask, frame_history, window_size):
-	"""Average IoU vote for a candidate detection against track history."""
+	"""Average IoU vote for a candidate detection against track history.
+	For a given track_id and detection mask, this function computes the average IoU
+	between the detection mask and the masks of the track in the recent frame history (up to window_size frames).
+	"""
+	# Select the most recent window_size frames from the history (or all if window_size==0)
 	recent = frame_history[-window_size:] if window_size > 0 else frame_history
 	scores = []
 	for entry in recent:
+		# Get the mask for this track_id in the historical entry
 		hist_mask = entry.get("masks", {}).get(track_id)
 		if hist_mask is None:
 			continue
+		# Compute IoU between the historical mask and the candidate detection mask
 		scores.append(mask_iou(hist_mask, det_mask))
 	if not scores:
+		# If there are no valid scores, return 0
 		return 0.0
+	# Return the average IoU score
 	return float(np.mean(scores))
 
 
 def appearance_distance(track_data, det_feat):
-	"""Compute appearance distance for tie-breaks."""
+	"""Compute appearance distance for tie-breaks.
+	Uses a weighted sum of color histogram and texture (LBP) histogram distances.
+	Lower mean more similar
+	"""
+	# Compute Bhattacharyya distance between color histograms and LBP histograms
 	dist_color = cv2.compareHist(track_data["hist"], det_feat["hist"], cv2.HISTCMP_BHATTACHARYYA)
 	dist_texture = cv2.compareHist(track_data["lbp"], det_feat["lbp"], cv2.HISTCMP_BHATTACHARYYA)
+	# color is weighted more than texture 
 	return 0.60 * dist_color + 0.40 * dist_texture
 
 
 def compute_appearance_tiebreak(tracks, tid_a, tid_b, det_feat):
-	"""Resolve near-equal IoU vote ties using appearance similarity."""
+	"""Resolve near-equal IoU vote ties using appearance similarity.
+	Compares two tracks (tid_a, tid_b) returns the track with the closest appearance.
+	"""
 	a_cost = appearance_distance(tracks[tid_a], det_feat)
 	b_cost = appearance_distance(tracks[tid_b], det_feat)
+	# Return the track id with the lower distance
 	return tid_a if a_cost <= b_cost else tid_b
 
 
 def update_frame_history(state, tracks, max_window):
-	"""Append current active track masks to sliding frame history."""
+	"""Append current active track masks to sliding frame history.
+	Maintains a sliding window of the most recent max_window frames in the state dict.
+	"""
+	# Create a new entry with all current track masks
 	entry = {"masks": {tid: trk["mask"] for tid, trk in tracks.items()}}
+	# Get or create the frame_history list in the state
 	history = state.setdefault("frame_history", [])
+	# Append the new entry
 	history.append(entry)
+	# Keep only the most recent max_window entries
 	if len(history) > max_window:
 		del history[:-max_window]
 
@@ -265,24 +435,38 @@ def match_with_consensus(
 	consensus_window=8,
 	tie_margin=0.05,
 ):
-	"""Run Hungarian matching, then refine assignment by temporal IoU consensus."""
+	"""Run Hungarian matching, then refine assignment by temporal IoU consensus.
+	This function performs object association between existing tracks and new detections.
+	1. Runs Hungarian matching on the cost matrix.
+	2. For each match, checks if another track has a better temporal IoU consensus with the detection.
+	3. If so, may reassign based on IoU or appearance tie-break.
+	4. Updates tracks, handles lost tracks, and re-identifies from the graveyard if possible.
+	Returns a dict of current output masks and the next available track id.
+	"""
 	if graveyard is None:
 		graveyard = {}
 	if frame_history is None:
 		frame_history = []
 
+	# Step 1: Hungarian matching 
+	# Guarantees the lowest total assignment cost across all objects, preventing two tracks from claiming the same detection
 	row_ind, col_ind = linear_sum_assignment(cost_matrix)
+	# Map track id to row index in cost matrix
 	row_by_tid = {tid: idx for idx, tid in enumerate(active_ids)}
 
 	proposals = []
+	# Step 2: For each matched pair, check for better consensus
 	for r, c in zip(row_ind, col_ind):
 		base_cost = float(cost_matrix[r, c])
 		if base_cost >= match_threshold:
 			continue
 
 		hung_tid = active_ids[r]
+		# Compute IoU vote for the Hungarian-assigned track
 		hung_vote = compute_iou_vote(hung_tid, new_feats[c]["mask"], frame_history, consensus_window)
 
+		# Search for any other track with a better IoU vote for this detection
+		#looks at the frame_history. It checks if the proposed match has a high IoU with the track over the last window frames 
 		best_tid = hung_tid
 		best_vote = hung_vote
 		for tid in active_ids:
@@ -291,24 +475,30 @@ def match_with_consensus(
 				best_tid = tid
 				best_vote = vote
 
+		# Decide which track to assign: Hungarian or best by consensus
 		chosen_tid = hung_tid
 		chosen_vote = hung_vote
 		if best_tid != hung_tid:
 			margin = abs(best_vote - hung_vote)
 			if margin < tie_margin:
+				# If votes are close, use appearance to break the tie
 				chosen_tid = compute_appearance_tiebreak(tracks, best_tid, hung_tid, new_feats[c])
 				chosen_vote = best_vote if chosen_tid == best_tid else hung_vote
 			else:
+				# Otherwise, pick the best by consensus
 				chosen_tid = best_tid
 				chosen_vote = best_vote
 
+		# Get the row index for the chosen track
 		chosen_row = row_by_tid[chosen_tid]
 		chosen_cost = float(cost_matrix[chosen_row, c])
 		proposals.append((chosen_tid, chosen_row, c, chosen_vote, chosen_cost))
 
+	# Step 3: Accept pairs by best vote, lowest cost, no duplicates to solve conflicts
 	used_rows = set()
 	used_cols = set()
 	accepted_pairs = []
+	# Sort proposals by vote (desc) then cost (asc) to prioritize better matches
 	for tid, r, c, vote_score, pair_cost in sorted(proposals, key=lambda x: (-x[3], x[4])):
 		if r in used_rows or c in used_cols:
 			continue
@@ -321,28 +511,37 @@ def match_with_consensus(
 	current_output = {}
 	assigned_new = set()
 
+	# Step 4: Update matched tracks with new features and reset lost counter
 	for r, c in accepted_pairs:
 		tid = active_ids[r]
+		# Exponential moving average update for histograms
 		tracks[tid]["hist"] = ema * new_feats[c]["hist"] + (1 - ema) * tracks[tid]["hist"]
 		tracks[tid]["lbp"] = ema * new_feats[c]["lbp"] + (1 - ema) * tracks[tid]["lbp"]
+		# Update mask, centroid, bbox, and bbox_wh
 		tracks[tid]["mask"] = new_feats[c]["mask"]
 		tracks[tid]["centroid"] = new_feats[c]["centroid"]
 		tracks[tid]["bbox"] = new_feats[c]["bbox"]
 		tracks[tid]["bbox_wh"] = (max(1.0, new_feats[c]["bbox"][2] - new_feats[c]["bbox"][0]), max(1.0, new_feats[c]["bbox"][3] - new_feats[c]["bbox"][1]))
+		# Initialize Kalman filter if not present
 		if tracks[tid].get("kalman") is None:
 			tracks[tid]["kalman"] = create_kalman_filter(*new_feats[c]["centroid"])
+		# Correct Kalman filter with new measurement
 		measurement = np.array([[new_feats[c]["centroid"][0]], [new_feats[c]["centroid"][1]]], dtype=np.float32)
 		tracks[tid]["kalman"].correct(measurement)
+		# Reset lost counter
 		tracks[tid]["lost"] = 0
 		current_output[tid] = new_feats[c]["mask"]
 		assigned_new.add(c)
 
+	# Step 5: Increment lost counter for unmatched tracks
 	for r in set(range(len(active_ids))) - {r for r, _ in accepted_pairs}:
 		tracks[active_ids[r]]["lost"] += 1
 
+	# Step 6: Try to re-identify unmatched detections from graveyard, or create new tracks
 	for c in set(range(len(new_feats))) - assigned_new:
 		best_gid, best_cost = None, reid_threshold
 		for gid, gdata in graveyard.items():
+			# Compute appearance and bbox distance to graveyard tracks
 			dist_color = cv2.compareHist(gdata["hist"], new_feats[c]["hist"], cv2.HISTCMP_BHATTACHARYYA)
 			dist_texture = cv2.compareHist(gdata["lbp"], new_feats[c]["lbp"], cv2.HISTCMP_BHATTACHARYYA)
 			dist_bbox = 1.0 - box_iou_xyxy(gdata.get("bbox", [0, 0, 0, 0]), new_feats[c]["bbox"])
@@ -350,6 +549,7 @@ def match_with_consensus(
 			if cost < best_cost:
 				best_gid, best_cost = gid, cost
 
+		# Prepare new track entry
 		feat_entry = {
 			"mask": new_feats[c]["mask"],
 			"hist": new_feats[c]["hist"],
@@ -363,10 +563,12 @@ def match_with_consensus(
 			"lost": 0,
 		}
 		if best_gid:
+			# Re-identify: assign graveyard id to this detection
 			tracks[best_gid] = feat_entry
 			current_output[best_gid] = new_feats[c]["mask"]
 			del graveyard[best_gid]
 		else:
+			# Create a new track
 			tracks[next_id] = feat_entry
 			current_output[next_id] = new_feats[c]["mask"]
 			next_id += 1
@@ -375,11 +577,20 @@ def match_with_consensus(
 
 
 def extract_features(mask, frame_hsv, frame_gray):
-	"""Extract HSV histogram, LBP histogram, and centroid for one mask."""
+	"""Extract HSV histogram, LBP histogram, and centroid for one mask.
+	- HSV histogram: color descriptor in masked region
+	- LBP histogram: texture descriptor in masked region
+	- Centroid: spatial center of the mask
+	"""
+	# Convert mask to uint8 for OpenCV functions
 	mask_uint8 = mask.astype(np.uint8)
+	# Compute 2D HSV histogram for masked region
 	hist = cv2.calcHist([frame_hsv], [0, 1], mask_uint8, [32, 32], [0, 180, 0, 256])
+	# Normalize histogram to [0, 1]
 	cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+	# Compute LBP histogram for masked region
 	lbp_hist = extract_lbp_hist(frame_gray, mask)
+	# Compute centroid of the mask
 	centroid = mask_centroid(mask)
 	return hist, lbp_hist, centroid
 
