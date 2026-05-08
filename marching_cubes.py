@@ -396,7 +396,7 @@ def run_marching_cubes(voxel_grid, N, color_grid=None):
     """
     Run the Marching Cubes algorithm on a voxel grid.
     
-    Fully vectorized NumPy implementation — no per-voxel Python loops.
+    Fully vectorized NumPy implementation with no per-voxel Python loops.
     
     Inputs:
     - voxel_grid: (N, N, N) numpy array of SDF values.
@@ -410,18 +410,17 @@ def run_marching_cubes(voxel_grid, N, color_grid=None):
     """
 
     # =========================================================================
-    # VECTORIZED IMPLEMENTATION
+    # Vectorized Implementation
     #
     # Instead of looping over every voxel one at a time with Python for-loops,
-    # we process ALL voxels simultaneously using NumPy array operations.
-    # The algorithm is identical — same lookup tables, same interpolation —
-    # but ~20-50× faster because NumPy runs in C under the hood.
+    # we process all voxels simultaneously using NumPy array operations.
+    # Faster because NumPy runs in C under the hood.
     #
     # The key ideas:
-    #   1. Extract the 8 corner SDF values for ALL (N-1)³ voxels at once
+    #   1. Extract the 8 corner SDF values for all (N-1)³ voxels at once
     #      using array slicing (no loops needed).
-    #   2. Build ALL cube indices simultaneously with vectorized bitwise ops.
-    #   3. For each of the 12 edges, find ALL voxels where that edge is
+    #   2. Build all cube indices simultaneously with vectorized bitwise ops.
+    #   3. For each of the 12 edges, find all voxels where that edge is
     #      intersected, and batch-interpolate their vertices.
     #   4. Assemble triangles by iterating over the 256 MC cases (not voxels).
     # =========================================================================
@@ -429,7 +428,7 @@ def run_marching_cubes(voxel_grid, N, color_grid=None):
     M = N - 1  # number of voxels along each axis
 
     # =========================================================================
-    # Step 1: Extract corner SDF values for ALL voxels at once
+    # Step 1: Extract corner SDF values for all voxels at once
     # =========================================================================
     # Corner i is at offset (i&1, (i>>1)&1, (i>>2)&1) relative to voxel origin.
     # For each corner, we slice the full grid to get an (M, M, M) array of
@@ -440,10 +439,10 @@ def run_marching_cubes(voxel_grid, N, color_grid=None):
         dy = (i >> 1) & 1
         dz = (i >> 2) & 1
         corner_vals.append(voxel_grid[dx:dx+M, dy:dy+M, dz:dz+M])
-    # corner_vals[i] has shape (M, M, M) — the SDF at corner i for every voxel
+    # corner_vals[i] has shape (M, M, M) - the SDF at corner i for every voxel
 
     # =========================================================================
-    # Step 2: Build cube indices for ALL voxels at once
+    # Step 2: Build cube indices for all voxels at once
     # =========================================================================
     # cube_index is an 8-bit integer where bit i is set if corner i < 0 (inside).
     # We build this with vectorized bitwise OR across all corners.
@@ -600,18 +599,18 @@ def run_marching_cubes(voxel_grid, N, color_grid=None):
     # =========================================================================
     # CONCEPTUAL SUMMARY (same algorithm, vectorized execution):
     #
-    # 1. THE WAREHOUSE (vertices):
+    # 1. The warehouse (vertices):
     #    All vertex coordinates are computed in bulk by edge, then concatenated.
     #
-    # 2. THE STICKY NOTES (edge_vertex_ids):
+    # 2. The sticky notes (edge_vertex_ids):
     #    A (n_active, 12) array maps each active voxel's 12 edges to global
-    #    vertex IDs — replacing the per-voxel `edge_vertices = [None]*12`.
+    #    vertex IDs - replacing the per-voxel `edge_vertices = [None]*12`.
     #
-    # 3. THE INTERSECTION (Interpolation):
-    #    For each edge, ALL intersected voxels are interpolated simultaneously
+    # 3. The intersection (Interpolation):
+    #    For each edge, all intersected voxels are interpolated simultaneously
     #    with vectorized NumPy ops (no per-voxel Python loop).
     #
-    # 4. DRAWING TRIANGLES:
+    # 4. Drawing triangles:
     #    We group voxels by cube_index and emit all triangles for each MC case
     #    in one batch (256 iterations, not (N-1)³ iterations).
     # =========================================================================

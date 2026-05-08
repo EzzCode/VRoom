@@ -102,6 +102,7 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
     sdf_values = torch.ones(world_points_h_t.shape[0], device=device, dtype=torch.float64) * 1e6
 
     # SDF = Camera's Measurement - Voxel's actual depth
+    # (Distance along the camera ray to the surface) - (Distance along the camera ray to the voxel)
     # Positive SDF: Voxel is in empty space (in front of the surface).
     # Zero SDF: Voxel is exactly on the surface.
     # Negative SDF: Voxel is buried inside the solid object.

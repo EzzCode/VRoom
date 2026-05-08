@@ -45,7 +45,7 @@ def export_ply_binary(vertices, triangles, filename, vertex_colors=None):
         # Write header
         f.write('\n'.join(header).encode('ascii'))
 
-        # 2. Write Vertices (Binary) — bulk NumPy operation instead of per-vertex loop
+        # 2. Write Vertices (Binary) - bulk NumPy operation instead of per-vertex loop
         verts_arr = np.array(vertices, dtype=np.float32)  # (V, 3)
 
         if has_colors:
@@ -62,7 +62,7 @@ def export_ply_binary(vertices, triangles, filename, vertex_colors=None):
         else:
             f.write(verts_arr.tobytes())
 
-        # 3. Write Faces (Binary) — bulk NumPy operation instead of per-face loop
+        # 3. Write Faces (Binary) - bulk NumPy operation instead of per-face loop
         # PLY face format: [number_of_vertices(uint8), v1(int32), v2(int32), v3(int32)]
         # = 1 + 12 = 13 bytes per face
         face_record = np.dtype([('count', 'u1'), ('indices', '<i4', 3)])

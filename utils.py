@@ -21,7 +21,7 @@ def remove_small_components(vertices, triangles, vertex_colors=None, min_ratio=0
     
     def find(x):
         while parent[x] != x:
-            parent[x] = parent[parent[x]]  # path compression
+            parent[x] = parent[parent[x]]
             x = parent[x]
         return x
     
@@ -71,8 +71,8 @@ def remove_small_components(vertices, triangles, vertex_colors=None, min_ratio=0
 def compute_depth_trunc(depth_maps, semantic_maps, label_id, percentile=99, margin=1.1):
     """Auto-compute depth_trunc from actual masked depth values for a given label.
     
-    Takes the `percentile`-th value of all valid depths belonging to this label
-    and multiplies by `margin` to give a tight but safe cutoff.
+    Takes the percentile-th value of all valid depths belonging to this label
+    and multiplies by margin to give a tight but safe cutoff.
     """
     all_valid = []
     for d, sem in zip(depth_maps, semantic_maps):
@@ -82,6 +82,8 @@ def compute_depth_trunc(depth_maps, semantic_maps, label_id, percentile=99, marg
     if not all_valid:
         return 3.0  # safe fallback
     merged = np.concatenate(all_valid)
+    # margin is used to make the truncation margin slightly larger than the actual
+    # percentile value to account for potential noise in the depth measurements.
     trunc = float(np.percentile(merged, percentile) * margin)
     return trunc
 
@@ -103,7 +105,7 @@ def unproject_to_3d(depth_map, mask, intrinsics, extrinsics):
     cam_x = (us - cx) * depths / fx
     cam_y = (vs - cy) * depths / fy
     cam_z = depths
-    cam_pts = np.stack([cam_x, cam_y, cam_z], axis=-1)  # (M, 3)
+    cam_pts = np.stack([cam_x, cam_y, cam_z], axis=-1)  # (M, 3) where M = number of valid pixels
 
     # Camera to world coordinates
     R = extrinsics[:3, :3]

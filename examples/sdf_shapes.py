@@ -1,5 +1,5 @@
 """
-SDF shape prototypes — examples of how to build voxel grids for testing.
+SDF shape prototypes - examples of how to build voxel grids for testing.
 
 Run any section by uncommenting it, then call run_marching_cubes on the result.
 """
