@@ -395,6 +395,7 @@ def run(
         hallucination_resolution=576,
         real_target_long_edge=576,
         up_W_override=cond_cam_up_W,
+        seed_points_W=xyz_W,
     )
     print(f"  {len(supervision_views)} supervision views built.")
 

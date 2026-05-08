@@ -222,98 +222,29 @@ def build_hallucinated_supervision_views(
         az_V = float(fr["azimuth_V_deg"])
         el_V = float(fr["elevation_V_deg"])
 
-        # Map V-pose to world camera. Ignore up_W_override to avoid the 13-degree wobble!
-        # The camera should always orbit perfectly around scope.up_W.
         R_w2c, T_w2c, C_W = local_sv3d.sv3d_view_to_world_camera(az_V, el_V)
+        if up_W_override is not None:
+            up = np.asarray(up_W_override, dtype=np.float64).reshape(3)
+            up = up / max(np.linalg.norm(up), 1e-9)
+            R_w2c, T_w2c = look_at_w2c(np.asarray(C_W, dtype=np.float64), centroid_W, up)
 
-        # ── Find Optimal Camera Roll and Flip ─────────────────────────────
-        flip_h_applied = False
-        angle_deg = 0.0
-        
-        # Load ref_mask to align against
-        ref_path = None
-        if fr.get("objgs_ref_path"):
-            ref_path = _resolve_path(fr["objgs_ref_path"], manifest_dir=halluc_index_path.parent)
-        
-        if ref_path is not None and ref_path.exists():
-            ref_rgba = cv2.imread(str(ref_path), cv2.IMREAD_UNCHANGED)
-            if ref_rgba is not None:
-                _, ref_mask = _rgba_to_rgb_mask(ref_rgba)
-                ref_mask = cv2.resize(ref_mask.astype(np.uint8), (res, res), interpolation=cv2.INTER_NEAREST) > 0
-                
-                # Center ref_mask on sv3d_mask for pure rotation testing
-                ys_s, xs_s = np.where(mask)
-                if len(ys_s) > 0:
-                    c_s = (float(np.mean(xs_s)), float(np.mean(ys_s)))
-                    ys_r, xs_r = np.where(ref_mask)
-                    if len(ys_r) > 0:
-                        c_r = (float(np.mean(xs_r)), float(np.mean(ys_r)))
-                        
-                        M_align = np.float32([[1, 0, c_s[0] - c_r[0]], [0, 1, c_s[1] - c_r[1]]])
-                        ref_mask_aligned = cv2.warpAffine(ref_mask.astype(np.uint8), M_align, (res, res)) > 0
-                        
-                        best_iou = 0.0
-                        
-                        for flip in [False, True]:
-                            mask_f = cv2.flip(mask.astype(np.uint8), 1) > 0 if flip else mask.copy()
-                            for test_angle in range(0, 360, 5):
-                                M_rot = cv2.getRotationMatrix2D(c_s, test_angle, 1.0)
-                                mask_r = cv2.warpAffine(mask_f.astype(np.uint8), M_rot, (res, res)) > 0
-                                
-                                intersection = np.logical_and(mask_r, ref_mask_aligned).sum()
-                                union = np.logical_or(mask_r, ref_mask_aligned).sum()
-                                iou = intersection / max(union, 1)
-                                
-                                if iou > best_iou:
-                                    best_iou = iou
-                                    angle_deg = float(test_angle)
-                                    flip_h_applied = flip
-        
-        # Apply flip if necessary (this handles the "up/down" chiral use cases)
-        if flip_h_applied:
-            rgb = cv2.flip(rgb, 1)
-            mask = cv2.flip(mask.astype(np.uint8), 1) > 0
-
-        # Apply the Camera Roll
-        # angle_deg is the CCW rotation applied to sv3d_mask to match ref_mask.
-        # This means ref_mask needs to be rotated CW by angle_deg to match sv3d_mask.
-        # R_roll rotates the projection CW when looking from +Z into -Z.
-        theta = np.deg2rad(angle_deg)
-        cos_t, sin_t = np.cos(theta), np.sin(theta)
-        R_roll = np.array([
-            [cos_t, -sin_t, 0.0],
-            [sin_t,  cos_t, 0.0],
-            [  0.0,    0.0, 1.0]
-        ], dtype=np.float64)
-        
-        R_w2c_new = (R_roll @ R_w2c.astype(np.float64)).astype(np.float32)
-        T_w2c_new = (R_roll @ T_w2c.astype(np.float64)).astype(np.float32)
-
-        # ── Telephoto Focal Length Adjustment ──────────────────────────────
         K_view = K_sv3d.copy()
         if aabb_min_W is not None and aabb_max_W is not None:
             ws, centroid_uv = _compute_aabb_world_scale_px(
                 np.asarray(aabb_min_W, dtype=np.float64),
                 np.asarray(aabb_max_W, dtype=np.float64),
-                np.asarray(R_w2c_new, dtype=np.float64),
-                np.asarray(T_w2c_new, dtype=np.float64),
+                np.asarray(R_w2c, dtype=np.float64),
+                np.asarray(T_w2c, dtype=np.float64),
                 K_sv3d.astype(np.float64),
                 sv3d_fill_frac=sv3d_fill_frac,
                 target_size=res,
                 seed_points_W=seed_points_W,
             )
-            # Find the new centroid of the sv3d_mask
-            ys_new, xs_new = np.where(mask)
-            c_s_new = (res/2.0, res/2.0)
-            if len(ys_new) > 0:
-                c_s_new = (float(np.mean(xs_new)), float(np.mean(ys_new)))
-
-            # Scale focal length to 'zoom in' by the mismatch factor
+            # Apply telephoto fix to avoid destroying the SV3D image resolution
             K_view[0, 0] = float(K_sv3d[0, 0] / ws)
             K_view[1, 1] = float(K_sv3d[1, 1] / ws)
-            # Adjust principal point so the object center lands at the new image center
-            K_view[0, 2] = float((K_sv3d[0, 2] - centroid_uv[0]) / ws + c_s_new[0])
-            K_view[1, 2] = float((K_sv3d[1, 2] - centroid_uv[1]) / ws + c_s_new[1])
+            K_view[0, 2] = float((K_sv3d[0, 2] - centroid_uv[0]) / ws + K_sv3d[0, 2])
+            K_view[1, 2] = float((K_sv3d[1, 2] - centroid_uv[1]) / ws + K_sv3d[1, 2])
 
         views.append({
             "source": "hallucinated",
@@ -321,8 +252,8 @@ def build_hallucinated_supervision_views(
             "mask": mask,
             "image_path": str(rgba_path),
             "camera": {
-                "R": np.asarray(R_w2c_new, dtype=np.float32),
-                "T": np.asarray(T_w2c_new, dtype=np.float32),
+                "R": np.asarray(R_w2c, dtype=np.float32),
+                "T": np.asarray(T_w2c, dtype=np.float32),
                 "K": K_view,
                 "width": res,
                 "height": res,
@@ -332,8 +263,6 @@ def build_hallucinated_supervision_views(
                 "azimuth_world_rad": float(np.deg2rad(az_V)),
                 "is_conditioning": fr.get("is_conditioning", False),
                 "frame_index": int(fr.get("index", 0)),
-                "alignment_flip": flip_h_applied,
-                "alignment_roll_deg": angle_deg,
             },
             "weight": weight,
         })

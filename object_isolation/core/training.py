@@ -114,6 +114,7 @@ def run_training(
         hallucination_resolution=576,
         real_target_long_edge=576,
         up_W_override=cond_cam_up_W,
+        seed_points_W=scope.anchor_xyz_W,
     )
     if not supervision_views:
         raise RuntimeError(f"No supervision views produced for obj {obj_id}.")
