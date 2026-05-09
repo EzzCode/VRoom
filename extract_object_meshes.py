@@ -14,6 +14,7 @@ import numpy as np
 import json
 import os
 import time
+import torch
 from PIL import Image
 from generate_sdf import fuse_tsdf
 from marching_cubes import run_marching_cubes
@@ -115,16 +116,14 @@ for label_id in sorted_labels:
 # Skip labels with too few pixels (noise) or the dominant background label
 MIN_PIXELS = 50000  # minimum total pixels across all views to process
 # BBOX_DEPTH_TRUNC is computed automatically per object (in compute_depth_trunc)
-SKIP_LABELS = []
 
 print(f"\n{'='*60}")
 print(f"Processing objects (min {MIN_PIXELS:,} pixels)...")
 print(f"{'='*60}")
-special_label = [70]
+
 for label_id in sorted_labels:
-    if label_id in SKIP_LABELS:
-        print(f"\n--- Skipping label {label_id} (in skip list) ---")
-        continue
+    torch.cuda.empty_cache() # clear GPU cache to avoid fragmentation issues
+
     if label_counts[label_id] < MIN_PIXELS:
         print(f"\n--- Skipping label {label_id} ({label_counts[label_id]:,} pixels < {MIN_PIXELS:,} min) ---")
         continue
