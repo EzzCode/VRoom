@@ -213,6 +213,11 @@ def _load_sv3d_cache(out_raw: Path, cond_az: float, cond_el: float,
     return views
 
 
+def _signed_angle_delta_deg(a: float, b: float) -> float:
+    """Shortest signed angular difference a-b in degrees."""
+    return float(((float(a) - float(b) + 180.0) % 360.0) - 180.0)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Render ObjectGS at a hallucinated V-pose
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,10 +232,7 @@ def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
 
     Distance from object centroid is local_sv3d.world_local.radius
     (baked into the SV3D virtual orbit at construction time)."""
-    import torch
-    from target_replenishment.core.objectgs_bridge import (
-        render_view, create_virtual_camera,
-    )
+    from .gs_renderer import create_camera, render_rgba
 
     R_w2c, T_w2c, _C_W = local_sv3d.sv3d_view_to_world_camera(
         az_V_deg, el_V_deg,
@@ -252,10 +254,8 @@ def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
     cx = cy = resolution / 2.0
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
 
-    cam = create_virtual_camera(R_w2c, T_w2c, K, resolution, resolution)
-
-    bg = torch.ones(3, dtype=torch.float32, device="cuda")  # white bg
-    out = render_view(gaussians, cam, pipe_config, bg, object_label_id=object_label_id)
+    cam = create_camera(R_w2c, T_w2c, K, resolution, resolution)
+    out = render_rgba(gaussians, cam, pipe_config, bg_white=True, object_label_id=object_label_id)
     rgb_t = out["rgb"].detach().clamp(0, 1).cpu().numpy().transpose(1, 2, 0)
     rgb_u8 = (rgb_t * 255.0 + 0.5).astype(np.uint8)
     alpha = out["alpha"].detach().cpu().numpy()
@@ -337,6 +337,22 @@ def run_hallucination(
     if not math.isfinite(cond_az):
         cond_az = 0.0
 
+    cond_cam_dict = scope.cameras[int(top1["cam_index"])]
+    current_az, current_el = local_sv3d.world_camera_to_sv3d_view(cond_cam_dict["position"])
+    current_az = ((float(current_az) + 180.0) % 360.0) - 180.0
+    current_el = float(current_el)
+    stale_az = abs(_signed_angle_delta_deg(cond_az, current_az))
+    stale_el = abs(float(cond_el) - current_el)
+    if stale_az > 0.5 or stale_el > 0.5:
+        logger.warning(
+            "Phase-4 scores pose for conditioning cam %d is stale under current coordinate frame: "
+            "scores az/el=(%.2f, %.2f), current az/el=(%.2f, %.2f). "
+            "Using current pose for SV3D.",
+            int(top1["cam_index"]), cond_az, cond_el, current_az, current_el,
+        )
+        cond_az = current_az
+        cond_el = current_el
+
     logger.info("Conditioning: cam=%d az_V=%.1f el_V=%.1f score=%.3f from %s",
                 top1["cam_index"], cond_az, cond_el, top1["score"], rgba_path.name)
 
@@ -344,7 +360,6 @@ def run_hallucination(
     # SV3D outputs inherit the cond image's roll; reference renders must use
     # the same up so the silhouettes align (otherwise scene-averaged up_W can
     # be tens of degrees off-axis from any individual camera).
-    cond_cam_dict = scope.cameras[int(top1["cam_index"])]
     R_cond = np.asarray(cond_cam_dict["R"], dtype=np.float64)  # already R_w2c
     cond_cam_up_W = (-R_cond[1]).astype(np.float64)
     cond_cam_up_W = cond_cam_up_W / max(np.linalg.norm(cond_cam_up_W), 1e-9)

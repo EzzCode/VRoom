@@ -42,6 +42,11 @@ if str(_VROOM_ROOT) not in sys.path:
 logger = logging.getLogger(__name__)
 
 
+def _signed_angle_delta_deg(a: float, b: float) -> float:
+    """Shortest signed angular difference a-b in degrees."""
+    return float(((float(a) - float(b) + 180.0) % 360.0) - 180.0)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pure-numpy projection (no ObjectGS, no torch, no magic)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -321,6 +326,21 @@ def run(
     cond_cam_up_W = -_R_cond[1]  # camera up in world = -row1 of R_w2c
     cond_cam_up_W = (cond_cam_up_W / np.linalg.norm(cond_cam_up_W)).astype(np.float64)
     print(f"  Using cond cam {_cam_idx} up vector for up_W_override.")
+
+    _current_az, _current_el = local_sv3d.world_camera_to_sv3d_view(scope.cameras[_cam_idx]["position"])
+    _current_az = ((_current_az + 180.0) % 360.0) - 180.0
+    _manifest_cond = _manifest.get("conditioning", {}) or {}
+    _manifest_az = float(_manifest_cond.get("azimuth_V_deg", _current_az))
+    _manifest_el = float(_manifest_cond.get("elevation_V_deg", _current_el))
+    _stale_az = abs(_signed_angle_delta_deg(_manifest_az, _current_az))
+    _stale_el = abs(float(_manifest_el) - float(_current_el))
+    if _stale_az > 0.5 or _stale_el > 0.5:
+        print(
+            "  *** STALE HALLUCINATION INDEX: "
+            f"manifest az/el=({_manifest_az:.2f}, {_manifest_el:.2f}), "
+            f"current az/el=({_current_az:.2f}, {_current_el:.2f}). "
+            "Re-run Phase 5 before training. ***"
+        )
 
     # ── Load supervision views (mirrors training call exactly) ────────────
     print(f"Building supervision views ...")

@@ -34,16 +34,12 @@ from typing import Optional
 
 import cv2
 import numpy as np
-import torch
 
 _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from target_replenishment.core.objectgs_bridge import (
-    create_virtual_camera, render_view, get_anchor_positions, get_label_ids,
-    project_anchor_silhouette,
-)
+from .gs_renderer import create_camera, render_rgba
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +101,6 @@ def auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir: Path,
         step = max(1, len(indices) // n_probe_cams)
         indices = indices[::step][:n_probe_cams]
 
-    bg = torch.ones(3, dtype=torch.float32, device="cuda")
     votes: dict[int, float] = {}
 
     for ci in indices:
@@ -118,10 +113,13 @@ def auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir: Path,
             continue
 
         # Render ObjectGS alpha for this object only.
-        cam = create_virtual_camera(cam_p['R'], cam_p['T'], cam_p['K'],
-                                    cam_p['width'], cam_p['height'])
-        res = render_view(gaussians, cam, pipe_config, bg,
-                          object_label_id=scope.object_label_id)
+        cam = create_camera(
+            cam_p['R'], cam_p['T'], cam_p['K'], cam_p['width'], cam_p['height'],
+        )
+        res = render_rgba(
+            gaussians, cam, pipe_config,
+            bg_white=True, object_label_id=scope.object_label_id,
+        )
         alpha = res['alpha'].detach().cpu().numpy()
         if alpha.ndim == 3:
             alpha = alpha[0]
@@ -244,11 +242,13 @@ def extract_frame(scope, gaussians, pipe_config,
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
     # ObjectGS alpha at the camera's native resolution.
-    bg = torch.ones(3, dtype=torch.float32, device="cuda")
-    cam = create_virtual_camera(cam_p['R'], cam_p['T'], cam_p['K'],
-                                cam_p['width'], cam_p['height'])
-    res = render_view(gaussians, cam, pipe_config, bg,
-                      object_label_id=scope.object_label_id)
+    cam = create_camera(
+        cam_p['R'], cam_p['T'], cam_p['K'], cam_p['width'], cam_p['height'],
+    )
+    res = render_rgba(
+        gaussians, cam, pipe_config,
+        bg_white=True, object_label_id=scope.object_label_id,
+    )
     alpha = res['alpha'].detach().cpu().numpy()
     if alpha.ndim == 3:
         alpha = alpha[0]

@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 
 def _ensure_hf_cache_env(cache_dir: Optional[str] = None) -> str:
-    target = cache_dir or os.environ.get("HF_HOME")
+    target = cache_dir or os.environ.get("HF_HOME") or r"A:\\hf_cache"
     target = str(Path(target).expanduser().resolve())
     Path(target).mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", target)

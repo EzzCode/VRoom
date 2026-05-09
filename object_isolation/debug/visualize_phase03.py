@@ -22,10 +22,9 @@ _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from target_replenishment.core.objectgs_bridge import (
-    create_virtual_camera, render_view,
+from object_isolation.core.gs_renderer import (
+    create_camera, render_rgba,
 )
-
 from object_isolation.core.object_scope import discover_object_scope
 from object_isolation.core.extraction import (
     run_extraction, _resolve_id_map_path, _find_image_file,
@@ -61,7 +60,6 @@ def make_triptychs(scope, gaussians, pipe_config,
         step = max(1, len(frames) // max_panels)
         frames = frames[::step][:max_panels]
 
-    bg = torch.ones(3, dtype=torch.float32, device="cuda")
     saved: list[Path] = []
 
     for fr in frames:
@@ -76,10 +74,10 @@ def make_triptychs(scope, gaussians, pipe_config,
         H_img, W_img = rgb_real.shape[:2]
 
         # Re-render objgs alpha (cheap) for visualization.
-        cam = create_virtual_camera(cam_p['R'], cam_p['T'], cam_p['K'],
-                                    cam_p['width'], cam_p['height'])
-        res = render_view(gaussians, cam, pipe_config, bg,
-                          object_label_id=scope.object_label_id)
+        cam = create_camera(cam_p['R'], cam_p['T'], cam_p['K'],
+                           cam_p['width'], cam_p['height'])
+        res = render_rgba(gaussians, cam, pipe_config, bg_white=False,
+                         object_label_id=scope.object_label_id)
         alpha = res['alpha'].detach().cpu().numpy()
         if alpha.ndim == 3:
             alpha = alpha[0]

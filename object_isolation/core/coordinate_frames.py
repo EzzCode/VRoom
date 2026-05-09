@@ -8,7 +8,7 @@ This file owns ALL transform math. Three frames are tracked explicitly:
     Frame V  — Diffusion Virtual Camera (canonical convention of the diffusion prior)
 
 Conventions (cameras.json, ObjectGS):
-    rotation  = R_c2w   (camera-to-world rotation; rows are camera axes in world)
+    rotation  = R_c2w   (camera-to-world rotation; columns are camera axes in world)
     position  = C_W     (camera world center)
 
 Derived:

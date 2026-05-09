@@ -166,9 +166,11 @@ def count_visible_anchors(cam: dict, points: np.ndarray) -> np.ndarray:
 def estimate_scene_up_from_cameras(raw_cameras: list[dict]) -> np.ndarray:
     ups = []
     for cam in raw_cameras:
-        R_w2c = np.asarray(cam["rotation"], dtype=np.float32)
-        if R_w2c.shape == (3, 3):
-            ups.append(-R_w2c[1, :])
+        R_c2w = np.asarray(cam["rotation"], dtype=np.float32)
+        if R_c2w.shape == (3, 3):
+            # cameras.json stores camera-to-world rotation. Image up in world
+            # is -row1 of R_w2c, equivalently -column1 of R_c2w.
+            ups.append(-R_c2w.T[1, :])
     if not ups:
         return np.array([0.0, 0.0, 1.0], dtype=np.float32)
     return _normalize(np.mean(np.asarray(ups, dtype=np.float32), axis=0), np.array([0.0, 0.0, 1.0], dtype=np.float32))

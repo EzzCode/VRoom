@@ -35,6 +35,11 @@ _SV3D_RESOLUTION: int = 576
 logger = logging.getLogger(__name__)
 
 
+def _signed_angle_delta_deg(a: float, b: float) -> float:
+    """Shortest signed angular difference a-b in degrees."""
+    return float(((float(a) - float(b) + 180.0) % 360.0) - 180.0)
+
+
 def run_training(
     *,
     model_path: str,
@@ -94,6 +99,22 @@ def run_training(
         raise RuntimeError(
             f"halluc_index 'conditioning.cam_index'={cam_idx} is out of range "
             f"(scope has {len(scope.cameras)} cameras).  Re-run Phase 5."
+        )
+
+    manifest_cond = manifest.get("conditioning", {}) or {}
+    current_az, current_el = local_sv3d.world_camera_to_sv3d_view(scope.cameras[cam_idx]["position"])
+    current_az = ((float(current_az) + 180.0) % 360.0) - 180.0
+    current_el = float(current_el)
+    manifest_az = float(manifest_cond.get("azimuth_V_deg", current_az))
+    manifest_el = float(manifest_cond.get("elevation_V_deg", current_el))
+    stale_az = abs(_signed_angle_delta_deg(manifest_az, current_az))
+    stale_el = abs(float(manifest_el) - current_el)
+    if stale_az > 0.5 or stale_el > 0.5:
+        raise RuntimeError(
+            "hallucination_index.json was generated with a different camera frame/up-vector: "
+            f"manifest az/el=({manifest_az:.2f}, {manifest_el:.2f}), "
+            f"current az/el=({current_az:.2f}, {current_el:.2f}) for conditioning cam {cam_idx}. "
+            "Re-run Phase 5 after the coordinate-frame fix before training."
         )
     cond_cam_up_W: np.ndarray
     if use_cond_cam_up:
