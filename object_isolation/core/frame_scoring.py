@@ -16,8 +16,16 @@ conditioning view will become the SV3D input image in Phase 5.
 Inputs:
     extraction_index.json  (from Phase 3)
 
-Outputs at <phase4_dir>/:
+Outputs at <out_root>/obj_<id>/02_frame_scoring/::
+
     scores.json            — per-frame components + final score, ranked
+
+Run via pipeline orchestrator (recommended)::
+
+    python -m object_isolation.run_pipeline \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --object_id 8 \\
+        --output_root object_isolation/outputs
 """
 from __future__ import annotations
 
@@ -137,7 +145,7 @@ class FrameScore:
     score: float = 0.0
 
 
-def _collect_raw_metrics(frame: dict, scope_cameras) -> FrameScore:
+def _collect_raw_metrics(frame: dict, scope_cameras: list[dict]) -> FrameScore:
     """Read RGB + mask once, compute raw metrics."""
     bgr = cv2.imread(frame['image_path'], cv2.IMREAD_COLOR)
     mask_u8 = cv2.imread(frame['out_mask_path'], cv2.IMREAD_GRAYSCALE)
@@ -188,7 +196,7 @@ def _rank_normalize(values: np.ndarray) -> np.ndarray:
 # Top-level
 # ─────────────────────────────────────────────────────────────────────────────
 
-def score_frames(extraction_index_path: Path, scope_cameras,
+def score_frames(extraction_index_path: Path, scope_cameras: list[dict],
                  weights: dict | None = None,
                  top_k: int = 5) -> dict:
     """Score every frame in the extraction manifest. Return ranked scores."""
@@ -238,7 +246,7 @@ def score_frames(extraction_index_path: Path, scope_cameras,
     return out
 
 
-def run_scoring(extraction_index_path: Path, scope_cameras,
+def run_scoring(extraction_index_path: Path, scope_cameras: list[dict],
                 output_dir: Path, top_k: int = 5) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     result = score_frames(extraction_index_path, scope_cameras, top_k=top_k)

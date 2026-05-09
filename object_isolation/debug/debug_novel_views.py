@@ -1,12 +1,20 @@
 """
-Visual debug for Phase 5 (SV3D hallucination).
+Visual debug for novel-view synthesis.
 
-Outputs:
+Outputs (under <output_root>/obj_<id>/03_novel_views_debug/):
     conditioning_panel.png   — input image + mapped V-pose info
     sv3d_grid.png            — all SV3D outputs in a grid, az labelled
     iou_strip.png            — per-frame side-by-side: SV3D | ObjectGS render | IoU
     coverage_overlay.png     — polar plot of real vs hallucinated azimuths (V-frame)
     summary.json
+
+Run standalone::
+
+    python -m object_isolation.debug.debug_novel_views \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --object_id 8 \\
+        --output_root object_isolation/outputs \\
+        [--reuse_sv3d]   # skip diffusion if 03_novel_views/ outputs already exist
 """
 from __future__ import annotations
 
@@ -16,6 +24,8 @@ import math
 import sys
 from pathlib import Path
 from typing import List
+
+from object_isolation.paths import FRAME_SCORING_DIR, NOVEL_VIEWS_DEBUG_DIR, NOVEL_VIEWS_DIR
 
 import cv2
 import numpy as np
@@ -244,49 +254,24 @@ def make_coverage_overlay(manifest: dict, scope_cameras: list, debug_dir: Path,
 # Orchestration
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_debug(model_path: str, object_id: int, output_root: str,
-              iou_threshold: float = 0.20, fov_y_deg: float = 50.0,
-              num_inference_steps: int = 25, safe_mode: bool = False,
-              seed: int = 0, reuse_sv3d: bool = False):
-    out_dir = Path(output_root) / f"obj_{object_id}"
-    phase4_scores = out_dir / "phase4" / "scores.json"
-    phase5_dir = out_dir / "phase5"
-    debug_dir = out_dir / "debug_phase05"
+def generate_debug_artifacts(manifest: dict, scope_cameras: list, debug_dir: Path) -> dict:
     debug_dir.mkdir(parents=True, exist_ok=True)
-    if not phase4_scores.exists():
-        raise FileNotFoundError(f"Run Phase 4 first: missing {phase4_scores}")
-
-    # Need scope, local_sv3d, gaussians/pipe_config (for ref renders).
-    scope, _world_local, local_sv3d, gaussians, pipe_config = discover_object_scope(
-        model_path=model_path, object_label_id=object_id,
-    )
-
-    backend = SV3DBackend(num_inference_steps=num_inference_steps,
-                          safe_mode=safe_mode)
-    manifest = run_hallucination(
-        scope=scope, local_sv3d=local_sv3d,
-        gaussians=gaussians, pipe_config=pipe_config,
-        scores_json_path=phase4_scores, output_dir=phase5_dir,
-        object_label_id=object_id, backend=backend,
-        iou_threshold=iou_threshold, fov_y_deg=fov_y_deg, seed=seed,
-        reuse_sv3d=reuse_sv3d,
-    )
 
     make_conditioning_panel(manifest, debug_dir)
     make_sv3d_grid(manifest, debug_dir)
     make_iou_strip(manifest, debug_dir)
-    make_coverage_overlay(manifest, scope.cameras, debug_dir)
+    make_coverage_overlay(manifest, scope_cameras, debug_dir)
 
     summary = {
-        "manifest_path": str(phase5_dir / "hallucination_index.json"),
-        "n_views": manifest["n_views"],
-        "n_kept": manifest["n_kept"],
-        "iou_threshold": iou_threshold,
-        "conditioning": manifest["conditioning"],
+        "manifest_path": manifest.get('manifest_path', ''),
+        "n_views": manifest.get("n_views", 0),
+        "n_kept": manifest.get("n_kept", 0),
+        "iou_threshold": manifest.get("iou_threshold", 0),
+        "conditioning": manifest.get("conditioning", {}),
     }
     with open(debug_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
-    logger.info("Phase 5 debug saved to: %s", debug_dir)
+    logger.info("Novel views debug saved to: %s", debug_dir)
     return summary
 
 
@@ -307,11 +292,21 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
-    run_debug(args.model_path, args.object_id, args.output_root,
-              iou_threshold=args.iou_threshold, fov_y_deg=args.fov_y_deg,
-              num_inference_steps=args.num_inference_steps,
-              safe_mode=args.safe_mode, seed=args.seed,
-              reuse_sv3d=args.reuse_sv3d)
+    
+    out_dir = Path(args.output_root) / f"obj_{args.object_id}"
+    manifest_json = out_dir / NOVEL_VIEWS_DIR / "hallucination_index.json"
+    if not manifest_json.exists():
+        logger.error(f"Cannot find hallucination_index.json at: {manifest_json}")
+        sys.exit(1)
+        
+    with open(manifest_json, "r") as f:
+        manifest = json.load(f)
+        
+    scope, _, _, _, _ = discover_object_scope(
+        model_path=args.model_path, object_label_id=args.object_id,
+    )
+        
+    generate_debug_artifacts(manifest, scope.cameras, out_dir / NOVEL_VIEWS_DEBUG_DIR)
 
 
 if __name__ == "__main__":

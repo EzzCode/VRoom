@@ -18,12 +18,15 @@ from typing import Optional
 
 import numpy as np
 import torch
+
+from object_isolation.paths import MODEL_DIR, TRAINING_SUMMARY_FILE
 import torch.nn.functional as F
 from torch import nn
 from tqdm.auto import tqdm
 
 from .colmap_init import load_colmap_object_point_cloud
 from .gs_renderer import create_camera
+from .object_scope import ObjectScope
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +213,7 @@ def _training_options(
 def train_object(
     *,
     supervision_views: list,
-    scope,
+    scope: ObjectScope,
     object_id: int,
     model_path: str | Path,
     output_dir: str | Path,
@@ -242,7 +245,7 @@ def train_object(
         raise RuntimeError("Cannot train object model with no supervision views.")
 
     out_dir = Path(output_dir)
-    model_dir = out_dir / "model"
+    model_dir = out_dir / MODEL_DIR
     model_dir.mkdir(parents=True, exist_ok=True)
 
     entries = []
@@ -447,6 +450,6 @@ def train_object(
         "depth_loss_history": depth_loss_history,
         "model_dir": str(model_dir),
     }
-    with open(out_dir / "training_summary.json", "w", encoding="utf-8") as f:
+    with open(out_dir / TRAINING_SUMMARY_FILE, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     return {"gaussians": gaussians, "summary": summary}

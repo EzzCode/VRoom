@@ -17,10 +17,19 @@ The resulting RGBA composites the *real-photo* RGB onto a white background
 where M_hybrid is true. We never use the ObjectGS rendered RGB for training
 data — that's the whole point of the rebuild.
 
-Outputs at <out_root>/obj_<id>/phase3/:
-    extracted/<cam_id>__<img_name>.png        RGBA, original camera resolution
-    masks/<cam_id>__<img_name>_mask.png       uint8 0/255
-    extraction_index.json                     manifest
+Outputs at <out_root>/obj_<id>/01_extraction/::
+
+    extracted/<seq>__<cam_id>__<img_name>.png    RGBA, original camera resolution
+    masks/<seq>__<cam_id>__<img_name>_mask.png   uint8 0/255
+    extraction_index.json                        manifest
+
+Run via pipeline orchestrator (recommended)::
+
+    python -m object_isolation.run_pipeline \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --object_id 8 \\
+        --scene_dir data/3dovs/bed \\
+        --output_root object_isolation/outputs
 """
 from __future__ import annotations
 
@@ -40,6 +49,7 @@ if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
 from .gs_renderer import create_camera, render_rgba
+from .object_scope import ObjectScope
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +229,7 @@ def _find_image_file(images_dir: Path, img_name: str) -> Optional[Path]:
     return None
 
 
-def extract_frame(scope, gaussians, pipe_config,
+def extract_frame(scope: ObjectScope, gaussians, pipe_config,
                   cam_index: int,
                   images_dir: Path,
                   id_map_dir: Optional[Path],
@@ -330,7 +340,7 @@ def extract_frame(scope, gaussians, pipe_config,
 # Top-level
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_extraction(scope, gaussians, pipe_config, *,
+def run_extraction(scope: ObjectScope, gaussians, pipe_config, *,
                    images_dir: Path,
                    id_map_dir: Optional[Path],
                    module1_obj_id: Optional[int],

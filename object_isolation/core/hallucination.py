@@ -15,11 +15,21 @@ Workflow:
            — Else require IoU(M_sv3d, M_objgs) ≥ iou_threshold.
     8. Save accepted frames as RGBA + manifest `hallucination_index.json`.
 
-Outputs (per object):
-    obj_<id>/phase5/hallucinated/<NN>__az<DEG>.png        # RGBA
-    obj_<id>/phase5/objgs_refs/<NN>__az<DEG>.png          # RGB ref render
-    obj_<id>/phase5/sv3d_raw/<NN>__az<DEG>.png            # raw SV3D RGB
-    obj_<id>/phase5/hallucination_index.json
+Outputs at <out_root>/obj_<id>/03_novel_views/::
+
+    conditioning.png                        SV3D input (square, padded)
+    hallucinated/<seq>__az<DEG>.png         RGBA hallucinated view
+    objgs_refs/<seq>__az<DEG>.png           RGB ObjectGS reference render
+    sv3d_raw/<seq>__az<DEG>.png             raw SV3D RGB output
+    hallucination_index.json                manifest
+
+Run via pipeline orchestrator (recommended)::
+
+    python -m object_isolation.run_pipeline \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --object_id 8 \\
+        --output_root object_isolation/outputs \\
+        [--reuse_sv3d]
 """
 from __future__ import annotations
 
@@ -122,7 +132,7 @@ def _alpha_from_white_bg(rgb: np.ndarray, sat_thresh: int = 12,
 
 def _normalize_framing(rgb: np.ndarray, alpha: np.ndarray,
                        target_size: int, fill_frac: float = _SV3D_FILL_FRAC,
-                       bg_value: int = 255):
+                       bg_value: int = 255) -> tuple[np.ndarray, np.ndarray]:
     """Tight-crop on alpha, square-pad to give ``fill_frac`` coverage, resize.
 
     Mirrors `_prepare_conditioning` so ObjectGS reference renders use the same
@@ -295,7 +305,7 @@ class HallucinatedFrame:
 
 def run_hallucination(
     scope: ObjectScope,
-    local_sv3d,
+    local_sv3d: LocalSV3D,
     gaussians,
     pipe_config,
     *,

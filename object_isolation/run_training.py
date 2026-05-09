@@ -1,22 +1,23 @@
 """Phases 6–8 — Object isolation training pipeline.
 
-Assumes Phases 0–5 have already run (``obj_<id>/phase5/hallucination_index.json`` must exist).
+Assumes extraction and novel-view synthesis have already run
+(``obj_<id>/03_novel_views/hallucination_index.json`` must exist).
 
 Per object:
-    Phase 6 — build aligned supervision views from Phase-3 real outputs + Phase-5 SV3D outputs.
+    Phase 6 — build aligned supervision views from extraction real outputs + novel-view SV3D outputs.
     Phase 7 — train an ObjectGS object model from COLMAP seed points + aligned views.
     Phase 8 — render before/after comparison orbit and save the scene package under obj_<id>/.
 
 Usage::
 
-    python -m object_isolation.run_phases \
+    python -m object_isolation.run_training \
         --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \
         --output_root object_isolation/outputs \
         --object_ids 8 \
         --iterations 1200
 
     # Run then immediately build debug visuals:
-    python -m object_isolation.run_phases ... --debug
+    python -m object_isolation.run_training ... --debug
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from object_isolation.paths import BATCH_SUMMARY_FILE, NOVEL_VIEWS_DIR, RENDERS_DIR
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -55,11 +57,11 @@ def _setup_logging(level: int = logging.INFO):
 
 
 def _resolve_halluc_index(output_root: Path, object_id: int) -> Path:
-    p = output_root / f"obj_{object_id}" / "phase5" / "hallucination_index.json"
+    p = output_root / f"obj_{object_id}" / NOVEL_VIEWS_DIR / "hallucination_index.json"
     if not p.exists():
         raise FileNotFoundError(
-            f"Phase-5 manifest missing for obj {object_id}: {p}\n"
-            f"Run Phase 5 first."
+            f"Novel-views manifest missing for obj {object_id}: {p}\n"
+            f"Run novel-view synthesis first."
         )
     return p
 
@@ -87,6 +89,7 @@ def run(
     n_compare_views: int = 8,
     skip_compare: bool = False,
     debug: bool = False,
+    preloaded_data: tuple | None = None,
 ) -> dict:
     """Run Phases 6/7/8 for every requested object_id."""
     output_root = Path(output_root)
@@ -96,10 +99,14 @@ def run(
         raise ValueError("object_ids must not be empty.")
 
     first_id = int(object_ids[0])
-    logger.info("Discovering scope for first object %d at %s", first_id, model_path)
-    scope0, _wl0, local_sv3d_first, gaussians, pipe_config = discover_object_scope(
-        model_path, first_id,
-    )
+    if preloaded_data is not None:
+        scope0, _wl0, local_sv3d_first, gaussians, pipe_config = preloaded_data
+        logger.info("Using preloaded scope and model for first object %d", first_id)
+    else:
+        logger.info("Discovering scope for first object %d at %s", first_id, model_path)
+        scope0, _wl0, local_sv3d_first, gaussians, pipe_config = discover_object_scope(
+            model_path, first_id,
+        )
 
     counts_pre = label_anchor_counts(gaussians)
     logger.info("Parent model anchor counts (pre): %s",
@@ -120,7 +127,7 @@ def run(
 
         halluc_index = _resolve_halluc_index(output_root, obj_id)
         obj_out = output_root / f"obj_{obj_id}"
-        renders_dir = obj_out / "renders"
+        renders_dir = obj_out / RENDERS_DIR
         renders_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Build comparison cameras BEFORE training ───────────────────────
@@ -217,7 +224,7 @@ def run(
     all_object_training = all(s.get("mode") == "object_training" for s in per_object_summaries)
     if all_object_training:
         # For a single object the scene package lives next to its model;
-        # for multiple objects it aggregates at output_root/scene/.
+        # for multiple objects it aggregates at output_root/07_scene/.
         scene_out = (
             output_root / f"obj_{object_ids[0]}"
             if len(object_ids) == 1
@@ -237,52 +244,34 @@ def run(
             extra_metadata=metadata,
         )
 
-    with open(output_root / "pipeline_summary.json", "w", encoding="utf-8") as f:
+    with open(output_root / BATCH_SUMMARY_FILE, "w", encoding="utf-8") as f:
         json.dump({
             "model_path": str(model_path),
             "object_ids": [int(x) for x in object_ids],
             "metadata": metadata,
         }, f, indent=2)
 
-    logger.info("Phases 6–8 complete. Output -> %s", final_output)
+    logger.info("Training pipeline complete. Output -> %s", final_output)
 
     if debug:
-        from object_isolation.debug.visualize_phase06 import run_debug
+        from object_isolation.debug.debug_supervision import generate_debug_artifacts
         for oid in object_ids:
-            run_debug(
-                model_path=model_path,
-                object_id=int(oid),
-                output_root=str(output_root),
-                iterations=iterations,
-                hallucination_weight=hallucination_weight,
-                real_weight=real_weight,
-                novel_rgb_weight=novel_rgb_weight,
-                hallucination_rgb_scale=hallucination_rgb_scale,
-                depth_weight=depth_weight,
-                depth_start_iter=depth_start_iter,
-                depth_front_weight=depth_front_weight,
-                depth_back_weight=depth_back_weight,
-                fov_y_deg=fov_y_deg,
-                colmap_init_target_points=colmap_init_target_points,
-                enable_densification=enable_densification,
-                max_anchor_count=max_anchor_count,
-                densify_grad_threshold=densify_grad_threshold,
-                densify_extra_ratio=densify_extra_ratio,
-                n_compare_views=n_compare_views,
-                no_run=True,
+            generate_debug_artifacts(
+                output_root=output_root,
+                object_id=int(oid)
             )
 
     return metadata
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Object-isolation Phases 6–8 pipeline orchestrator")
+    p = argparse.ArgumentParser(description="Object-isolation training pipeline orchestrator")
     p.add_argument("--model_path", required=True,
                    help="Path to trained ObjectGS output dir (containing point_cloud/, cameras.json).")
     p.add_argument("--output_root", default="object_isolation/outputs",
-                   help="Root holding obj_<id>/phase5 inputs and where outputs are written.")
+                   help="Root holding obj_<id>/03_novel_views inputs and where outputs are written.")
     p.add_argument("--object_ids", type=int, nargs="+", required=True,
-                   help="Object label IDs to train (Phase 5 must already exist for each).")
+                   help="Object label IDs to train (03_novel_views must already exist for each).")
     p.add_argument("--iterations", type=int, default=1200,
                    help="Number of ObjectGS training iterations.")
     p.add_argument("--hallucination_weight", type=float, default=1.0)
@@ -299,7 +288,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--depth_back_weight", type=float, default=0.15,
                    help="Penalty scale when the object renders behind reliable real depth.")
     p.add_argument("--fov_y_deg", type=float, default=50.0,
-                   help="Vertical FOV used for SV3D outputs (must match Phase-5 setting).")
+                   help="Vertical FOV used for SV3D outputs (must match the novel-view stage setting).")
     p.add_argument("--colmap_init_target_points", type=int, default=8000,
                    help="Fresh seed points via COLMAP-neighbor interpolation (no parent ObjectGS points used).")
     p.add_argument("--enable_densification", action="store_true",
@@ -312,7 +301,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--skip_compare", action="store_true",
                    help="Skip before/after orbit rendering.")
     p.add_argument("--debug", action="store_true",
-                   help="Build debug visuals under obj_<id>/debug/ immediately after training.")
+                   help="Build debug visuals under obj_<id>/04_supervision_debug immediately after training.")
     p.add_argument("--log_level", default="INFO")
     return p.parse_args()
 

@@ -1,11 +1,22 @@
-"""Visual debug for the Phase 6 object-isolation training pipeline.
+"""Visual debug for supervision and training outputs.
 
-Outputs under <output_root>/obj_<id>/debug/:
-    alignment_audit_strip.png    before / after / ref / overlap for every hallucinated view
+Outputs under <output_root>/obj_<id>/04_supervision_debug/:
+    alignment_audit_strip.png      before / after / ref / overlap for every hallucinated view
     supervision_contact_sheet.png  real + retained supervision images
-    training_loss.png            training loss curve
-    compare_sheet.png            object/full-scene before-after comparison grids
+    training_loss.png              training loss curve
+    compare_sheet.png              object/full-scene before-after comparison grids
     summary.json
+
+Run standalone (also executes training)::
+
+    python -m object_isolation.debug.debug_supervision \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --object_id 8 \\
+        --output_root object_isolation/outputs \\
+        --iterations 1200
+
+    # To regenerate debug panels from an existing run without re-training:
+    python -m object_isolation.debug.debug_supervision ... --no_run
 """
 from __future__ import annotations
 
@@ -17,11 +28,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from object_isolation.paths import RENDERS_DIR, SUPERVISION_DEBUG_DIR, SUPERVISION_MANIFEST_FILE, TRAINING_SUMMARY_FILE
+
 _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from object_isolation.run_phases import run as _run_pipeline
+from object_isolation.run_training import run as _run_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -248,77 +261,31 @@ def make_compare_sheet(renders_dir: Path, out_path: Path, tile_w: int = 360) -> 
     return out_path
 
 
-def run_debug(
-    model_path: str,
-    object_id: int,
-    output_root: str = "object_isolation/outputs",
-    iterations: int = 1200,
-    hallucination_weight: float = 1.0,
-    real_weight: float = 1.0,
-    novel_rgb_weight: float = 1.0,
-    hallucination_rgb_scale: float = 1.0,
-    depth_weight: float = 0.1,
-    depth_start_iter: int = 100,
-    depth_front_weight: float = 1.0,
-    depth_back_weight: float = 0.15,
-    fov_y_deg: float = 50.0,
-    colmap_init_target_points: int = 8000,
-    enable_densification: bool = False,
-    max_anchor_count: int = 20000,
-    densify_grad_threshold: float = 0.00005,
-    densify_extra_ratio: float = 0.08,
-    n_compare_views: int = 8,
-    no_run: bool = False,
-) -> dict:
+def generate_debug_artifacts(output_root: str, object_id: int) -> dict:
     output_root_p = Path(output_root)
     obj_dir = output_root_p / f"obj_{int(object_id)}"
-    debug_dir = obj_dir / "debug"
+    debug_dir = obj_dir / SUPERVISION_DEBUG_DIR
     debug_dir.mkdir(parents=True, exist_ok=True)
-
-    if not no_run:
-        _run_pipeline(
-            model_path=model_path,
-            output_root=output_root_p,
-            object_ids=[int(object_id)],
-            iterations=int(iterations),
-            hallucination_weight=float(hallucination_weight),
-            real_weight=float(real_weight),
-            novel_rgb_weight=float(novel_rgb_weight),
-            hallucination_rgb_scale=float(hallucination_rgb_scale),
-            depth_weight=float(depth_weight),
-            depth_start_iter=int(depth_start_iter),
-            depth_front_weight=float(depth_front_weight),
-            depth_back_weight=float(depth_back_weight),
-            fov_y_deg=float(fov_y_deg),
-            colmap_init_target_points=int(colmap_init_target_points),
-            enable_densification=bool(enable_densification),
-            max_anchor_count=int(max_anchor_count),
-            densify_grad_threshold=float(densify_grad_threshold),
-            densify_extra_ratio=float(densify_extra_ratio),
-            n_compare_views=int(n_compare_views),
-            skip_compare=False,
-        )
 
     outputs = {
         "alignment_audit_strip": make_alignment_audit_strip(
             obj_dir / "alignment_audit.json", debug_dir / "alignment_audit_strip.png"),
         "supervision_contact_sheet": make_supervision_contact_sheet(
-            obj_dir / "supervision_manifest.json", debug_dir / "supervision_contact_sheet.png"),
+            obj_dir / SUPERVISION_MANIFEST_FILE, debug_dir / "supervision_contact_sheet.png"),
         "training_loss": make_loss_plot(
-            obj_dir / "training_summary.json", debug_dir / "training_loss.png"),
+            obj_dir / TRAINING_SUMMARY_FILE, debug_dir / "training_loss.png"),
         "compare_sheet": make_compare_sheet(
-            obj_dir / "renders", debug_dir / "compare_sheet.png"),
+            obj_dir / RENDERS_DIR, debug_dir / "compare_sheet.png"),
     }
     summary = {
         "object_id": int(object_id),
-        "model_path": str(model_path),
         "output_root": str(output_root_p),
         "debug_dir": str(debug_dir),
         "outputs": {key: str(value) if value is not None else None for key, value in outputs.items()},
     }
     with open(debug_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
-    logger.info("Phase 6 debug visuals saved to: %s", debug_dir)
+    logger.info("Supervision debug visuals saved to: %s", debug_dir)
     return summary
 
 
@@ -348,27 +315,9 @@ def main():
                         help="Only regenerate debug panels from existing outputs (skip pipeline).")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
-    run_debug(
-        args.model_path,
-        args.object_id,
-        args.output_root,
-        iterations=args.iterations,
-        hallucination_weight=args.hallucination_weight,
-        real_weight=args.real_weight,
-        novel_rgb_weight=args.novel_rgb_weight,
-        hallucination_rgb_scale=args.hallucination_rgb_scale,
-        depth_weight=args.depth_weight,
-        depth_start_iter=args.depth_start_iter,
-        depth_front_weight=args.depth_front_weight,
-        depth_back_weight=args.depth_back_weight,
-        fov_y_deg=args.fov_y_deg,
-        colmap_init_target_points=args.colmap_init_target_points,
-        enable_densification=args.enable_densification,
-        max_anchor_count=args.max_anchor_count,
-        densify_grad_threshold=args.densify_grad_threshold,
-        densify_extra_ratio=args.densify_extra_ratio,
-        n_compare_views=args.n_compare_views,
-        no_run=args.no_run,
+    generate_debug_artifacts(
+        output_root=args.output_root,
+        object_id=args.object_id,
     )
 
 

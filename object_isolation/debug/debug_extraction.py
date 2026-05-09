@@ -1,22 +1,30 @@
 """
-Visual debug for Phase 3 (extraction).
+Visual debug for extraction.
 
-Outputs (under <output_root>/<scene>/<obj>/debug_phase03/):
-    extraction_index.json (copied)
-    triptych/<cam_id>__<img_name>.png   real | M_real | M_objgs | M_hybrid | composite
-    contact_sheet.png                    grid of all extracted RGBAs on white
+Outputs (under <output_root>/obj_<id>/01_extraction_debug/):
+    triptych/<seq>__<cam_id>__<img_name>.png   real | M_real | M_objgs | M_hybrid | composite
+    contact_sheet.png                           grid of all extracted RGBAs on white
+    summary.json
+
+Run standalone::
+
+    python -m object_isolation.debug.debug_extraction \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --object_id 8 \\
+        --scene_dir data/3dovs/bed \\
+        --output_root object_isolation/outputs
 """
 from __future__ import annotations
 
 from pathlib import Path
 import json
 import logging
-import math
 import sys
+
+from object_isolation.paths import EXTRACTION_DEBUG_DIR, EXTRACTION_DIR
 
 import cv2
 import numpy as np
-import torch
 
 _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
@@ -39,10 +47,6 @@ def _ensure3(img: np.ndarray) -> np.ndarray:
     if img.shape[2] == 4:
         return cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
     return img
-
-
-def _resize_to(img: np.ndarray, size_wh: tuple) -> np.ndarray:
-    return cv2.resize(img, size_wh, interpolation=cv2.INTER_NEAREST)
 
 
 def make_triptychs(scope, gaussians, pipe_config,
@@ -206,70 +210,28 @@ def _checker(w: int, h: int, sq: int = 16) -> np.ndarray:
     return out
 
 
-def run_debug(model_path: str, object_id: int, scene_dir: str,
-              output_root: str,
-              id_map_dir: str = "auto",
-              module1_obj_id=None,
-              tau_alpha: float = 0.4,
-              min_pixels: int = 64) -> dict:
-    out_dir = Path(output_root) / f"obj_{object_id}"
-    phase3_dir = out_dir / "phase3"
-    debug_dir = out_dir / "debug_phase03"
+def generate_debug_artifacts(manifest: dict, scope, gaussians, pipe_config, images_dir: Path,
+                             id_map_dir: Path | None, debug_dir: Path, tau_alpha: float = 0.4) -> dict:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
-    scope, world_local, local_sv3d, gaussians, pipe = discover_object_scope(
-        model_path=model_path, object_label_id=object_id,
-    )
-
-    scene_p = Path(scene_dir)
-    images_dir = scene_p / "images"
-
-    # id_map dir auto-detection.
-    resolved_id_map_dir = None
-    if id_map_dir == "auto":
-        candidates = [
-            scene_p / "tracked" / "id_maps",
-            scene_p / "semantic_instance",
-            scene_p / "object_mask",
-        ]
-        for c in candidates:
-            if c.exists() and any(c.iterdir()):
-                resolved_id_map_dir = c
-                break
-        if resolved_id_map_dir is None:
-            logger.info("No id_map dir auto-detected; falling back to ObjectGS-alpha-only.")
-    elif id_map_dir.lower() in ("none", "null", ""):
-        resolved_id_map_dir = None
-    else:
-        resolved_id_map_dir = Path(id_map_dir)
-
-    manifest = run_extraction(scope, gaussians, pipe,
-                              images_dir=images_dir,
-                              id_map_dir=resolved_id_map_dir,
-                              module1_obj_id=module1_obj_id,
-                              output_dir=phase3_dir,
-                              tau_alpha=tau_alpha,
-                              min_pixels=min_pixels,
-                              auto_resolve=True)
-
     # Visual debug.
-    make_triptychs(scope, gaussians, pipe,
-                   images_dir, resolved_id_map_dir, manifest.get('module1_obj_id'),
+    make_triptychs(scope, gaussians, pipe_config,
+                   images_dir, id_map_dir, manifest.get('module1_obj_id'),
                    manifest, debug_dir / "triptych",
                    max_panels=8, tau_alpha=tau_alpha)
     make_contact_sheet(manifest, debug_dir / "contact_sheet.png")
 
     summary = {
-        "manifest_path": str(phase3_dir / "extraction_index.json"),
+        "manifest_path": manifest.get('manifest_path', ''),
         "module1_obj_id_resolved": manifest.get('module1_obj_id'),
-        "id_map_dir": str(resolved_id_map_dir) if resolved_id_map_dir else None,
-        "n_extracted": manifest['n_extracted'],
-        "n_visible_cams": manifest['n_visible_cams'],
-        "n_used_real_mask": manifest['n_used_real_mask'],
+        "id_map_dir": str(id_map_dir) if id_map_dir else None,
+        "n_extracted": manifest.get('n_extracted', 0),
+        "n_visible_cams": manifest.get('n_visible_cams', 0),
+        "n_used_real_mask": manifest.get('n_used_real_mask', 0),
     }
     with open(debug_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
-    logger.info("Phase 3 debug saved to: %s", debug_dir)
+    logger.info("Extraction debug saved to: %s", debug_dir)
     return summary
 
 
@@ -290,10 +252,34 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
-    run_debug(args.model_path, args.object_id, args.scene_dir,
-              args.output_root, id_map_dir=args.id_map_dir,
-              module1_obj_id=args.module1_obj_id,
-              tau_alpha=args.tau_alpha, min_pixels=args.min_pixels)
+    
+    out_dir = Path(args.output_root) / f"obj_{args.object_id}"
+    extraction_index = out_dir / EXTRACTION_DIR / "extraction_index.json"
+    if not extraction_index.exists():
+        logger.error(f"Cannot find extraction manifest: {extraction_index}")
+        sys.exit(1)
+        
+    with open(extraction_index, "r") as f:
+        manifest = json.load(f)
+        
+    scope, world_local, local_sv3d, gaussians, pipe = discover_object_scope(
+        model_path=args.model_path, object_label_id=args.object_id,
+    )
+    
+    scene_p = Path(args.scene_dir)
+    images_dir = scene_p / "images"
+    resolved_id_map_dir = Path(manifest.get('id_map_dir')) if manifest.get('id_map_dir') else None
+
+    generate_debug_artifacts(
+        manifest=manifest,
+        scope=scope,
+        gaussians=gaussians,
+        pipe_config=pipe,
+        images_dir=images_dir,
+        id_map_dir=resolved_id_map_dir,
+        debug_dir=out_dir / EXTRACTION_DEBUG_DIR,
+        tau_alpha=args.tau_alpha
+    )
 
 
 if __name__ == "__main__":

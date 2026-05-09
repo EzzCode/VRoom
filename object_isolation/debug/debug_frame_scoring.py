@@ -1,12 +1,19 @@
 """
-Visual debug for Phase 4 (frame scoring).
+Visual debug for frame scoring.
 
-Outputs:
-    summary.json           — chosen frame and weights
-    bar_chart.png          — top-K stacked bar of component contributions
-    scatter.png            — az_V vs final score for all frames
-    top1.png               — winning frame with score breakdown overlay
-    top_k_strip.png        — thumbnails of top-K with scores
+Outputs (under <output_root>/obj_<id>/02_frame_scoring_debug/):
+    summary.json       — chosen frame and weights
+    bar_chart.png      — top-K stacked bar of component contributions
+    scatter.png        — az_V vs final score for all frames
+    top1.png           — winning frame with score breakdown overlay
+    top_k_strip.png    — thumbnails of top-K with scores
+
+Run standalone::
+
+    python -m object_isolation.debug.debug_frame_scoring \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --object_id 8 \\
+        --output_root object_isolation/outputs
 """
 from __future__ import annotations
 
@@ -15,6 +22,8 @@ import json
 import logging
 import math
 import sys
+
+from object_isolation.paths import EXTRACTION_DIR, FRAME_SCORING_DEBUG_DIR, FRAME_SCORING_DIR
 
 import cv2
 import numpy as np
@@ -321,23 +330,8 @@ def _pad_h(img: np.ndarray, target_h: int) -> np.ndarray:
 # Orchestration
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_debug(model_path: str, object_id: int, output_root: str,
-              top_k: int = 5) -> dict:
-    out_dir = Path(output_root) / f"obj_{object_id}"
-    phase4_dir = out_dir / "phase4"
-    debug_dir = out_dir / "debug_phase04"
+def generate_debug_artifacts(scores: dict, debug_dir: Path, top_k: int = 5) -> dict:
     debug_dir.mkdir(parents=True, exist_ok=True)
-
-    extraction_index = out_dir / "phase3" / "extraction_index.json"
-    if not extraction_index.exists():
-        raise FileNotFoundError(f"Run Phase 3 first: missing {extraction_index}")
-
-    # Re-run scope discovery to recover azimuth/elevation tags on cameras.
-    scope, _, _, _, _ = discover_object_scope(
-        model_path=model_path, object_label_id=object_id,
-    )
-
-    scores = run_scoring(extraction_index, scope.cameras, phase4_dir, top_k=top_k)
 
     # Visual debug.
     make_bar_chart(scores, debug_dir / "bar_chart.png", top_k=top_k)
@@ -346,10 +340,10 @@ def run_debug(model_path: str, object_id: int, output_root: str,
     make_topk_strip(scores, debug_dir / "top_k_strip.png", k=top_k)
 
     summary = {
-        "scores_json": str(phase4_dir / "scores.json"),
-        "n_frames_scored": scores["n_frames"],
-        "top1": scores["top_k"][0] if scores["top_k"] else None,
-        "weights": scores["weights"],
+        "scores_json": scores.get("scores_json", ""),
+        "n_frames_scored": scores.get("n_frames", 0),
+        "top1": scores.get("top_k", [None])[0] if scores.get("top_k") else None,
+        "weights": scores.get("weights", {}),
     }
     with open(debug_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
@@ -367,7 +361,17 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
-    run_debug(args.model_path, args.object_id, args.output_root, args.top_k)
+    
+    out_dir = Path(args.output_root) / f"obj_{args.object_id}"
+    scores_json = out_dir / FRAME_SCORING_DIR / "scores.json"
+    if not scores_json.exists():
+        logger.error(f"Cannot find scores.json at: {scores_json}")
+        sys.exit(1)
+        
+    with open(scores_json, "r") as f:
+        scores = json.load(f)
+        
+    generate_debug_artifacts(scores, out_dir / FRAME_SCORING_DEBUG_DIR, args.top_k)
 
 
 if __name__ == "__main__":

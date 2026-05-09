@@ -37,6 +37,7 @@ import cv2
 import numpy as np
 
 from .coordinate_frames import LocalSV3D, look_at_w2c
+from .object_scope import ObjectScope
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +288,7 @@ def build_hallucinated_supervision_views(
 
 def build_real_supervision_views(
     extraction_index_path: str | Path,
-    scope,
+    scope: ObjectScope,
     *,
     weight: float = 1.0,
     target_long_edge: int = 576,
@@ -377,7 +378,7 @@ def build_joint_supervision_views(
     *,
     halluc_index_path: str | Path,
     extraction_index_path: str | Path,
-    scope,
+    scope: ObjectScope,
     local_sv3d: LocalSV3D,
     seed_points_W: np.ndarray,
     real_weight: float = 1.0,

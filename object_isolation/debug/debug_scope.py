@@ -1,13 +1,18 @@
 """
-Visual debug for Phases 0-2.
+Visual debug for scope discovery + coordinate frames.
 
-Outputs (under <output_root>/<scene>/<obj>/debug_phase01/):
-    summary.json           — numeric snapshot of the scope
-    aabb_overlays/         — AABB drawn on a subset of training images
-    object_isolation/      — current ObjectGS object render at the same cams
-    topdown.png            — birds-eye view of cameras + object axes + V-azimuths
-    coord_roundtrip.txt    — Phase 2 unit-test results
-    sv3d_pose_preview.png  — example SV3D virtual cams projected to topdown
+Outputs (under <output_root>/obj_<id>/00_scope_debug/):
+    summary.json             numeric snapshot of the scope
+    aabb_overlays/           AABB drawn on a subset of training images
+    topdown.png              birds-eye view of cameras + object axes + V-azimuths
+    coord_roundtrip.json     Phase 2 unit-test results
+
+Run standalone::
+
+    python -m object_isolation.debug.debug_scope \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --object_id 8 \\
+        --output_root object_isolation/outputs
 """
 from __future__ import annotations
 
@@ -16,19 +21,16 @@ import json
 import logging
 import sys
 
+from object_isolation.paths import SCOPE_DEBUG_DIR
+
 import cv2
 import numpy as np
-import torch
 
 _VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from target_replenishment.core.objectgs_bridge import (
-    create_virtual_camera, render_view,
-)
-from target_replenishment.core.diagnostics import overlay_aabb
-
+from object_isolation.core.gs_renderer import create_camera, render_rgba
 from object_isolation.core.object_scope import (
     discover_object_scope, find_uncovered_azimuth_sectors,
 )
@@ -37,6 +39,42 @@ from object_isolation.core.coordinate_frames import WorldLocal, LocalSV3D, R_LV
 
 logger = logging.getLogger(__name__)
 
+
+def _project_aabb_corners(cam_p: dict, aabb_min: np.ndarray,
+                          aabb_max: np.ndarray) -> np.ndarray:
+    """Project 8 AABB corners to pixel coords; return (8, 2) int array."""
+    corners = np.array([
+        [aabb_min[0], aabb_min[1], aabb_min[2]],
+        [aabb_max[0], aabb_min[1], aabb_min[2]],
+        [aabb_max[0], aabb_max[1], aabb_min[2]],
+        [aabb_min[0], aabb_max[1], aabb_min[2]],
+        [aabb_min[0], aabb_min[1], aabb_max[2]],
+        [aabb_max[0], aabb_min[1], aabb_max[2]],
+        [aabb_max[0], aabb_max[1], aabb_max[2]],
+        [aabb_min[0], aabb_max[1], aabb_max[2]],
+    ], dtype=np.float64)
+    R = np.asarray(cam_p['R'], dtype=np.float64)  # R_w2c
+    T = np.asarray(cam_p['T'], dtype=np.float64)  # T_w2c
+    K = np.asarray(cam_p['K'], dtype=np.float64)
+    cam_pts = (R @ corners.T).T + T  # (8, 3)
+    px = K @ cam_pts.T  # (3, 8)
+    px[:2] /= px[2:3]
+    return px[:2].T.astype(int)
+
+
+def _overlay_aabb(rgb_u8: np.ndarray, cam_p: dict,
+                  aabb_min: np.ndarray, aabb_max: np.ndarray,
+                  color=(0, 200, 0), thickness: int = 2) -> np.ndarray:
+    """Draw AABB box edges on an RGB image."""
+    img = rgb_u8.copy()
+    px = _project_aabb_corners(cam_p, aabb_min, aabb_max)
+    # 12 edges of a cube (indices into px)
+    edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+    for a, b in edges:
+        p1 = tuple(px[a].clip(0, 1e5).astype(int))
+        p2 = tuple(px[b].clip(0, 1e5).astype(int))
+        cv2.line(img, p1, p2, color[::-1], thickness, cv2.LINE_AA)
+    return img
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2 round-trip unit test
@@ -251,32 +289,24 @@ def render_aabb_overlays(scope, gaussians, pipe_config, out_dir: Path,
     out_dir.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
 
-    # Sample evenly-spaced visible cams.
     indices = scope.visible_cam_indices
     if len(indices) > max_views:
         step = max(1, len(indices) // max_views)
         indices = indices[::step][:max_views]
 
-    bg = torch.ones(3, dtype=torch.float32, device="cuda")
     for ci in indices:
         cam_p = scope.cameras[ci]
-        cam = create_virtual_camera(cam_p['R'], cam_p['T'], cam_p['K'],
-                                    cam_p['width'], cam_p['height'])
-        # Object-only render
-        res = render_view(gaussians, cam, pipe_config, bg,
+        cam = create_camera(cam_p['R'], cam_p['T'], cam_p['K'],
+                            cam_p['width'], cam_p['height'])
+        res = render_rgba(gaussians, cam, pipe_config, bg_white=True,
                           object_label_id=scope.object_label_id)
         rgb = res['rgb'].detach().clamp(0, 1).cpu().numpy().transpose(1, 2, 0)
         rgb_u8 = (rgb * 255 + 0.5).astype(np.uint8)
-        # Overlay AABB
-        rgb_u8 = overlay_aabb(rgb_u8, cam, scope.aabb_min_W, scope.aabb_max_W,
-                              color=(0, 200, 0), thickness=2)
-
-        # Annotate cam id and visible-anchor count
-        from target_replenishment.core.perspective_graph import _count_visible_anchors
-        n_vis = int(_count_visible_anchors(cam_p, scope.anchor_xyz_W).sum())
-        cv2.putText(rgb_u8, f"cam={ci} | vis_anchors={n_vis} | img={cam_p['img_name']}",
+        rgb_u8 = _overlay_aabb(rgb_u8, cam_p, scope.aabb_min_W, scope.aabb_max_W,
+                               color=(0, 200, 0), thickness=2)
+        cv2.putText(rgb_u8, f"cam={ci} | img={cam_p['img_name']}",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(rgb_u8, f"cam={ci} | vis_anchors={n_vis} | img={cam_p['img_name']}",
+        cv2.putText(rgb_u8, f"cam={ci} | img={cam_p['img_name']}",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
         out_path = out_dir / f"cam_{ci:03d}_{cam_p['img_name']}.png"
@@ -290,15 +320,11 @@ def render_aabb_overlays(scope, gaussians, pipe_config, out_dir: Path,
 # Orchestration
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_debug(model_path: str, object_id: int, output_root: str,
-              max_aabb_views: int = 6) -> dict:
-    """Run Phases 1 & 2 + emit all visual debug artefacts."""
-    out_dir = Path(output_root) / f"obj_{object_id}" / "debug_phase01"
+def generate_debug_artifacts(scope, world_local, local_sv3d, gaussians, pipe, object_id: int, output_root: str,
+                             max_aabb_views: int = 6) -> dict:
+    """Run Phases 1 & 2 visual debug artefacts."""
+    out_dir = Path(output_root) / f"obj_{object_id}" / SCOPE_DEBUG_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    scope, world_local, local_sv3d, gaussians, pipe = discover_object_scope(
-        model_path=model_path, object_label_id=object_id,
-    )
 
     # Round-trip math test (no GPU).
     rt = coord_roundtrip_test(world_local, local_sv3d, out_dir / "coord_roundtrip.json")
@@ -350,7 +376,12 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
-    run_debug(args.model_path, args.object_id, args.output_root, args.max_aabb_views)
+    
+    scope, world_local, local_sv3d, gaussians, pipe = discover_object_scope(
+        model_path=args.model_path, object_label_id=args.object_id,
+    )
+    
+    generate_debug_artifacts(scope, world_local, local_sv3d, gaussians, pipe, args.object_id, args.output_root, args.max_aabb_views)
 
 
 if __name__ == "__main__":

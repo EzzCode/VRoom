@@ -1,28 +1,65 @@
 """
-Complete pipeline orchestrator — Phases 1-8 end-to-end.
+Complete pipeline orchestrator — end-to-end object isolation.
 
-Runs all object isolation phases in sequence:
-    Phase 1-2 — Object scope discovery (automatic)
-    Phase 3   — Hybrid object extraction
-    Phase 4   — Frame scoring
-    Phase 5   — SV3D hallucination
-    Phase 6   — Supervision alignment
-    Phase 7   — Object training
-    Phase 8   — Before/after comparison
+Runs all object isolation stages in sequence:
+    Scope discovery  — Object scope discovery (automatic, embedded in extraction)
+    Extraction       — Hybrid object extraction from real masks + ObjectGS renders
+    Frame scoring    — Pick best conditioning view for SV3D novel-view synthesis
+    Novel views      — SV3D novel-view hallucination
+    Supervision      — Supervision dataset alignment
+    Training         — Object model training (ObjectGS scratch)
+    Comparison       — Before/after render comparison
 
-Usage::
+Output layout per object::
 
-    python -m object_isolation.run_all_phases \
-        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \
-        --scene_dir data/office_0 \
-        --output_root object_isolation/outputs \
-        --object_id 8 \
+    <output_root>/obj_<id>/
+        01_extraction/
+            extraction_index.json
+            extracted/<seq>__<cam_id>__<img_name>.png
+            masks/<seq>__<cam_id>__<img_name>_mask.png
+        01_extraction_debug/
+            triptych/...
+            contact_sheet.png
+            summary.json
+        02_frame_scoring/
+            scores.json
+        02_frame_scoring_debug/
+            bar_chart.png  scatter.png  top1.png  top_k_strip.png  summary.json
+        03_novel_views/
+            conditioning.png
+            hallucinated/<seq>__az<DEG>.png
+            objgs_refs/<seq>__az<DEG>.png
+            sv3d_raw/<seq>__az<DEG>.png
+            hallucination_index.json
+        03_novel_views_debug/
+            conditioning_panel.png  sv3d_grid.png  iou_strip.png
+            coverage_overlay.png    summary.json
+        04_supervision_manifest.json
+        04_supervision_audit/
+        04_supervision_debug/
+        05_training_summary.json
+        05_renders/
+        06_model/
+            point_cloud.ply  color_mlp.pt  cov_mlp.pt  opacity_mlp.pt
+        07_scene/
+        99_pipeline_summary.json
+
+Run command::
+
+    python -m object_isolation.run_pipeline \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/2d_crossentropy_loss_01/2026-03-19_04-01-38 \\
+        --scene_dir data/3dovs/bed \\
+        --output_root object_isolation/outputs \\
+        --object_id 8 \\
         --iterations 1200
 
-Optional flags:
-    --debug              — Enable debug visualizations for all phases
-    --skip_compare       — Skip Phase 8 before/after rendering
-    --reuse_sv3d         — Skip SV3D diffusion if Phase 5 already exists
+Key optional flags::
+
+    --debug              enable debug visualizations for all stages
+    --skip_compare       skip before/after rendering
+    --reuse_sv3d         skip SV3D diffusion if 03_novel_views/ outputs already exist
+    --id_map_dir auto    'auto' | 'none' | explicit path to Module-1 id_maps
+    --iou_threshold 0.20 minimum SV3D↔reference IoU to accept a hallucinated view
 """
 
 from __future__ import annotations
@@ -32,6 +69,8 @@ import json
 import logging
 import sys
 from pathlib import Path
+
+from object_isolation.paths import OBJECT_SUMMARY_FILE
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -48,28 +87,28 @@ def _setup_logging(level: int = logging.INFO):
     )
 
 
-def run_all_phases(
+def run_pipeline(
     *,
     model_path: str,
     scene_dir: str,
     output_root: str,
     object_id: int,
     iterations: int = 1200,
-    # Phase 3 params
+    # Extraction params
     id_map_dir: str = "auto",
     module1_obj_id: int | None = None,
     tau_alpha: float = 0.4,
     min_pixels: int = 64,
-    # Phase 4 params
+    # Frame scoring params
     top_k: int = 5,
-    # Phase 5 params
+    # Novel views params
     iou_threshold: float = 0.20,
     fov_y_deg: float = 50.0,
     num_inference_steps: int = 25,
     safe_mode: bool = False,
     seed: int = 0,
     reuse_sv3d: bool = False,
-    # Phase 6-8 params
+    # Training params
     hallucination_weight: float = 1.0,
     real_weight: float = 1.0,
     novel_rgb_weight: float = 1.0,
@@ -90,13 +129,15 @@ def run_all_phases(
     """
     Run the complete object isolation pipeline for one object.
     
-    Returns a summary dict with outputs from all phases.
+    Returns a summary dict with outputs from all stages.
     """
     import torch
-    from object_isolation.debug.visualize_phase03 import run_debug as run_phase3
-    from object_isolation.debug.visualize_phase04 import run_debug as run_phase4
-    from object_isolation.debug.visualize_phase05 import run_debug as run_phase5
-    from object_isolation.run_phases import run as run_phase678
+    from object_isolation.core.object_scope import discover_object_scope
+    from object_isolation.core.extraction import run_extraction
+    from object_isolation.core.frame_scoring import run_scoring
+    from object_isolation.core.hallucination import run_hallucination
+    from object_isolation.core.diffusion_priors.sv3d import SV3DBackend
+    from object_isolation.run_training import run as run_training
 
     torch.backends.cudnn.benchmark = True
     
@@ -117,94 +158,147 @@ def run_all_phases(
         "output_root": str(output_root),
         "phases": {}
     }
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Model Loading & Scope Discovery
+    # ═══════════════════════════════════════════════════════════════════════════
+    logger.info("Discovering scope and loading model...")
+    scope, world_local, local_sv3d, gaussians, pipe_config = discover_object_scope(
+        str(model_path), obj_id
+    )
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # Phase 3: Extraction
+    # Extraction
     # ═══════════════════════════════════════════════════════════════════════════
     logger.info("\n" + "─" * 80)
-    logger.info("PHASE 3: Hybrid Object Extraction")
+    logger.info("EXTRACTION: Hybrid Object Extraction")
     logger.info("─" * 80)
     
     try:
-        phase3_summary = run_phase3(
-            model_path=str(model_path),
-            object_id=obj_id,
-            scene_dir=str(scene_dir),
-            output_root=str(output_root),
-            id_map_dir=id_map_dir,
+        scene_p = Path(scene_dir)
+        images_dir = scene_p / "images"
+        
+        resolved_id_map_dir = None
+        if id_map_dir == "auto":
+            from object_isolation.core.extraction import auto_resolve_module1_id
+            candidates = [
+                scene_p / "tracked" / "id_maps",
+                scene_p / "semantic_instance",
+                scene_p / "object_mask",
+            ]
+            for c in candidates:
+                if c.exists() and any(c.iterdir()):
+                    resolved_id_map_dir = c
+                    break
+        elif id_map_dir.lower() not in ("none", "null", ""):
+            resolved_id_map_dir = Path(id_map_dir)
+
+        extraction_summary = run_extraction(
+            scope=scope,
+            gaussians=gaussians,
+            pipe_config=pipe_config,
+            images_dir=images_dir,
+            id_map_dir=resolved_id_map_dir,
             module1_obj_id=module1_obj_id,
+            output_dir=obj_dir / "01_extraction",
             tau_alpha=tau_alpha,
             min_pixels=min_pixels,
+            auto_resolve=True,
         )
-        summary["phases"]["phase3"] = phase3_summary
-        logger.info(f"✓ Phase 3 complete: {phase3_summary['n_extracted']} frames extracted")
-        logger.info(f"  Output: {phase3_summary['manifest_path']}")
+        summary["phases"]["extraction"] = extraction_summary
+        
+        if debug:
+            from object_isolation.debug.debug_extraction import generate_debug_artifacts
+            generate_debug_artifacts(
+                manifest=extraction_summary,
+                scope=scope,
+                gaussians=gaussians,
+                pipe_config=pipe_config,
+                images_dir=images_dir,
+                id_map_dir=resolved_id_map_dir,
+                debug_dir=obj_dir / "01_extraction_debug",
+                tau_alpha=tau_alpha,
+            )
+
+        logger.info(f"✓ Extraction complete: {extraction_summary['n_extracted']} frames extracted")
     except Exception as e:
-        logger.exception(f"✗ Phase 3 failed: {e}")
-        summary["phases"]["phase3"] = {"error": str(e)}
+        logger.exception(f"✗ Extraction failed: {e}")
+        summary["phases"]["extraction"] = {"error": str(e)}
         return summary
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # Phase 4: Frame Scoring
+    # Frame Scoring
     # ═══════════════════════════════════════════════════════════════════════════
     logger.info("\n" + "─" * 80)
-    logger.info("PHASE 4: Frame Scoring")
+    logger.info("FRAME SCORING: Pick SV3D conditioning view")
     logger.info("─" * 80)
     
     try:
-        phase4_summary = run_phase4(
-            model_path=str(model_path),
-            object_id=obj_id,
-            output_root=str(output_root),
+        frame_scoring_summary = run_scoring(
+            extraction_index=obj_dir / "01_extraction" / "extraction_index.json",
+            scope_cameras=scope.cameras,
+            output_dir=obj_dir / "02_frame_scoring",
             top_k=top_k,
         )
-        summary["phases"]["phase4"] = phase4_summary
-        if phase4_summary.get("top1"):
-            logger.info(f"✓ Phase 4 complete: Best frame score = {phase4_summary['top1'].get('score', 0.0):.3f}")
-            logger.info(f"  Conditioning view: cam={phase4_summary['top1'].get('cam_index', 'N/A')}, "
-                       f"az={phase4_summary['top1'].get('azimuth_V_deg', 0.0):.1f}°")
-        logger.info(f"  Output: {phase4_summary.get('scores_json', 'N/A')}")
+        summary["phases"]["frame_scoring"] = frame_scoring_summary
+        
+        if debug:
+            from object_isolation.debug.debug_frame_scoring import generate_debug_artifacts
+            generate_debug_artifacts(frame_scoring_summary, obj_dir / "02_frame_scoring_debug", top_k)
+
+        if frame_scoring_summary.get("top1"):
+            logger.info(f"✓ Frame scoring complete: Best frame score = {frame_scoring_summary['top1'].get('score', 0.0):.3f}")
+            logger.info(f"  Conditioning view: cam={frame_scoring_summary['top1'].get('cam_index', 'N/A')}, "
+                       f"az={frame_scoring_summary['top1'].get('azimuth_V_deg', 0.0):.1f}°")
     except Exception as e:
-        logger.exception(f"✗ Phase 4 failed: {e}")
-        summary["phases"]["phase4"] = {"error": str(e)}
+        logger.exception(f"✗ Frame scoring failed: {e}")
+        summary["phases"]["frame_scoring"] = {"error": str(e)}
         return summary
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # Phase 5: Hallucination (SV3D)
+    # Novel Views
     # ═══════════════════════════════════════════════════════════════════════════
     logger.info("\n" + "─" * 80)
-    logger.info("PHASE 5: SV3D Hallucination")
+    logger.info("NOVEL VIEWS: SV3D Hallucination")
     logger.info("─" * 80)
     
     try:
-        phase5_summary = run_phase5(
-            model_path=str(model_path),
-            object_id=obj_id,
-            output_root=str(output_root),
+        backend = SV3DBackend(num_inference_steps=num_inference_steps, safe_mode=safe_mode)
+        novel_views_summary = run_hallucination(
+            scope=scope,
+            local_sv3d=local_sv3d,
+            gaussians=gaussians,
+            pipe_config=pipe_config,
+            scores_json_path=obj_dir / "02_frame_scoring" / "scores.json",
+            output_dir=obj_dir / "03_novel_views",
+            object_label_id=obj_id,
+            backend=backend,
             iou_threshold=iou_threshold,
             fov_y_deg=fov_y_deg,
-            num_inference_steps=num_inference_steps,
-            safe_mode=safe_mode,
             seed=seed,
             reuse_sv3d=reuse_sv3d,
         )
-        summary["phases"]["phase5"] = phase5_summary
-        logger.info(f"✓ Phase 5 complete: {phase5_summary['n_kept']}/{phase5_summary['n_views']} views kept")
-        logger.info(f"  Output: {phase5_summary['manifest_path']}")
+        summary["phases"]["novel_views"] = novel_views_summary
+        
+        if debug:
+            from object_isolation.debug.debug_novel_views import generate_debug_artifacts
+            generate_debug_artifacts(novel_views_summary, scope.cameras, obj_dir / "03_novel_views_debug")
+
+        logger.info(f"✓ Novel views complete: {novel_views_summary['n_kept']}/{novel_views_summary['n_views']} views kept")
     except Exception as e:
-        logger.exception(f"✗ Phase 5 failed: {e}")
-        summary["phases"]["phase5"] = {"error": str(e)}
+        logger.exception(f"✗ Novel views failed: {e}")
+        summary["phases"]["novel_views"] = {"error": str(e)}
         return summary
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # Phase 6-8: Training and Comparison
+    # Training
     # ═══════════════════════════════════════════════════════════════════════════
     logger.info("\n" + "─" * 80)
-    logger.info("PHASE 6-8: Training and Comparison")
+    logger.info("TRAINING: Supervision + ObjectGS + Comparison")
     logger.info("─" * 80)
     
     try:
-        phase678_result = run_phase678(
+        training_result = run_training(
             model_path=str(model_path),
             output_root=output_root,
             object_ids=[obj_id],
@@ -226,13 +320,14 @@ def run_all_phases(
             n_compare_views=n_compare_views,
             skip_compare=skip_compare,
             debug=debug,
+            preloaded_data=(scope, world_local, local_sv3d, gaussians, pipe_config),
         )
-        summary["phases"]["phase678"] = phase678_result
-        logger.info("✓ Phase 6-8 complete")
-        logger.info(f"  Pipeline summary: {output_root / 'pipeline_summary.json'}")
+        summary["phases"]["training"] = training_result
+        logger.info("✓ Training complete")
+        logger.info(f"  Batch summary: {output_root / '99_batch_summary.json'}")
     except Exception as e:
-        logger.exception(f"✗ Phase 6-8 failed: {e}")
-        summary["phases"]["phase678"] = {"error": str(e)}
+        logger.exception(f"✗ Training failed: {e}")
+        summary["phases"]["training"] = {"error": str(e)}
         return summary
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -242,15 +337,15 @@ def run_all_phases(
     logger.info("COMPLETE PIPELINE FINISHED")
     logger.info("=" * 80)
     logger.info(f"Object {obj_id}:")
-    logger.info(f"  Phase 3: {summary['phases']['phase3'].get('n_extracted', 0)} frames extracted")
-    logger.info(f"  Phase 4: Best conditioning score = {summary['phases']['phase4'].get('top1', {}).get('score', 0.0):.3f}")
-    logger.info(f"  Phase 5: {summary['phases']['phase5'].get('n_kept', 0)} hallucinated views")
-    logger.info(f"  Phase 7: Training complete with {iterations} iterations")
+    logger.info(f"  Extraction: {summary['phases']['extraction'].get('n_extracted', 0)} frames extracted")
+    logger.info(f"  Frame scoring: Best conditioning score = {summary['phases']['frame_scoring'].get('top1', {}).get('score', 0.0):.3f}")
+    logger.info(f"  Novel views: {summary['phases']['novel_views'].get('n_kept', 0)} hallucinated views")
+    logger.info(f"  Training: complete with {iterations} iterations")
     logger.info(f"\nAll outputs saved to: {obj_dir}")
     logger.info("=" * 80 + "\n")
     
     # Save summary
-    summary_path = obj_dir / "complete_pipeline_summary.json"
+    summary_path = obj_dir / OBJECT_SUMMARY_FILE
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     logger.info(f"Complete summary saved to: {summary_path}")
@@ -260,7 +355,7 @@ def run_all_phases(
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Complete object isolation pipeline — Phases 1-8",
+        description="Complete object isolation pipeline — end-to-end",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     
@@ -276,9 +371,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output_root", default="object_isolation/outputs",
                    help="Root directory for all outputs")
     p.add_argument("--iterations", type=int, default=1200,
-                   help="Number of training iterations (Phase 7)")
+                   help="Number of training iterations")
     
-    # Phase 3 params
+    # Extraction params
     p.add_argument("--id_map_dir", default="auto",
                    help="'auto' (default) | 'none' | explicit path to Module-1 id_maps")
     p.add_argument("--module1_obj_id", type=int, default=None,
@@ -288,11 +383,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--min_pixels", type=int, default=64,
                    help="Minimum object pixels to accept a frame")
     
-    # Phase 4 params
+    # Frame scoring params
     p.add_argument("--top_k", type=int, default=5,
-                   help="Number of top frames to save in Phase 4")
+                   help="Number of top frames to save during scoring")
     
-    # Phase 5 params
+    # Novel views params
     p.add_argument("--iou_threshold", type=float, default=0.20,
                    help="Minimum IoU between SV3D and reference to keep a hallucinated view")
     p.add_argument("--fov_y_deg", type=float, default=50.0,
@@ -304,9 +399,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0,
                    help="Random seed for SV3D")
     p.add_argument("--reuse_sv3d", action="store_true",
-                   help="Skip SV3D diffusion if Phase 5 already exists")
+                   help="Skip SV3D diffusion if 03_novel_views/ already exists")
     
-    # Phase 6-8 params
+    # Training params
     p.add_argument("--hallucination_weight", type=float, default=1.0,
                    help="Loss weight for hallucinated views")
     p.add_argument("--real_weight", type=float, default=1.0,
@@ -332,13 +427,13 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
     p.add_argument("--densify_extra_ratio", type=float, default=0.08)
     p.add_argument("--n_compare_views", type=int, default=8,
-                   help="Number of orbit views for Phase 8 comparison")
+                   help="Number of orbit views for comparison")
     p.add_argument("--skip_compare", action="store_true",
-                   help="Skip Phase 8 before/after rendering")
+                   help="Skip before/after rendering")
     
     # General flags
     p.add_argument("--debug", action="store_true",
-                   help="Enable debug visualizations for all phases")
+                   help="Enable debug visualizations for all stages")
     p.add_argument("--log_level", default="INFO",
                    help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     
@@ -349,27 +444,27 @@ def main():
     args = _parse_args()
     _setup_logging(getattr(logging, str(args.log_level).upper(), logging.INFO))
     
-    run_all_phases(
+    run_pipeline(
         model_path=args.model_path,
         scene_dir=args.scene_dir,
         output_root=args.output_root,
         object_id=args.object_id,
         iterations=args.iterations,
-        # Phase 3
+        # Extraction
         id_map_dir=args.id_map_dir,
         module1_obj_id=args.module1_obj_id,
         tau_alpha=args.tau_alpha,
         min_pixels=args.min_pixels,
-        # Phase 4
+        # Frame scoring
         top_k=args.top_k,
-        # Phase 5
+        # Novel views
         iou_threshold=args.iou_threshold,
         fov_y_deg=args.fov_y_deg,
         num_inference_steps=args.num_inference_steps,
         safe_mode=args.safe_mode,
         seed=args.seed,
         reuse_sv3d=args.reuse_sv3d,
-        # Phase 6-8
+        # Training
         hallucination_weight=args.hallucination_weight,
         real_weight=args.real_weight,
         novel_rgb_weight=args.novel_rgb_weight,

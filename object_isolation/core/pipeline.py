@@ -1,19 +1,14 @@
-"""Phases 6–7 — Supervision alignment and object training.
+"""Supervision alignment and object training.
 
-Uses ONLY ``object_isolation`` internals — no dependency on
-``target_replenishment``.
-
-Phases driven here
-------------------
-Phase 6  : ``dataset_builder.build_joint_supervision_views``
-Phase 7  : ``trainer.train_object``
+Uses only ``object_isolation`` internals.
 
 Output layout (per object_id)::
 
     <output_dir>/obj_<id>/
-        supervision_manifest.json
-        training_summary.json
-        model/
+        04_supervision_manifest.json
+        04_supervision_audit/
+        05_training_summary.json
+        06_model/
             point_cloud.ply
             color_mlp.pt  cov_mlp.pt  opacity_mlp.pt
             object_model.json
@@ -26,6 +21,12 @@ import logging
 from pathlib import Path
 
 import numpy as np
+
+from typing import Optional
+
+from object_isolation.paths import EXTRACTION_DIR, MODEL_DIR, SUPERVISION_AUDIT_DIR, SUPERVISION_MANIFEST_FILE, TRAINING_SUMMARY_FILE
+from .coordinate_frames import LocalSV3D
+from .object_scope import ObjectScope
 
 # SV3D native output resolution (square).  Matches SV3DBackend.native_resolution.
 _SV3D_RESOLUTION: int = 576
@@ -46,8 +47,8 @@ def run_pipeline(
     output_dir: str | Path,
     gaussians=None,
     pipe_config=None,
-    scope=None,
-    local_sv3d=None,
+    scope: Optional[ObjectScope] = None,
+    local_sv3d: Optional[LocalSV3D] = None,
     iterations: int = 1200,
     lr_scale: float = 1.0,
     hallucination_weight: float = 1.0,
@@ -127,9 +128,8 @@ def run_pipeline(
     else:
         cond_cam_up_W = np.asarray(scope.up_W, dtype=np.float64)
 
-    extraction_index_path = Path(halluc_index_path).parents[1] / "phase3" / "extraction_index.json"
+    extraction_index_path = Path(halluc_index_path).parents[1] / EXTRACTION_DIR / "extraction_index.json"
 
-    # ── Load COLMAP seed points for Phase 6 world-scale computation ──────
     from .colmap_init import load_colmap_object_point_cloud
     pcd, _meta = load_colmap_object_point_cloud(
         model_path=model_path,
@@ -142,7 +142,6 @@ def run_pipeline(
     seed_points_W = np.asarray(pcd.points, dtype=np.float32)
     logger.info("Loaded %d COLMAP seed points (obj %d).", len(seed_points_W), obj_id)
 
-    # ── Phase 6: build real + hallucinated supervision views ────────────
     supervision_views = build_joint_supervision_views(
         halluc_index_path=halluc_index_path,
         extraction_index_path=extraction_index_path,
@@ -159,25 +158,26 @@ def run_pipeline(
     if not supervision_views:
         raise RuntimeError(f"No supervision views produced for obj {obj_id}.")
 
-    save_supervision_manifest(supervision_views, obj_dir / "supervision_manifest.json")
-    # Always write projection overlays immediately after building supervision views.
-    # If the red dots don't trace the object the camera coordinate frame is wrong.
+    save_supervision_manifest(supervision_views, obj_dir / SUPERVISION_MANIFEST_FILE)
     write_projection_overlays(
         seed_points_W,
         supervision_views,
-        obj_dir / "phase6_projection_audit",
+        obj_dir / SUPERVISION_AUDIT_DIR,
     )
-    n_real = sum(1 for v in supervision_views if v.get("source") == "real")
+    n_real = sum(1 for view in supervision_views if view.get("source") == "real")
     n_hall = len(supervision_views) - n_real
-    logger.info("%d supervision views for obj %d (real=%d hallucinated=%d).",
-                len(supervision_views), obj_id, n_real, n_hall)
+    logger.info(
+        "%d supervision views for obj %d (real=%d hallucinated=%d).",
+        len(supervision_views), obj_id, n_real, n_hall,
+    )
 
     if gaussians is not None:
         labels = gaussians.label_ids.squeeze(-1).cpu().numpy()
         n_parent_anchors = int(gaussians._anchor.shape[0])
         n_parent_obj_anchors = int((labels == obj_id).sum())
     else:
-        n_parent_anchors = n_parent_obj_anchors = 0
+        n_parent_anchors = 0
+        n_parent_obj_anchors = 0
 
     logger.info("Training obj %d for %d iters from COLMAP seed points.", obj_id, iterations)
     scratch = train_object(
@@ -214,18 +214,18 @@ def run_pipeline(
         "model_path": str(model_path),
     })
 
-    with open(obj_dir / "model" / "object_model.json", "w", encoding="utf-8") as f:
+    with open(obj_dir / MODEL_DIR / "object_model.json", "w", encoding="utf-8") as f:
         json.dump({
             "object_id": obj_id,
             "mode": "object_training",
             "n_parent_obj_anchors": n_parent_obj_anchors,
             "n_final_anchors": summary.get("n_final_anchors", 0),
         }, f, indent=2)
-    with open(obj_dir / "training_summary.json", "w", encoding="utf-8") as f:
+    with open(obj_dir / TRAINING_SUMMARY_FILE, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     logger.info(
-        "Phase 7 done: obj %d anchors=%d final_loss=%.5f",
+        "Training complete: obj %d anchors=%d final_loss=%.5f",
         obj_id, summary.get("n_final_anchors", 0), summary.get("final_loss", 0.0),
     )
     summary["_gaussians"] = scratch["gaussians"]

@@ -27,6 +27,8 @@ import cv2
 import numpy as np
 import torch
 
+from object_isolation.paths import MODEL_DIR, SCENE_DIR
+
 logger = logging.getLogger(__name__)
 
 
@@ -209,7 +211,7 @@ def save_final_model(
 
     Creates::
 
-        <output_dir>/final_model/
+        <output_dir>/06_model/
             point_cloud.ply
             color_mlp.pt cov_mlp.pt opacity_mlp.pt
             point_cloud/iteration_1/
@@ -220,7 +222,7 @@ def save_final_model(
             reintegration_metadata.json
     """
     output_dir = Path(output_dir)
-    final_dir = output_dir / "final_model"
+    final_dir = output_dir / MODEL_DIR
     final_dir.mkdir(parents=True, exist_ok=True)
 
     iter_dir = final_dir / "point_cloud" / "iteration_1"
@@ -243,7 +245,7 @@ def save_final_model(
         with open(final_dir / "reintegration_metadata.json", "w", encoding="utf-8") as f:
             json.dump(extra_metadata, f, indent=2)
 
-    logger.info("Phase 8: saved final model to %s", final_dir)
+    logger.info("Saved final model to %s", final_dir)
     return final_dir
 
 
@@ -256,7 +258,7 @@ def save_scene_package(
 ) -> Path:
     """Save the scene package with per-object trained model references."""
     output_dir = Path(output_dir)
-    scene_dir = output_dir / "scene"
+    scene_dir = output_dir / SCENE_DIR
     scene_dir.mkdir(parents=True, exist_ok=True)
 
     ref = Path(reference_model_path)
@@ -273,7 +275,7 @@ def save_scene_package(
         object_id = int(summary.get("object_id", -1))
         object_models.append({
             "object_id": object_id,
-            "model_dir": str((Path("..") / f"obj_{object_id}" / "model").as_posix()),
+            "model_dir": str((Path("..") / f"obj_{object_id}" / MODEL_DIR).as_posix()),
             "n_final_anchors": int(summary.get("n_final_anchors", 0)),
             "source_counts": summary.get("source_counts", {}),
             "final_loss": float(summary.get("final_loss", 0.0)),
