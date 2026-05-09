@@ -235,11 +235,14 @@ def run_pipeline(
     
     try:
         frame_scoring_summary = run_scoring(
-            extraction_index=obj_dir / "01_extraction" / "extraction_index.json",
+            extraction_index_path=obj_dir / "01_extraction" / "extraction_index.json",
             scope_cameras=scope.cameras,
             output_dir=obj_dir / "02_frame_scoring",
             top_k=top_k,
         )
+        if not frame_scoring_summary.get("top1") and frame_scoring_summary.get("top_k"):
+            frame_scoring_summary["top1"] = frame_scoring_summary["top_k"][0]
+        frame_scoring_summary["scores_json"] = str(obj_dir / "02_frame_scoring" / "scores.json")
         summary["phases"]["frame_scoring"] = frame_scoring_summary
         
         if debug:
