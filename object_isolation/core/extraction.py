@@ -1,5 +1,5 @@
 """
-Phase 3 — Hybrid Object Extraction.
+Hybrid object extraction.
 
 For each visible training camera of an object, produce a clean RGBA tile of
 just the object cut out of the real photograph. Two-source mask:

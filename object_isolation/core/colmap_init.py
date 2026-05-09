@@ -46,7 +46,7 @@ def _read_source_path(model_path: str | Path) -> Optional[Path]:
     return _resolve_path(source_path, base_dir=model_path)
 
 
-def _read_phase3_module_label(extraction_index_path: str | Path | None) -> Optional[int]:
+def _read_extraction_module_label(extraction_index_path: str | Path | None) -> Optional[int]:
     if extraction_index_path is None:
         return None
     path = Path(extraction_index_path)
@@ -58,11 +58,11 @@ def _read_phase3_module_label(extraction_index_path: str | Path | None) -> Optio
         value = manifest.get("module1_obj_id")
         return int(value) if value is not None else None
     except Exception as exc:
-        logger.warning("Could not read Phase-3 module label from %s: %s", path, exc)
+        logger.warning("Could not read extraction module label from %s: %s", path, exc)
         return None
 
 
-def _read_phase3_manifest(extraction_index_path: str | Path | None) -> tuple[Optional[dict], Optional[int]]:
+def _read_extraction_manifest(extraction_index_path: str | Path | None) -> tuple[Optional[dict], Optional[int]]:
     if extraction_index_path is None:
         return None, None
     path = Path(extraction_index_path)
@@ -75,7 +75,7 @@ def _read_phase3_manifest(extraction_index_path: str | Path | None) -> tuple[Opt
         module_label = int(value) if value is not None else None
         return manifest, module_label
     except Exception as exc:
-        logger.warning("Could not read Phase-3 manifest from %s: %s", path, exc)
+        logger.warning("Could not read extraction manifest from %s: %s", path, exc)
         return None, None
 
 
@@ -200,7 +200,7 @@ def _project_points(points: np.ndarray, cam: dict, mask_shape: tuple[int, int]) 
     return ui, vi, valid
 
 
-def _score_colmap_labels_against_phase3(
+def _score_colmap_labels_against_extraction(
     xyz_all: np.ndarray,
     labels_all: np.ndarray,
     *,
@@ -208,7 +208,7 @@ def _score_colmap_labels_against_phase3(
     extraction_index_path: str | Path | None,
     min_points: int,
 ) -> dict[int, dict]:
-    manifest, _module_label = _read_phase3_manifest(extraction_index_path)
+    manifest, _module_label = _read_extraction_manifest(extraction_index_path)
     if manifest is None or scope is None:
         return {}
 
@@ -305,14 +305,14 @@ def load_colmap_object_point_cloud(
     colors_all = colors_all[finite]
     labels_all = labels_all[finite]
 
-    _manifest, module_label = _read_phase3_manifest(extraction_index_path)
+    _manifest, module_label = _read_extraction_manifest(extraction_index_path)
     label_priority: list[int] = []
     for value in (module_label, int(object_id)):
         if value is not None and int(value) not in label_priority:
             label_priority.append(int(value))
 
     label_counts = {int(label): int((labels_all == label).sum()) for label in np.unique(labels_all)}
-    label_projection_scores = _score_colmap_labels_against_phase3(
+    label_projection_scores = _score_colmap_labels_against_extraction(
         xyz_all,
         labels_all,
         scope=scope,
@@ -343,7 +343,7 @@ def load_colmap_object_point_cloud(
             )
         chosen_label = max(positive.items(), key=lambda item: item[1])[0]
         logger.warning(
-            "No preferred COLMAP label for object %d (phase3=%s). Falling back to largest label %d.",
+            "No preferred COLMAP label for object %d (extraction=%s). Falling back to largest label %d.",
             int(object_id), module_label, int(chosen_label),
         )
 
@@ -379,7 +379,7 @@ def load_colmap_object_point_cloud(
         "init_source": "colmap_labeled_ply",
         "source_path": str(source_path),
         "colmap_ply_path": str(ply_path),
-        "phase3_module_label": int(module_label) if module_label is not None else None,
+        "extraction_module_label": int(module_label) if module_label is not None else None,
         "colmap_label_used": int(chosen_label),
         "colmap_label_counts": label_counts,
         "colmap_label_projection_scores": label_projection_scores,

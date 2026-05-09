@@ -151,7 +151,7 @@ def test_projection_overlay(
     """Save projection overlay images and print a per-view text report.
 
     Image saving is delegated to ``dataset_builder.write_projection_overlays``
-    (the same function called automatically after Phase 6).  This function adds
+    (the same function called automatically after supervision building).  This function adds
     the detailed text table that is useful in the interactive audit context.
     """
     from object_isolation.core.dataset_builder import write_projection_overlays, _SEED_DEPTH_MIN
@@ -242,10 +242,10 @@ def test_halluc_manifest(halluc_index_path: Path) -> None:
     n_total = len(frames)
     n_accepted = sum(1 for f in frames if f.get("accepted", False))
     print(f"  Total frames in manifest : {n_total}")
-    print(f"  Accepted by Phase 5      : {n_accepted}")
-    print(f"  Rejected by Phase 5      : {n_total - n_accepted}")
+    print(f"  Accepted by novel views  : {n_accepted}")
+    print(f"  Rejected by novel views  : {n_total - n_accepted}")
     if n_accepted == 0:
-        print("  *** CRITICAL: Phase 5 accepted 0 frames — no hallucinated views at all! ***")
+        print("  *** CRITICAL: Novel-view synthesis accepted 0 frames — no hallucinated views at all! ***")
     print()
     print(f"  {'#':>3}  {'Az':>7} {'El':>7}  {'Accepted':>9}  {'IoU':>6}  Path")
     print("  " + "-" * 70)
@@ -320,7 +320,7 @@ def run(
     if _cam_idx < 0 or _cam_idx >= len(scope.cameras):
         raise RuntimeError(
             f"hallucination_index 'conditioning.cam_index'={_cam_idx} is out of range "
-            f"(scope has {len(scope.cameras)} cameras).  Re-run Phase 5."
+            f"(scope has {len(scope.cameras)} cameras).  Re-run novel-view synthesis."
         )
     _R_cond = np.asarray(scope.cameras[_cam_idx]["R"], dtype=np.float64)
     cond_cam_up_W = -_R_cond[1]  # camera up in world = -row1 of R_w2c
@@ -339,7 +339,7 @@ def run(
             "  *** STALE HALLUCINATION INDEX: "
             f"manifest az/el=({_manifest_az:.2f}, {_manifest_el:.2f}), "
             f"current az/el=({_current_az:.2f}, {_current_el:.2f}). "
-            "Re-run Phase 5 before training. ***"
+            "Re-run novel-view synthesis before training. ***"
         )
 
     # ── Load supervision views (mirrors training call exactly) ────────────

@@ -1,7 +1,7 @@
-"""Phase 6 — Build aligned real + hallucinated supervision views.
+"""Build aligned real + hallucinated supervision views.
 
-Converts Phase-3 real extractions and Phase-5 hallucinations into the
-``supervision_views`` list expected by the Phase-7 optimizer:
+Converts extraction outputs and novel-view hallucinations into the
+``supervision_views`` list expected by the object-training optimizer:
 
     [{
         'rgb': np.ndarray HxWx3 uint8/float32 (RGB, white background),
@@ -20,8 +20,8 @@ Converts Phase-3 real extractions and Phase-5 hallucinations into the
     }, ...]
 
 Critical design points:
-- Real views use the original training camera R/T/K and Phase-3 alpha mask.
-- Hallucinated views use the Phase-5 SV3D orbit camera and Phase-5 alpha mask.
+- Real views use the original training camera R/T/K and extraction alpha mask.
+- Hallucinated views use the novel-view SV3D orbit camera and novel-view alpha mask.
 - If an image is resized, K is scaled by exactly the same x/y factors.
 """
 
@@ -178,7 +178,7 @@ def build_hallucinated_supervision_views(
     up_W_override: Optional[np.ndarray] = None,
     include_conditioning: bool = True,
 ) -> list[dict]:
-    """Build hallucinated supervision views from Phase-5 outputs.
+    """Build hallucinated supervision views from novel-view outputs.
 
     seed_points_W is required — it is used to compute per-view telephoto
     intrinsics (K_view) that make the object span _SV3D_FILL_FRAC of the
@@ -221,7 +221,7 @@ def build_hallucinated_supervision_views(
             raise FileNotFoundError(
                 f"Accepted hallucination RGBA missing: {rgba_path}\n"
                 f"  Frame: az={fr.get('azimuth_V_deg')} el={fr.get('elevation_V_deg')}\n"
-                "  Re-run Phase 5 or check the output directory."
+                "  Re-run novel-view synthesis or check the output directory."
             )
 
         rgba = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
@@ -293,10 +293,10 @@ def build_real_supervision_views(
     weight: float = 1.0,
     target_long_edge: int = 576,
 ) -> list[dict]:
-    """Read Phase-3 real extractions as camera-aligned supervision views."""
+    """Read extraction outputs as camera-aligned supervision views."""
     extraction_index_path = Path(extraction_index_path)
     if not extraction_index_path.exists():
-        logger.warning("Phase-3 extraction manifest not found: %s", extraction_index_path)
+        logger.warning("Extraction manifest not found: %s", extraction_index_path)
         return []
 
     with open(extraction_index_path) as f:
@@ -368,7 +368,7 @@ def build_real_supervision_views(
         })
 
     logger.info(
-        "Phase 6: built %d real supervision views from %s (frames=%d).",
+        "Built %d real supervision views from %s (frames=%d).",
         len(views), extraction_index_path.name, len(manifest.get("frames", [])),
     )
     return views
@@ -408,7 +408,7 @@ def build_joint_supervision_views(
     )
     views = real_views + hallucinated_views
     logger.info(
-        "Phase 6: joint supervision views ready: total=%d real=%d hallucinated=%d.",
+        "Joint supervision views ready: total=%d real=%d hallucinated=%d.",
         len(views), len(real_views), len(hallucinated_views),
     )
     return views
@@ -421,12 +421,12 @@ def write_projection_overlays(
 ) -> None:
     """Project COLMAP seed points onto every supervision view and save overlay images.
 
-    Called automatically after Phase 6 to verify coordinate-frame alignment.
+    Called automatically after supervision building to verify coordinate-frame alignment.
     Colour-codes each projected point by depth (JET colormap: blue=near, red=far).
     Green contour = supervision mask.  Yellow text = source / az / el / stats.
 
     If the dots DON'T trace the object silhouette the camera coordinate frame
-    is broken and Phase 7 training data is incorrect.
+    is broken and training data is incorrect.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -510,8 +510,8 @@ def write_projection_overlays(
 def save_supervision_manifest(views: list[dict], output_path: str | Path) -> Path:
     """Persist a JSON-serialisable manifest of the in-memory supervision_views.
 
-    Useful for debugging / re-running Phase 7 without rebuilding from raw
-    Phase-5 outputs. Image arrays are NOT saved here — only the camera
+    Useful for debugging / re-running training without rebuilding from raw
+    novel-view outputs. Image arrays are NOT saved here — only the camera
     metadata + paths to the source RGBA files."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,11 +1,11 @@
-"""Phase 8 — Final export + before/after verification renders.
+"""Final export and before/after verification renders.
 
 For legacy seeded runs the parent ``ObjectGS`` model may be mutated in-place.
 For object training the parent and object models stay separate because
 their MLP checkpoints are independent. This module is responsible for:
 
 1. Building a fixed orbit of comparison cameras around an object's centroid
-   so the *same* viewpoints can be rendered before and after Phase 7.
+    so the *same* viewpoints can be rendered before and after training.
 2. Saving either a mutated parent model or a scene package that points
     at the reference scene plus per-object checkpoints.
 3. Writing a ``reintegration_metadata.json`` summary listing every object
@@ -292,7 +292,7 @@ def save_scene_package(
     with open(scene_dir / "scene_metadata.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
-    logger.info("Phase 8: saved scene package to %s", scene_dir)
+    logger.info("Saved scene package to %s", scene_dir)
     return scene_dir
 
 
@@ -303,7 +303,7 @@ def build_reintegration_metadata(
     per_object_summaries: List[dict],
     reference_model_path: str,
 ) -> dict:
-    """Aggregate per-object Phase-7 summaries into a single metadata dict."""
+    """Aggregate per-object training summaries into a single metadata dict."""
     return {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "reference_model_path": str(reference_model_path),

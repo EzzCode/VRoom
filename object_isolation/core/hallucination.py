@@ -1,8 +1,8 @@
 """
-Phase 5 — Diffusion-prior orchestration (novel-view hallucination).
+Diffusion-prior orchestration for novel-view hallucination.
 
 Workflow:
-    1. Load Phase 4 top-1 frame (best SV3D conditioning view).
+    1. Load the frame-scoring top-1 frame (best SV3D conditioning view).
     2. Crop tight + pad onto neutral background → square conditioning image.
     3. Instantiate the chosen DiffusionPriorBackend (SV3D-u by default).
     4. Run backend → list of HallucinatedView at (azimuth_V, elevation_V).
@@ -320,7 +320,7 @@ def run_hallucination(
     save_dropped: bool = True,
     reuse_sv3d: bool = False,
 ) -> dict:
-    """Run novel-view hallucination on the Phase-4 top-1 conditioning view."""
+    """Run novel-view hallucination on the top-ranked conditioning view."""
     output_dir = Path(output_dir)
     out_halluc = output_dir / "hallucinated"
     out_raw = output_dir / "sv3d_raw"
@@ -328,11 +328,11 @@ def run_hallucination(
     for d in (out_halluc, out_raw, out_ref):
         d.mkdir(parents=True, exist_ok=True)
 
-    # Load Phase-4 scores → pick top-1 conditioning frame.
+    # Load frame-scoring results → pick the top conditioning frame.
     with open(scores_json_path) as f:
         scores = json.load(f)
     if not scores["top_k"]:
-        raise RuntimeError("No frames in scores.json; rerun Phase 4.")
+        raise RuntimeError("No frames in scores.json; rerun frame scoring.")
     top1 = scores["top_k"][0]
     # Find full record for paths.
     full = next((fr for fr in scores["frames"] if fr["cam_index"] == top1["cam_index"]), None)
@@ -355,7 +355,7 @@ def run_hallucination(
     stale_el = abs(float(cond_el) - current_el)
     if stale_az > 0.5 or stale_el > 0.5:
         logger.warning(
-            "Phase-4 scores pose for conditioning cam %d is stale under current coordinate frame: "
+            "Frame-scoring pose for conditioning cam %d is stale under current coordinate frame: "
             "scores az/el=(%.2f, %.2f), current az/el=(%.2f, %.2f). "
             "Using current pose for SV3D.",
             int(top1["cam_index"]), cond_az, cond_el, current_az, current_el,
@@ -496,6 +496,6 @@ def run_hallucination(
     }
     with open(output_dir / "hallucination_index.json", "w") as f:
         json.dump(manifest, f, indent=2)
-    logger.info("Phase 5: kept %d / %d views (manifest: %s)",
+    logger.info("Novel-view synthesis kept %d / %d views (manifest: %s)",
                 n_kept, len(views), output_dir / "hallucination_index.json")
     return manifest

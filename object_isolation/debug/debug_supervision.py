@@ -103,7 +103,7 @@ def make_alignment_audit_strip(audit_path: Path, out_path: Path, tile: int = 180
     info_w = 340
     n_tiles = 5
     canvas = np.full((40 + row_h * len(frames), n_tiles * tile + info_w, 3), 245, dtype=np.uint8)
-    _putlbl(canvas, "Phase 6 alignment audit", (10, 26), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
+    _putlbl(canvas, "Supervision alignment audit", (10, 26), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
     _putlbl(canvas, "before | after | ref | overlap | post-denorm   red=halluc-only  green=ref-only  yellow=both",
             (260, 26), fg=(70, 70, 70), bg=(255, 255, 255), scale=0.40)
 
@@ -191,7 +191,7 @@ def make_supervision_contact_sheet(manifest_path: Path, out_path: Path, tile: in
         return None
     rows = int(np.ceil(len(views) / cols))
     canvas = np.full((40 + rows * (tile + 28), cols * tile, 3), 240, dtype=np.uint8)
-    _putlbl(canvas, "Phase 6 retained supervision views", (10, 26), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
+    _putlbl(canvas, "Retained supervision views", (10, 26), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
     for idx, view in enumerate(views):
         row, col = divmod(idx, cols)
         x0 = col * tile
@@ -215,7 +215,7 @@ def make_loss_plot(summary_path: Path, out_path: Path, width: int = 900, height:
     if not losses:
         return None
     canvas = np.full((height, width, 3), 250, dtype=np.uint8)
-    _putlbl(canvas, "Phase 7 training loss", (14, 28), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
+    _putlbl(canvas, "Training loss", (14, 28), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.58)
     plot = canvas[54:height - 34, 60:width - 24]
     plot[:] = 255
     lo, hi = min(losses), max(losses)
@@ -291,7 +291,7 @@ def generate_debug_artifacts(output_root: str, object_id: int) -> dict:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Phase 6 training pipeline debug visualizer.")
+    parser = argparse.ArgumentParser(description="Supervision and training debug visualizer.")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--object_id", required=True, type=int)
     parser.add_argument("--output_root", default="object_isolation/outputs")

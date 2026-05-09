@@ -5,7 +5,7 @@ Outputs (under <output_root>/obj_<id>/00_scope_debug/):
     summary.json             numeric snapshot of the scope
     aabb_overlays/           AABB drawn on a subset of training images
     topdown.png              birds-eye view of cameras + object axes + V-azimuths
-    coord_roundtrip.json     Phase 2 unit-test results
+    coord_roundtrip.json     coordinate-frame round-trip test results
 
 Run standalone::
 
@@ -77,7 +77,7 @@ def _overlay_aabb(rgb_u8: np.ndarray, cam_p: dict,
     return img
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 2 round-trip unit test
+# Coordinate-frame round-trip unit test
 # ─────────────────────────────────────────────────────────────────────────────
 
 def coord_roundtrip_test(world_local: WorldLocal, local_sv3d: LocalSV3D,
@@ -284,7 +284,7 @@ def render_aabb_overlays(scope, gaussians, pipe_config, out_dir: Path,
     """Render the current ObjectGS isolation of the object on a few visible
     training cameras, and overlay the AABB. This is the "what the model
     currently thinks the object looks like" reference — useful baseline for
-    Phase 1 hybrid extraction.
+    Extraction baseline reference.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
@@ -322,7 +322,7 @@ def render_aabb_overlays(scope, gaussians, pipe_config, out_dir: Path,
 
 def generate_debug_artifacts(scope, world_local, local_sv3d, gaussians, pipe, object_id: int, output_root: str,
                              max_aabb_views: int = 6) -> dict:
-    """Run Phases 1 & 2 visual debug artefacts."""
+    """Run scope and coordinate-frame visual debug artifacts."""
     out_dir = Path(output_root) / f"obj_{object_id}" / SCOPE_DEBUG_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -362,13 +362,13 @@ def generate_debug_artifacts(scope, world_local, local_sv3d, gaussians, pipe, ob
     with open(out_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
 
-    logger.info("Phase 0-2 debug saved to: %s", out_dir)
+    logger.info("Scope debug saved to: %s", out_dir)
     return summary
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Phase 0-2 visual debug.")
+    parser = argparse.ArgumentParser(description="Scope and coordinate-frame visual debug.")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--object_id", required=True, type=int)
     parser.add_argument("--output_root", default="object_isolation/outputs")

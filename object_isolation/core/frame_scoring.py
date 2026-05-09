@@ -1,5 +1,5 @@
 """
-Phase 4 — Frame Scoring.
+Frame scoring.
 
 Pick the SV3D conditioning frame (top-1) and rank backups (top-K). Five
 factors with locked weights:
@@ -11,10 +11,10 @@ factors with locked weights:
     occl    0.15   |M_hybrid| / |M_objgs|  (drops when something occludes)
 
 All factors are mapped into [0, 1] and combined linearly. The chosen
-conditioning view will become the SV3D input image in Phase 5.
+conditioning view will become the SV3D input image for novel-view synthesis.
 
 Inputs:
-    extraction_index.json  (from Phase 3)
+    extraction_index.json  (from extraction)
 
 Outputs at <out_root>/obj_<id>/02_frame_scoring/::
 

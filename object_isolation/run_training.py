@@ -1,12 +1,12 @@
-"""Phases 6–8 — Object isolation training pipeline.
+"""Object isolation training pipeline.
 
 Assumes extraction and novel-view synthesis have already run
 (``obj_<id>/03_novel_views/hallucination_index.json`` must exist).
 
 Per object:
-    Phase 6 — build aligned supervision views from extraction real outputs + novel-view SV3D outputs.
-    Phase 7 — train an ObjectGS object model from COLMAP seed points + aligned views.
-    Phase 8 — render before/after comparison orbit and save the scene package under obj_<id>/.
+    Build aligned supervision views from extraction real outputs + novel-view SV3D outputs.
+    Train an ObjectGS object model from COLMAP seed points + aligned views.
+    Render before/after comparison orbits and save the scene package under obj_<id>/.
 
 Usage::
 
@@ -91,7 +91,7 @@ def run(
     debug: bool = False,
     preloaded_data: tuple | None = None,
 ) -> dict:
-    """Run Phases 6/7/8 for every requested object_id."""
+    """Run supervision, training, and comparison for every requested object_id."""
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -154,7 +154,7 @@ def run(
                 gaussians, pipe_config, compare_cams, object_label_id=None,
             )
 
-        # ── Phase 6/7: align hallucinations + train object model ───────────
+        # ── Build supervision and train the object model ───────────────────
         obj_gaussians = None
         try:
             summary = run_pipeline(
@@ -189,7 +189,7 @@ def run(
 
         per_object_summaries.append(summary)
 
-        # ── Phase 8: before/after renders ─────────────────────────────────
+        # ── Before/after renders ───────────────────────────────────────────
         if compare_cams is not None and not skip_compare and obj_gaussians is not None:
             try:
                 after_obj = render_with_orbit(
@@ -208,9 +208,9 @@ def run(
                     renders_dir / "full_scene",
                     prefix="scene",
                 )
-                logger.info("Phase 8: saved compare grids to %s", renders_dir)
+                logger.info("Saved compare grids to %s", renders_dir)
             except Exception as e:
-                logger.exception("Phase 8 compare-render failed for obj %d: %s", obj_id, e)
+                logger.exception("Compare-render failed for obj %d: %s", obj_id, e)
 
     # ── Final model export ────────────────────────────────────────────────
     counts_post = label_anchor_counts(gaussians)

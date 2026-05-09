@@ -237,7 +237,7 @@ def generate_debug_artifacts(manifest: dict, scope, gaussians, pipe_config, imag
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Phase 3 extraction visual debug.")
+    parser = argparse.ArgumentParser(description="Extraction visual debug.")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--object_id", required=True, type=int)
     parser.add_argument("--scene_dir", required=True,

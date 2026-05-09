@@ -90,14 +90,14 @@ def run_pipeline(
             model_path, obj_id,
         )
 
-    # ── Pull cond cam up (matches Phase 5 reference renders) ──────────────
+    # ── Pull conditioning-camera up (matches novel-view reference renders) ──
     with open(halluc_index_path) as f:
         manifest = json.load(f)
     cam_idx = int(manifest.get("conditioning", {}).get("cam_index", -1))
     if cam_idx < 0 or cam_idx >= len(scope.cameras):
         raise RuntimeError(
             f"halluc_index 'conditioning.cam_index'={cam_idx} is out of range "
-            f"(scope has {len(scope.cameras)} cameras).  Re-run Phase 5."
+            f"(scope has {len(scope.cameras)} cameras).  Re-run novel-view synthesis."
         )
 
     manifest_cond = manifest.get("conditioning", {}) or {}
@@ -113,7 +113,7 @@ def run_pipeline(
             "hallucination_index.json was generated with a different camera frame/up-vector: "
             f"manifest az/el=({manifest_az:.2f}, {manifest_el:.2f}), "
             f"current az/el=({current_az:.2f}, {current_el:.2f}) for conditioning cam {cam_idx}. "
-            "Re-run Phase 5 after the coordinate-frame fix before training."
+            "Re-run novel-view synthesis after the coordinate-frame fix before training."
         )
     cond_cam_up_W: np.ndarray
     if use_cond_cam_up:

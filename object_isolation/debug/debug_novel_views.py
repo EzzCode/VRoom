@@ -277,7 +277,7 @@ def generate_debug_artifacts(manifest: dict, scope_cameras: list, debug_dir: Pat
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Phase 5 SV3D hallucination visual debug.")
+    parser = argparse.ArgumentParser(description="Novel-view synthesis visual debug.")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--object_id", required=True, type=int)
     parser.add_argument("--output_root", default="object_isolation/outputs")

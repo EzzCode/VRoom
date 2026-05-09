@@ -12,7 +12,7 @@ Concrete backends so far:
 
 Backends MUST NOT touch the world frame; they live entirely in V-space.
 The caller (hallucination.py) is responsible for V→W pose mapping using
-Phase-2 math.
+the coordinate-frame math.
 """
 from __future__ import annotations
 

@@ -86,7 +86,7 @@ def make_bar_chart(scores: dict, out_path: Path, top_k: int = 5,
     img = np.full((height, width, 3), 250, dtype=np.uint8)
 
     # Title.
-    _putlbl(img, "Phase 4 frame scoring — top-K component contributions",
+    _putlbl(img, "Frame scoring — top-K component contributions",
             (16, 28), fg=(20, 20, 20), bg=(255, 255, 255), scale=0.6, thick=1)
 
     rows = scores["top_k"][:top_k]
@@ -347,13 +347,13 @@ def generate_debug_artifacts(scores: dict, debug_dir: Path, top_k: int = 5) -> d
     }
     with open(debug_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
-    logger.info("Phase 4 debug saved to: %s", debug_dir)
+    logger.info("Frame-scoring debug saved to: %s", debug_dir)
     return summary
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Phase 4 frame-scoring visual debug.")
+    parser = argparse.ArgumentParser(description="Frame-scoring visual debug.")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--object_id", required=True, type=int)
     parser.add_argument("--output_root", default="object_isolation/outputs")

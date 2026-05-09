@@ -1,4 +1,4 @@
-"""Phase 1 — object scope discovery for object_isolation."""
+"""Object scope discovery for object_isolation."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ObjectScope:
-    """Everything Phase 2+ needs about an object.
+    """Everything downstream stages need about an object.
 
     Coordinates are in world frame W unless suffixed `_L`.
     """
@@ -53,7 +53,7 @@ def discover_object_scope(
     visibility_min_anchors: int = 50,
     azimuth_bin_deg: float = 10.0,
 ) -> tuple[ObjectScope, "WorldLocal", "LocalSV3D", object, object]:
-    """Run Phase-1 discovery.
+    """Run scope discovery.
 
     Returns:
         scope, world_local, local_sv3d, gaussians, pipe_config
