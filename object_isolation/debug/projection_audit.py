@@ -29,6 +29,7 @@ import logging
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 # ── path setup ─────────────────────────────────────────────────────────────
@@ -263,6 +264,127 @@ def test_halluc_manifest(halluc_index_path: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Test 4: Fill-fraction and centroid drift per hallucinated view
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_fill_fraction_drift(halluc_index_path: Path) -> list[dict]:
+    """Quantify how far each accepted SV3D frame deviates from the fixed
+    _SV3D_FILL_FRAC=0.85 assumption and how much the mask centroid is offset
+    from the image centre.
+
+    Two numbers are printed per frame:
+      ws   — ratio of measured mask fill to assumed fill (1.0 = perfect match).
+             A frame with ws=1.3 means the object fills 30% more of the image
+             than assumed, so without correction the projected points would
+             appear 30% too large (focal length over-estimated).
+      Δcx,Δcy — pixel offset of the mask centroid from (res/2, res/2).
+             Non-zero values cause the projected dots to shift laterally.
+
+    These are exactly the two quantities corrected in
+    build_hallucinated_supervision_views() by the mask_fill_stats patch.
+    """
+    from object_isolation.core.dataset_builder import _mask_fill_stats, _SV3D_FILL_FRAC, _resolve_path
+
+    print("\n" + "=" * 65)
+    print("TEST 4 — FILL-FRACTION AND CENTROID DRIFT (hallucinated views)")
+    print("=" * 65)
+
+    if not halluc_index_path.exists():
+        print(f"  Not found: {halluc_index_path}")
+        return []
+
+    with open(halluc_index_path) as f:
+        manifest = json.load(f)
+
+    frames = [fr for fr in manifest.get("frames", []) if fr.get("accepted", False)]
+    if not frames:
+        print("  No accepted frames found.")
+        return []
+
+    assumed_fill_px: float | None = None  # filled on first frame
+    results = []
+
+    print(f"  {'#':>3}  {'Az':>7} {'El':>7}  {'fill_px':>8}  {'assumed':>8}  "
+          f"{'ws':>6}  {'Δcx':>7}  {'Δcy':>7}  status")
+    print("  " + "-" * 75)
+
+    for i, fr in enumerate(frames):
+        rgba_path = _resolve_path(fr["out_rgba_path"], manifest_dir=halluc_index_path.parent)
+        az = float(fr.get("azimuth_V_deg", 0.0))
+        el = float(fr.get("elevation_V_deg", 0.0))
+
+        if not rgba_path.exists():
+            print(f"  {i:>3}  {az:>7.1f} {el:>7.1f}  MISSING: {rgba_path.name}")
+            continue
+
+        rgba = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
+        if rgba is None:
+            print(f"  {i:>3}  {az:>7.1f} {el:>7.1f}  READ_FAILED: {rgba_path.name}")
+            continue
+
+        res = rgba.shape[0]
+        if assumed_fill_px is None:
+            assumed_fill_px = _SV3D_FILL_FRAC * float(res)
+
+        # Extract alpha mask
+        if rgba.ndim == 3 and rgba.shape[2] == 4:
+            mask = rgba[..., 3] > 127
+        elif rgba.ndim == 3:
+            # white-background RGB: non-white pixels are foreground
+            mask = rgba.mean(axis=2) < 250
+        else:
+            mask = rgba > 127
+
+        cx_px, cy_px, fill_px = _mask_fill_stats(mask)
+        ws = fill_px / max(assumed_fill_px, 1.0)
+        delta_cx = cx_px - res / 2.0
+        delta_cy = cy_px - res / 2.0
+
+        ws_flag = "  OK" if abs(ws - 1.0) < 0.15 else "  *** fill drift"
+        cx_flag = "" if abs(delta_cx) < res * 0.05 else " cx_off"
+        cy_flag = "" if abs(delta_cy) < res * 0.05 else " cy_off"
+        flag = ws_flag + cx_flag + cy_flag
+
+        print(f"  {i:>3}  {az:>7.1f} {el:>7.1f}  {fill_px:>8.1f}  {assumed_fill_px:>8.1f}  "
+              f"{ws:>6.3f}  {delta_cx:>+7.1f}  {delta_cy:>+7.1f}{flag}")
+        results.append({
+            "frame_index": fr.get("index", i),
+            "azimuth_V_deg": az,
+            "elevation_V_deg": el,
+            "fill_px_measured": fill_px,
+            "fill_px_assumed": assumed_fill_px,
+            "ws": ws,
+            "delta_cx_px": delta_cx,
+            "delta_cy_px": delta_cy,
+        })
+
+    if results:
+        ws_vals = [r["ws"] for r in results]
+        dcx_vals = [abs(r["delta_cx_px"]) for r in results]
+        dcy_vals = [abs(r["delta_cy_px"]) for r in results]
+        res_ref = int(results[0]["fill_px_assumed"] / _SV3D_FILL_FRAC)
+        print(f"\n  ws  — mean={float(np.mean(ws_vals)):.3f}  "
+              f"max_dev={float(max(abs(w - 1.0) for w in ws_vals)):.3f}")
+        print(f"  Δcx — mean={float(np.mean(dcx_vals)):.1f}px  "
+              f"max={float(max(dcx_vals)):.1f}px  "
+              f"({float(max(dcx_vals)) / res_ref * 100:.1f}% of res)")
+        print(f"  Δcy — mean={float(np.mean(dcy_vals)):.1f}px  "
+              f"max={float(max(dcy_vals)):.1f}px  "
+              f"({float(max(dcy_vals)) / res_ref * 100:.1f}% of res)")
+        n_ws_bad = sum(1 for w in ws_vals if abs(w - 1.0) >= 0.15)
+        n_cx_bad = sum(1 for v in results if abs(v["delta_cx_px"]) >= res_ref * 0.05)
+        n_cy_bad = sum(1 for v in results if abs(v["delta_cy_px"]) >= res_ref * 0.05)
+        if n_ws_bad:
+            print(f"\n  *** {n_ws_bad}/{len(results)} frames have fill-fraction deviation ≥15%. "
+                  "The ws correction in build_hallucinated_supervision_views() addresses this.")
+        if n_cx_bad or n_cy_bad:
+            print(f"  *** {max(n_cx_bad, n_cy_bad)}/{len(results)} frames have centroid offset ≥5% of res. "
+                  "The cx/cy correction addresses this.")
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -286,8 +408,8 @@ def run(
 
     output_root_p = Path(output_root)
     obj_dir = output_root_p / f"obj_{object_id}"
-    halluc_index = obj_dir / "novel_views" / "hallucination_index.json"
-    extraction_index = obj_dir / "extraction" / "extraction_index.json"
+    halluc_index = obj_dir / "03_novel_views" / "hallucination_index.json"
+    extraction_index = obj_dir / "01_extraction" / "extraction_index.json"
     debug_out = obj_dir / "debug_projection_audit"
     debug_out.mkdir(parents=True, exist_ok=True)
 
@@ -362,6 +484,7 @@ def run(
     # ── Run tests ─────────────────────────────────────────────────────────
     geo_report = test_point_cloud_geometry(xyz_W, scope, supervision_views)
     proj_results = test_projection_overlay(xyz_W, supervision_views, debug_out)
+    fill_results = test_fill_fraction_drift(halluc_index)
 
     # ── Save JSON report ──────────────────────────────────────────────────
     report = {
@@ -370,6 +493,7 @@ def run(
         "init_source": metadata.get("init_source"),
         "geometry": geo_report,
         "projection": proj_results,
+        "fill_fraction_drift": fill_results,
     }
     report_path = debug_out / "audit_report.json"
     with open(report_path, "w") as f:

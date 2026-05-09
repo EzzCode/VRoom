@@ -57,6 +57,11 @@ _SEED_PERCENTILE_HI: float = 98  # upper percentile for outlier-robust extent
 _WS_CLIP_MIN: float = 0.05
 _WS_CLIP_MAX: float = 2.0
 
+# Camera-pose optimisation (CPO): maximum elevation correction allowed per
+# hallucinated view.  SV3D elevation drift is typically < 5°; 12° is a
+# conservative safety bound that prevents the optimiser from over-fitting.
+_CPO_MAX_DELTA_EL_DEG: float = 12.0
+
 
 def _resolve_path(path_value: str | Path, *, manifest_dir: Path) -> Path:
     """Resolve paths saved in manifests, supporting old relative outputs."""
@@ -83,6 +88,34 @@ def _rgba_to_rgb_mask(rgba: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     out = a * bgr + (1.0 - a) * white
     rgb = cv2.cvtColor(out.astype(np.uint8), cv2.COLOR_BGR2RGB)
     return rgb, (a[..., 0] > 0.5)
+
+
+def _mask_fill_stats(mask: np.ndarray, min_pixels: int = 64) -> tuple[float, float, float]:
+    """Return (cx_px, cy_px, fill_px) measured from an SV3D boolean mask.
+
+    cx_px, cy_px — 2D centroid of the foreground in pixel coordinates.
+    fill_px      — max(bbox_width, bbox_height) of the foreground region.
+
+    Falls back to image-centre cx/cy and _SV3D_FILL_FRAC-based fill when
+    fewer than ``min_pixels`` foreground pixels are present.
+    """
+    res_h, res_w = mask.shape[:2]
+    fallback_cx = float(res_w) / 2.0
+    fallback_cy = float(res_h) / 2.0
+    fallback_fill = _SV3D_FILL_FRAC * float(max(res_h, res_w))
+
+    ys, xs = np.where(mask)
+    if len(xs) < min_pixels:
+        return fallback_cx, fallback_cy, fallback_fill
+
+    cx = float(xs.mean())
+    cy = float(ys.mean())
+    fill = float(max(int(xs.max()) - int(xs.min()) + 1,
+                     int(ys.max()) - int(ys.min()) + 1))
+    if fill < 1.0:
+        return fallback_cx, fallback_cy, fallback_fill
+
+    return cx, cy, fill
 
 
 def _resize_rgb_mask_camera(
@@ -120,19 +153,19 @@ def _compute_world_scale_px(
     T_w2c: np.ndarray,
     K: np.ndarray,
     target_size: int,
+    *,
+    sv3d_px_override: float | None = None,
 ) -> float:
     """Return ws from COLMAP seed point projection.
 
-    ws  — ratio of world object extent in K_sv3d pixels to sv3d_px
-          (= fill_frac * target_size).  K_view = K_sv3d / ws gives the
-          telephoto intrinsics that make the object span sv3d_px in the
-          supervision image.
+    ws  — ratio of world object extent in K_sv3d pixels to sv3d_px.
+          K_view = K_sv3d / ws gives telephoto intrinsics that make the
+          projected seed-point bounding box span exactly sv3d_px pixels.
 
-    The principal point is NOT part of the return because the camera is
-    constructed with look_at_w2c(C_W, scope.centroid_W, ...), which places
-    scope.centroid_W exactly on the optical axis.  scope.centroid_W therefore
-    always projects to (cx_sv3d, cy_sv3d) = (res/2, res/2) regardless of which
-    COLMAP seed points are used, so cx and cy of K_view must stay unchanged.
+    sv3d_px_override — if given, use this as the target pixel extent instead
+          of the fixed _SV3D_FILL_FRAC * target_size assumption.  Pass the
+          mask bounding-box extent from _mask_fill_stats for a per-view,
+          data-driven estimate.
 
     Raises RuntimeError if fewer than _SEED_MIN_IN_FRONT points are in
     front of this camera (pathological case — signals a data problem).
@@ -142,7 +175,7 @@ def _compute_world_scale_px(
     K64 = K.astype(np.float64)
     fx, fy = float(K64[0, 0]), float(K64[1, 1])
     cx_k, cy_k = float(K64[0, 2]), float(K64[1, 2])
-    sv3d_px = _SV3D_FILL_FRAC * float(target_size)
+    sv3d_px = float(sv3d_px_override) if sv3d_px_override is not None else _SV3D_FILL_FRAC * float(target_size)
 
     pts = np.asarray(seed_points_W, dtype=np.float64)
     pts_cam = (R @ pts.T).T + T
@@ -167,6 +200,85 @@ def _compute_world_scale_px(
     return ws
 
 
+def _cpo_refine_elevation(
+    seed_points_W: np.ndarray,
+    K_view: np.ndarray,
+    centroid_W: np.ndarray,
+    up_W: np.ndarray,
+    local_sv3d: "LocalSV3D",
+    az_V: float,
+    el_V: float,
+    mask_cx: float,
+    mask_cy: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Optimise the SV3D elevation offset (cause #3 correction).
+
+    SV3D is a diffusion model — its rendered elevation is not guaranteed to
+    match the geometrically-computed angle.  This finds the small δel that
+    minimises the distance between the median projected-seed-point position
+    and the mask centroid (mask_cx, mask_cy).
+
+    Returns (R_w2c, T_w2c, C_W, delta_el_deg) all as float64 arrays.
+    On any failure the nominal pose is returned with delta_el_deg = 0.0.
+    """
+    from scipy.optimize import minimize_scalar
+
+    fx = float(K_view[0, 0])
+    fy = float(K_view[1, 1])
+    cx = float(K_view[0, 2])
+    cy = float(K_view[1, 2])
+    pts = np.asarray(seed_points_W, dtype=np.float64)
+
+    def _residual(delta_el: float) -> float:
+        R_c, T_c, C_c = local_sv3d.sv3d_view_to_world_camera(az_V, el_V + delta_el)
+        R_c, T_c = look_at_w2c(np.asarray(C_c, dtype=np.float64), centroid_W, up_W)
+        R_c = np.asarray(R_c, dtype=np.float64)
+        T_c = np.asarray(T_c, dtype=np.float64).reshape(3)
+        pts_cam = (R_c @ pts.T).T + T_c
+        in_front = pts_cam[:, 2] > _SEED_DEPTH_MIN
+        if in_front.sum() < _SEED_MIN_IN_FRONT:
+            return 1e9
+        pf = pts_cam[in_front]
+        u = pf[:, 0] / pf[:, 2] * fx + cx
+        v = pf[:, 1] / pf[:, 2] * fy + cy
+        # Use percentile-based centroid to match _compute_world_scale_px and be
+        # robust to outlier COLMAP points behind thin surfaces.
+        mu_u = float(np.percentile(u, 50))
+        mu_v = float(np.percentile(v, 50))
+        return float((mu_u - mask_cx) ** 2 + (mu_v - mask_cy) ** 2)
+
+    def _make_pose(delta_el: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        R_c, T_c, C_c = local_sv3d.sv3d_view_to_world_camera(az_V, el_V + delta_el)
+        R_ref, T_ref = look_at_w2c(np.asarray(C_c, dtype=np.float64), centroid_W, up_W)
+        return (
+            np.asarray(R_ref, dtype=np.float64),
+            np.asarray(T_ref, dtype=np.float64).reshape(3),
+            np.asarray(C_c, dtype=np.float64).reshape(3),
+        )
+
+    try:
+        result = minimize_scalar(
+            _residual,
+            bounds=(-_CPO_MAX_DELTA_EL_DEG, _CPO_MAX_DELTA_EL_DEG),
+            method="bounded",
+            options={"xatol": 0.05},   # 0.05° precision is more than enough
+        )
+        delta_el = float(result.x)
+    except Exception as exc:
+        logger.debug("CPO elevation search failed (%s); using nominal pose.", exc)
+        R_n, T_n, C_n = _make_pose(0.0)
+        return R_n, T_n, C_n, 0.0
+
+    if abs(delta_el) >= _CPO_MAX_DELTA_EL_DEG * 0.99:
+        logger.warning(
+            "CPO reached elevation bound (δel=%.2f°) for az=%.1f el=%.1f — "
+            "check seed point coverage for this view.",
+            delta_el, az_V, el_V,
+        )
+    R_ref, T_ref, C_ref = _make_pose(delta_el)
+    return R_ref, T_ref, C_ref, delta_el
+
+
 def build_hallucinated_supervision_views(
     halluc_index_path: str | Path,
     local_sv3d: LocalSV3D,
@@ -177,12 +289,18 @@ def build_hallucinated_supervision_views(
     target_resolution: int = 576,
     up_W_override: Optional[np.ndarray] = None,
     include_conditioning: bool = True,
+    enable_cpo: bool = True,
 ) -> list[dict]:
     """Build hallucinated supervision views from novel-view outputs.
 
     seed_points_W is required — it is used to compute per-view telephoto
     intrinsics (K_view) that make the object span _SV3D_FILL_FRAC of the
     target image exactly as SV3D rendered it.
+
+    enable_cpo — when True (default) a 1-D elevation search is run per frame
+    (cause #3 correction): the elevation angle is perturbed by up to
+    ±_CPO_MAX_DELTA_EL_DEG to minimise the distance between the median
+    projected seed-point position and the mask centroid.
     """
     if seed_points_W is None or len(seed_points_W) == 0:
         raise ValueError(
@@ -237,19 +355,20 @@ def build_hallucinated_supervision_views(
         el_V = float(fr["elevation_V_deg"])
 
         R_w2c, T_w2c, C_W = local_sv3d.sv3d_view_to_world_camera(az_V, el_V)
+        # Resolve the up vector used for look_at; needed by CPO to stay consistent.
         if up_W_override is not None:
-            up = np.asarray(up_W_override, dtype=np.float64).reshape(3)
-            up = up / max(np.linalg.norm(up), 1e-9)
-            R_w2c, T_w2c = look_at_w2c(np.asarray(C_W, dtype=np.float64), centroid_W, up)
+            up_W = np.asarray(up_W_override, dtype=np.float64).reshape(3)
+            up_W = up_W / max(float(np.linalg.norm(up_W)), 1e-9)
+            R_w2c, T_w2c = look_at_w2c(np.asarray(C_W, dtype=np.float64), centroid_W, up_W)
+        else:
+            up_W = np.asarray(local_sv3d.world_local.up_W, dtype=np.float64)
 
-        # Compute telephoto intrinsics so the object spans _SV3D_FILL_FRAC of
-        # the image exactly as it does in the SV3D render.
-        # Only the focal length is scaled.  cx/cy are kept at (res/2, res/2)
-        # because the camera looks directly at scope.centroid_W, which the
-        # look_at_w2c construction places exactly on the optical axis →
-        # scope.centroid_W always projects to (cx_sv3d, cy_sv3d).  Shifting cx/cy
-        # to track the COLMAP seed centroid would mis-align the projection with
-        # the SV3D image content.
+        # ── Compute telephoto intrinsics K_view ───────────────────────────
+        # Focal length is scaled so the projected COLMAP seed-point bounding
+        # box spans _SV3D_FILL_FRAC of the target resolution.
+        # The mask centroid (mask_cx, mask_cy) is read for CPO targeting only —
+        # the principal point stays at image centre (K_sv3d default).
+        mask_cx, mask_cy, _ = _mask_fill_stats(mask)
         ws = _compute_world_scale_px(
             seed_points_W=seed_points_W,
             R_w2c=np.asarray(R_w2c, dtype=np.float64),
@@ -260,7 +379,26 @@ def build_hallucinated_supervision_views(
         K_view = K_sv3d.copy()
         K_view[0, 0] = float(K_sv3d[0, 0] / ws)
         K_view[1, 1] = float(K_sv3d[1, 1] / ws)
-        # K_view[0, 2] and K_view[1, 2] intentionally unchanged.
+
+        # ── Cause #3: CPO elevation refinement ────────────────────────────
+        if enable_cpo:
+            R_w2c, T_w2c, C_W, cpo_delta_el = _cpo_refine_elevation(
+                seed_points_W=seed_points_W,
+                K_view=K_view,
+                centroid_W=centroid_W,
+                up_W=up_W,
+                local_sv3d=local_sv3d,
+                az_V=az_V,
+                el_V=el_V,
+                mask_cx=mask_cx,
+                mask_cy=mask_cy,
+            )
+            logger.debug(
+                "CPO  az=%+6.1f  el=%+6.1f  →  δel=%+.2f°",
+                az_V, el_V, cpo_delta_el,
+            )
+        else:
+            cpo_delta_el = 0.0
 
         views.append({
             "source": "hallucinated",
@@ -276,6 +414,7 @@ def build_hallucinated_supervision_views(
                 "position": np.asarray(C_W, dtype=np.float32),
                 "azimuth_offset_deg": az_V,
                 "elevation_offset_deg": el_V,
+                "elevation_cpo_delta_deg": cpo_delta_el,
                 "azimuth_world_rad": float(np.deg2rad(az_V)),
                 "is_conditioning": fr.get("is_conditioning", False),
                 "frame_index": int(fr.get("index", 0)),
