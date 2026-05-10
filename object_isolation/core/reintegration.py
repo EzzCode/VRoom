@@ -28,6 +28,7 @@ import numpy as np
 import torch
 
 from object_isolation.paths import MODEL_DIR, SCENE_DIR
+from .coordinate_frames import look_at_w2c
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +50,7 @@ class _OrbitCam:
 
 def _look_at(cam_pos: np.ndarray, target: np.ndarray, up: np.ndarray):
     """COLMAP-convention look-at used by the comparison orbit renders."""
-    forward = target - cam_pos
-    forward = forward / max(np.linalg.norm(forward), 1e-8)
-    right = np.cross(up, forward)
-    right = right / max(np.linalg.norm(right), 1e-8)
-    cam_up = np.cross(forward, right)
-    cam_up = cam_up / max(np.linalg.norm(cam_up), 1e-8)
-    R = np.vstack((right, -cam_up, forward)).astype(np.float32)
-    T = (-R @ cam_pos).astype(np.float32)
-    return R, T
+    return look_at_w2c(cam_pos, target, up)
 
 
 def build_orbit_cameras(

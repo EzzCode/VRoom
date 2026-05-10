@@ -430,6 +430,8 @@ def write_projection_overlays(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    for old_overlay in output_dir.glob("*.jpg"):
+        old_overlay.unlink()
 
     xyz = np.asarray(xyz_W, dtype=np.float64)
     for i, view in enumerate(supervision_views):
