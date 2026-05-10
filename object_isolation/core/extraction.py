@@ -163,7 +163,7 @@ def _largest_cc(mask: np.ndarray, min_pixels: int = 64) -> np.ndarray:
     n_labels, lbl, stats, _ = cv2.connectedComponentsWithStats(m_u8, connectivity=4)
     if n_labels <= 1:
         return np.zeros_like(m_u8, dtype=bool)
-    # stats[0] = background
+    # Index 0 is background; skip it.
     areas = stats[1:, cv2.CC_STAT_AREA]
     if len(areas) == 0:
         return np.zeros_like(m_u8, dtype=bool)
@@ -294,7 +294,7 @@ def extract_frame(scope: ObjectScope, gaussians, pipe_config,
     alpha_u8 = (m_hybrid.astype(np.uint8) * 255)
     rgba = np.concatenate([rgb, alpha_u8[..., None]], axis=-1)
 
-    # bbox in pixels.
+    # Bounding box in pixels.
     ys, xs = np.where(m_hybrid)
     x0, y0, x1, y1 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
     bbox = [x0, y0, x1 - x0, y1 - y0]

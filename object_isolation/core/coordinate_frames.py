@@ -193,7 +193,7 @@ def sv3d_view_position_V(azimuth_deg: float, elevation_deg: float) -> np.ndarray
     el = np.deg2rad(float(elevation_deg))
     cos_e, sin_e = np.cos(el), np.sin(el)
     # Horizontal (XZ) ring rotated by azimuth, then lifted by elevation.
-    # az = 0 → +Z; az = 90° → +X; az = 180° → -Z (back).
+    # At az = 0 → +Z; az = 90° → +X; az = 180° → -Z (back).
     horiz = np.array([np.sin(az) * cos_e, 0.0, np.cos(az) * cos_e], dtype=np.float64)
     vert = np.array([0.0, sin_e, 0.0], dtype=np.float64)
     return horiz + vert  # unit radius

@@ -75,7 +75,7 @@ class VirtualCamera:
         self.FoVx = 2.0 * np.arctan(width / (2.0 * self.fx))
         self.FoVy = 2.0 * np.arctan(height / (2.0 * self.fy))
 
-        # world_view_transform: column-major [R|T] (ObjectGS stores transposed)
+        # World-view transform: column-major [R|T] (ObjectGS stores transposed).
         Rt = np.eye(4, dtype=np.float32)
         Rt[:3, :3] = self.R
         Rt[:3, 3] = self.T
@@ -191,8 +191,7 @@ def render_rgba(
         object_mask=object_mask,
     )
 
-    # render returns different shapes for 2DGS vs 3DGS; both expose 'render'
-    # (3, H, W) and 'render_alphas'.
+    # Output shape varies between 2DGS and 3DGS; both expose 'render' (3, H, W) and 'render_alphas'.
     rgb = torch.clamp(pkg["render"], 0.0, 1.0)        # (3, H, W)
     alpha_raw = pkg["render_alphas"]                   # (1, H, W) or (H, W)
     if alpha_raw.ndim == 3:

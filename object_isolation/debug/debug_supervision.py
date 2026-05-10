@@ -124,16 +124,16 @@ def make_alignment_audit_strip(audit_path: Path, out_path: Path, tile: int = 180
         transform = str(fr.get("alignment_transform", "identity"))
         accepted  = bool(fr.get("accepted"))
 
-        # column 0: original (before alignment)
+        # Column 0: original image (before alignment).
         canvas[y0:y0 + tile, 0:tile] = _resize_tile(original_img, tile)
         _putlbl(canvas, "original", (4, y0 + tile + 14),
                 fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
 
-        # column 1: after alignment (may be same as original if identity)
+        # Column 1: after alignment (same as original for identity transform).
         is_identity = (transform == "identity") or (original_path == aligned_path)
         col1 = _resize_tile(aligned_img, tile)
         if not is_identity:
-            # green border around the aligned tile to signal a transform was applied
+            # Green border signals a non-identity alignment transform.
             cv2.rectangle(col1, (0, 0), (tile - 1, tile - 1), (60, 180, 60), 3)
         canvas[y0:y0 + tile, tile:2 * tile] = col1
         label1 = transform[:18] if not is_identity else "identity"
@@ -141,31 +141,31 @@ def make_alignment_audit_strip(audit_path: Path, out_path: Path, tile: int = 180
                 fg=(40, 130, 40) if not is_identity else (80, 80, 80),
                 bg=(255, 255, 255), scale=0.35)
 
-        # column 2: ObjectGS reference render
+        # Column 2: ObjectGS reference render.
         canvas[y0:y0 + tile, 2 * tile:3 * tile] = _resize_tile(ref_img, tile)
         _putlbl(canvas, "ref", (2 * tile + 4, y0 + tile + 14),
                 fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
 
-        # column 3: overlap mask
+        # Column 3: overlap mask.
         mask     = _mask_from_image(aligned_path)
         ref_mask = _mask_from_image(ref_path, size_wh=(mask.shape[1], mask.shape[0]) if mask is not None else None)
         canvas[y0:y0 + tile, 3 * tile:4 * tile] = _overlay_masks(mask, ref_mask, tile)
         _putlbl(canvas, "overlap", (3 * tile + 4, y0 + tile + 14),
                 fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
 
-        # column 4: post-denormalized training-ready image (saved by dataset_builder)
+        # Column 4: post-denormalized training-ready image (written by dataset_builder).
         _pd_name = Path(str(aligned_path or "")).name
         post_denorm_img = _read_bgr(post_denorm_dir / _pd_name) if _pd_name else None
         col4 = _resize_tile(post_denorm_img, tile)
         if post_denorm_img is None:
-            # grey placeholder with "N/A" when not available (rejected frame or no denorm)
+            # Grey placeholder when no post-denorm image is available.
             cv2.putText(col4, "N/A", (tile // 2 - 16, tile // 2 + 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 140, 140), 1)
         canvas[y0:y0 + tile, 4 * tile:5 * tile] = col4
         _putlbl(canvas, "post-denorm", (4 * tile + 4, y0 + tile + 14),
                 fg=(80, 80, 80), bg=(255, 255, 255), scale=0.35)
 
-        # info column
+        # Info column.
         keep  = accepted
         color = (40, 150, 40) if keep else (40, 40, 190)
         status = "KEEP" if keep else "DROP"

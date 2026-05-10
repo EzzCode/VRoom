@@ -197,7 +197,7 @@ def make_scatter(scores: dict, out_path: Path,
         az = fr["azimuth_V_deg"]
         if not math.isfinite(az):
             continue
-        # az already in (-180, 180]
+        # Azimuth already normalized to (-180, 180].
         x = int(px0 + (az + 180) / 360 * plot_w)
         y = int(py1 - fr["score"] * plot_h)
         cv2.circle(img, (x, y), 3, (140, 140, 140), -1)
@@ -256,7 +256,7 @@ def make_top1_card(scores: dict, out_path: Path, target_w: int = 720):
         col = COMP_COLORS_RGB[k][::-1]  # to BGR
         _putlbl(sidebar, f"{k:>6}", (10, y + 12),
                 fg=(40, 40, 40), bg=(255, 255, 255), scale=0.45)
-        # bar
+        # Score bar.
         bx0 = 80
         cv2.rectangle(sidebar, (bx0, y), (bx0 + bar_w, y + 16), (220, 220, 220), 1)
         seg = int(round(v * bar_w))

@@ -80,7 +80,7 @@ def _prepare_conditioning(rgba_path: Path, target_size: int = 576,
     obj_w, obj_h = x1 - x0, y1 - y0
     side = max(obj_w, obj_h)
     pad = int(round(side * (1.0 - fill_frac) / (2.0 * fill_frac)))
-    # square crop centered on object
+    # Square-crop centered on the object.
     cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
     half = side // 2 + pad
     sx0 = max(0, cx - half); sy0 = max(0, cy - half)
@@ -88,7 +88,7 @@ def _prepare_conditioning(rgba_path: Path, target_size: int = 576,
     crop_bgr = bgr[sy0:sy1, sx0:sx1]
     crop_a = a[sy0:sy1, sx0:sx1].astype(np.float32) / 255.0
 
-    # square pad
+    # Square-pad to a uniform side length.
     h, w = crop_bgr.shape[:2]
     side2 = max(h, w)
     pad_top = (side2 - h) // 2; pad_bot = side2 - h - pad_top
@@ -98,12 +98,12 @@ def _prepare_conditioning(rgba_path: Path, target_size: int = 576,
     crop_a = cv2.copyMakeBorder(crop_a, pad_top, pad_bot, pad_left, pad_right,
                                 cv2.BORDER_CONSTANT, value=0.0)
 
-    # composite on bg
+    # Composite onto neutral background.
     bg = np.full_like(crop_bgr, bg_value)
     a3 = crop_a[..., None]
     comp = (a3 * crop_bgr + (1 - a3) * bg).astype(np.uint8)
 
-    # resize to target
+    # Resize to target resolution.
     comp = cv2.resize(comp, (target_size, target_size), interpolation=cv2.INTER_AREA)
     return cv2.cvtColor(comp, cv2.COLOR_BGR2RGB)
 
@@ -118,7 +118,7 @@ def _alpha_from_white_bg(rgb: np.ndarray, sat_thresh: int = 12,
     val = hsv[..., 2]
     fg = (sat > sat_thresh) | (val < val_thresh)
     fg = fg.astype(np.uint8)
-    # cleanup
+    # Clean up via open+close morphology.
     fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN,
                           cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
     fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE,
