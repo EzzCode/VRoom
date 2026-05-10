@@ -163,6 +163,8 @@ def _collect_raw_metrics(frame: dict, scope_cameras: list[dict]) -> FrameScore:
         az = ((az + 180.0) % 360.0) - 180.0
 
     el = float(scope_cameras[frame['cam_index']].get('elevation_V_deg', 0.0))
+    if not math.isfinite(el):
+        el = 0.0
 
     return FrameScore(
         cam_index=int(frame['cam_index']),

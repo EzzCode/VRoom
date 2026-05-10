@@ -33,6 +33,7 @@ Run via pipeline orchestrator (recommended)::
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -200,32 +201,121 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter / max(union, 1))
 
 
-def _load_sv3d_cache(out_raw: Path, cond_az: float, cond_el: float,
-                     expected_n: int) -> List[HallucinatedView]:
-    """Reload previously saved SV3D outputs as HallucinatedView list."""
-    files = sorted(Path(out_raw).glob("*.png"))
-    if not files:
-        raise FileNotFoundError(f"No cached SV3D outputs in {out_raw}")
-    if len(files) != expected_n:
-        logger.warning("Cached SV3D count=%d, expected %d", len(files), expected_n)
-    n = len(files)
-    views: List[HallucinatedView] = []
-    for i, p in enumerate(files):
-        bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        # Reproduce sv3d_p azimuth schedule: az_off = (i+1)*360/n.
-        az_off = (((i + 1) * 360.0 / n) % 360.0)
-        az_abs = ((cond_az + az_off + 180.0) % 360.0) - 180.0
-        views.append(HallucinatedView(
-            rgb=rgb, azimuth_V_deg=float(az_abs),
-            elevation_V_deg=float(cond_el), is_conditioning=False,
-        ))
-    return views
+def _md5_file(path: Path) -> str:
+    """Return hex MD5 of file bytes (for conditioning image identity check)."""
+    h = hashlib.md5()
+    h.update(path.read_bytes())
+    return h.hexdigest()
 
 
 def _signed_angle_delta_deg(a: float, b: float) -> float:
     """Shortest signed angular difference a-b in degrees."""
     return float(((float(a) - float(b) + 180.0) % 360.0) - 180.0)
+
+
+def _load_sv3d_cache(out_dir: Path, cond_az: float, cond_el: float,
+                     expected_n: int) -> List[HallucinatedView]:
+    """Reload previously saved SV3D outputs as HallucinatedView list.
+
+    Preferred path: reads ``hallucination_index.json`` and reloads each frame
+    from its ``sv3d_raw_path``.  Azimuth and elevation come from the manifest,
+    not from directory listing order, so stale extra files cannot corrupt the
+    schedule.
+
+    Legacy raw-only path (no manifest): falls back to sorted directory glob
+    **only** when the file count matches ``expected_n`` exactly; raises
+    ``RuntimeError`` on any mismatch.
+    """
+    out_dir = Path(out_dir)
+    manifest_path = out_dir / "hallucination_index.json"
+    out_raw = out_dir / "sv3d_raw"
+
+    if manifest_path.exists():
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+
+        # Validate count.
+        manifest_n = int(manifest.get("n_views", -1))
+        if manifest_n != expected_n:
+            raise RuntimeError(
+                f"Cache manifest has n_views={manifest_n} but backend expects "
+                f"{expected_n}.  Delete the cache or re-run without --reuse_sv3d."
+            )
+
+        # Validate conditioning pose.
+        cond_section = manifest.get("conditioning", {})
+        m_az = float(cond_section.get("azimuth_V_deg", float("nan")))
+        m_el = float(cond_section.get("elevation_V_deg", float("nan")))
+        if abs(_signed_angle_delta_deg(m_az, cond_az)) > 0.5 or abs(m_el - cond_el) > 0.5:
+            raise RuntimeError(
+                f"Cache manifest conditioning pose az/el=({m_az:.2f}, {m_el:.2f}) "
+                f"differs from current az/el=({cond_az:.2f}, {cond_el:.2f}). "
+                "Re-run without --reuse_sv3d."
+            )
+
+        # Reload frames sorted by index.
+        frame_entries = sorted(manifest.get("frames", []), key=lambda e: int(e["index"]))
+        if not frame_entries:
+            raise RuntimeError(f"Manifest at {manifest_path} contains no frames.")
+
+        views: List[HallucinatedView] = []
+        for entry in frame_entries:
+            raw_path = Path(entry["sv3d_raw_path"])
+            if not raw_path.exists():
+                raise FileNotFoundError(
+                    f"Manifest references missing file: {raw_path}. "
+                    "Re-run without --reuse_sv3d."
+                )
+            bgr = cv2.imread(str(raw_path), cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise RuntimeError(f"Cannot read cached SV3D frame: {raw_path}")
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            views.append(HallucinatedView(
+                rgb=rgb,
+                azimuth_V_deg=float(entry["azimuth_V_deg"]),
+                elevation_V_deg=float(entry["elevation_V_deg"]),
+                is_conditioning=bool(entry.get("is_conditioning", False)),
+            ))
+        logger.info(
+            "Manifest-driven cache reuse: loaded %d/%d frames (all=%d in manifest).",
+            len(views), expected_n, len(frame_entries),
+        )
+        return views
+
+    # ── Legacy fallback: no manifest, glob raw directory ──────────────────
+    files = sorted(out_raw.glob("*.png"))
+    if not files:
+        raise FileNotFoundError(
+            f"No cached SV3D outputs in {out_raw} and no manifest at {manifest_path}. "
+            "Run without --reuse_sv3d to generate."
+        )
+    if len(files) != expected_n:
+        raise RuntimeError(
+            f"Legacy cache in {out_raw} has {len(files)} PNGs but backend expects "
+            f"{expected_n}. Cannot safely reconstruct azimuth schedule from stale files. "
+            "Delete the cache directory and re-run without --reuse_sv3d."
+        )
+    n = len(files)
+    views = []
+    for i, p in enumerate(files):
+        bgr = cv2.imread(str(p), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise RuntimeError(f"Cannot read legacy cached frame: {p}")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        # Reproduce sv3d_p azimuth schedule: az_off = (i+1)*360/n.
+        az_off = ((i + 1) * 360.0 / n) % 360.0
+        az_abs = ((cond_az + az_off + 180.0) % 360.0) - 180.0
+        views.append(HallucinatedView(
+            rgb=rgb, azimuth_V_deg=float(az_abs),
+            elevation_V_deg=float(cond_el), is_conditioning=False,
+        ))
+    logger.warning(
+        "Legacy cache reuse (no manifest) from %s: %d frames. "
+        "Azimuth schedule reconstructed from filename order.",
+        out_raw, n,
+    )
+    return views
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,6 +418,21 @@ def run_hallucination(
     for d in (out_halluc, out_raw, out_ref):
         d.mkdir(parents=True, exist_ok=True)
 
+    # Clean stale outputs before a fresh generation run so old PNGs from
+    # previous iterations cannot corrupt the azimuth schedule on future reuse.
+    if not reuse_sv3d:
+        old_manifest = output_dir / "hallucination_index.json"
+        if old_manifest.exists():
+            old_manifest.unlink()
+            logger.info("Removed stale manifest %s.", old_manifest)
+        for stale_dir in (out_raw, out_halluc, out_ref):
+            removed = 0
+            for p in stale_dir.glob("*.png"):
+                p.unlink()
+                removed += 1
+            if removed:
+                logger.info("Cleaned %d stale PNGs from %s.", removed, stale_dir)
+
     # Load frame-scoring results → pick the top conditioning frame.
     with open(scores_json_path) as f:
         scores = json.load(f)
@@ -387,9 +492,13 @@ def run_hallucination(
     cv2.imwrite(str(output_dir / "conditioning.png"),
                 cv2.cvtColor(cond_rgb, cv2.COLOR_RGB2BGR))
 
+    # Compute MD5 of conditioning image for manifest provenance.
+    cond_png_path = output_dir / "conditioning.png"
+    cond_png_md5 = _md5_file(cond_png_path) if cond_png_path.exists() else ""
+
     # Run prior (or reuse cached outputs).
     if reuse_sv3d:
-        views = _load_sv3d_cache(out_raw, cond_az, cond_el, backend.output_count)
+        views = _load_sv3d_cache(output_dir, cond_az, cond_el, backend.output_count)
         logger.info("Reusing %d cached SV3D views from %s.", len(views), out_raw)
     else:
         views = backend.hallucinate(
@@ -474,6 +583,8 @@ def run_hallucination(
     # Manifest.
     manifest = {
         "backend": backend.name,
+        "backend_output_count": backend.output_count,
+        "backend_native_resolution": backend.native_resolution,
         "object_label_id": object_label_id,
         "conditioning": {
             "cam_index": top1["cam_index"],
@@ -482,6 +593,7 @@ def run_hallucination(
             "elevation_V_deg": cond_el,
             "score": top1["score"],
             "image_path": str(output_dir / "conditioning.png"),
+            "conditioning_png_md5": cond_png_md5,
         },
         "params": {
             "iou_threshold": iou_threshold,

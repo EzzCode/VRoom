@@ -115,6 +115,29 @@ def run_pipeline(
             f"current az/el=({current_az:.2f}, {current_el:.2f}) for conditioning cam {cam_idx}. "
             "Re-run novel-view synthesis after the coordinate-frame fix before training."
         )
+
+    # Validate fov, resolution, and view count match current training assumptions.
+    manifest_params = manifest.get("params", {})
+    manifest_fov = manifest_params.get("fov_y_deg")
+    manifest_res = manifest_params.get("resolution")
+    manifest_n_views = int(manifest.get("n_views", -1))
+    if manifest_fov is not None and abs(float(manifest_fov) - fov_y_deg) > 0.01:
+        raise RuntimeError(
+            f"hallucination_index.json was generated with fov_y_deg={manifest_fov} but "
+            f"training is using fov_y_deg={fov_y_deg}. The hallucinated camera intrinsics "
+            "will not match the training views. Re-run novel-view synthesis."
+        )
+    if manifest_res is not None and int(manifest_res) != _SV3D_RESOLUTION:
+        raise RuntimeError(
+            f"hallucination_index.json was generated at resolution={manifest_res} but "
+            f"training expects {_SV3D_RESOLUTION}. Re-run novel-view synthesis."
+        )
+    if manifest_n_views < 0:
+        logger.warning(
+            "hallucination_index.json missing 'n_views'; cannot validate view count. "
+            "Consider re-running novel-view synthesis to get a complete manifest."
+        )
+
     cond_cam_up_W: np.ndarray
     if use_cond_cam_up:
         R_cond = np.asarray(scope.cameras[cam_idx]["R"], dtype=np.float64)
