@@ -1,19 +1,19 @@
-"""Object isolation training pipeline.
+"""Object-Isolation Training Pipeline.
 
-Assumes extraction and novel-view synthesis have already run
+This stage assumes extraction and novel-view synthesis have already run
 (``obj_<id>/03_novel_views/hallucination_index.json`` must exist).
 
-Per object:
-    Build aligned supervision views from extraction real outputs + novel-view SV3D outputs.
-    Train an ObjectGS object model from COLMAP seed points + aligned views.
-    Render before/after comparison orbits and save the scene package under obj_<id>/.
+Per object it will:
+    1. Build aligned supervision views from extracted real frames and SV3D novel views.
+    2. Train a fresh ObjectGS object model from COLMAP-seeded points + aligned views.
+    3. Render before/after comparison orbits and save the scene package under obj_<id>/.
 
 Usage::
 
-    python -m object_isolation.run_training \
-        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \
-        --output_root object_isolation/outputs \
-        --object_ids 8 \
+    python -m object_isolation.run_training \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+        --output_root object_isolation/outputs \\
+        --object_ids 8 \\
         --iterations 1200
 
     # Run then immediately build debug visuals:
@@ -48,15 +48,19 @@ from object_isolation.core.reintegration import (
 logger = logging.getLogger(__name__)
 
 
+# ── Logging + helpers ───────────────────────────────────────────────────────────
+
 def _setup_logging(level: int = logging.INFO):
+    """Configure root logger with the project-standard format."""
     logging.basicConfig(
         level=level,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%H:%M:%S",
     )
 
 
 def _resolve_halluc_index(output_root: Path, object_id: int) -> Path:
+    """Locate the SV3D ``hallucination_index.json`` for one object."""
     p = output_root / f"obj_{object_id}" / NOVEL_VIEWS_DIR / "hallucination_index.json"
     if not p.exists():
         raise FileNotFoundError(
@@ -65,6 +69,8 @@ def _resolve_halluc_index(output_root: Path, object_id: int) -> Path:
         )
     return p
 
+
+# ── Training entrypoint ─────────────────────────────────────────────────────────────
 
 def run(
     *,
@@ -91,7 +97,7 @@ def run(
     debug: bool = False,
     preloaded_data: tuple | None = None,
 ) -> dict:
-    """Run supervision, training, and comparison for every requested object_id."""
+    """Run supervision, training, and comparison for every requested ``object_id``."""
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -264,7 +270,10 @@ def run(
     return metadata
 
 
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
 def _parse_args() -> argparse.Namespace:
+    """Build and parse the command-line argument namespace."""
     p = argparse.ArgumentParser(description="Object-isolation training pipeline orchestrator")
     p.add_argument("--model_path", required=True,
                    help="Path to trained ObjectGS output dir (containing point_cloud/, cameras.json).")
@@ -307,6 +316,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
+    """CLI entrypoint: parse args, configure logging, and dispatch ``run``."""
     args = _parse_args()
     _setup_logging(getattr(logging, str(args.log_level).upper(), logging.INFO))
     torch.backends.cudnn.benchmark = True

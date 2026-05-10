@@ -1,20 +1,20 @@
-"""Thin rendering wrapper for ObjectGS — used by the object-isolation pipeline.
+"""Thin Rendering Wrapper for ObjectGS.
 
-Imports DIRECTLY from ``temp_deps/ObjectGS``; has NO dependency on
-``target_replenishment``.
+Used by the object-isolation pipeline. Imports DIRECTLY from
+``temp_deps/ObjectGS``; has NO dependency on ``target_replenishment``.
 
 Public API
 ----------
-VirtualCamera(R, T, K, width, height)
+``VirtualCamera(R, T, K, width, height)``
     Lightweight camera object compatible with ObjectGS render.
 
-create_camera(R, T, K, width, height) -> VirtualCamera
+``create_camera(R, T, K, width, height) -> VirtualCamera``
     Convenience constructor.
 
-render_rgba(gaussians, cam, pipe_config, bg_white=True, object_label_id=None)
-    -> {'rgb': (3,H,W) float32 cuda, 'alpha': (H,W) float32 cuda}
+``render_rgba(gaussians, cam, pipe_config, bg_white=True, object_label_id=None)``
+    Returns ``{'rgb': (3, H, W) float32 cuda, 'alpha': (H, W) float32 cuda}``.
 
-prefilter_anchors(gaussians, cam) -> bool mask (N,) cuda
+``prefilter_anchors(gaussians, cam) -> bool mask (N,) cuda``
     Voxel prefilter — returns visible anchor mask.
 """
 

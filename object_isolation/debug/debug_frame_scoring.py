@@ -1,5 +1,4 @@
-"""
-Visual debug for frame scoring.
+"""Visual Debug for Frame Scoring.
 
 Outputs (under <output_root>/obj_<id>/02_frame_scoring_debug/):
     summary.json       — chosen frame and weights
@@ -47,9 +46,7 @@ COMP_COLORS_RGB = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _putlbl(img, text, org, fg=(255, 255, 255), bg=(0, 0, 0), scale=0.5, thick=1):
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, bg, thick + 2, cv2.LINE_AA)
@@ -76,9 +73,7 @@ def _crop_object(rgba_path: Path, pad_frac: float = 0.10):
     return comp
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Bar chart of top-K components
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Bar chart of top-K components ─────────────────────────────────────────────
 
 def make_bar_chart(scores: dict, out_path: Path, top_k: int = 5,
                    width: int = 1100, height: int = 520):
@@ -153,9 +148,7 @@ def make_bar_chart(scores: dict, out_path: Path, top_k: int = 5,
     return out_path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Scatter: az_V vs score
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Scatter: az_V vs score ─────────────────────────────────────────────────
 
 def make_scatter(scores: dict, out_path: Path,
                  width: int = 900, height: int = 420):
@@ -225,9 +218,7 @@ def make_scatter(scores: dict, out_path: Path,
     return out_path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Top-1 thumbnail with score breakdown overlay
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Top-1 thumbnail with score breakdown overlay ───────────────────────────
 
 def make_top1_card(scores: dict, out_path: Path, target_w: int = 720):
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -281,9 +272,7 @@ def make_top1_card(scores: dict, out_path: Path, target_w: int = 720):
     return out_path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Top-K thumbnail strip
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Top-K thumbnail strip ───────────────────────────────────────────────
 
 def make_topk_strip(scores: dict, out_path: Path, tile_w: int = 220, k: int = 5):
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -326,9 +315,7 @@ def _pad_h(img: np.ndarray, target_h: int) -> np.ndarray:
     return np.concatenate([img, pad], axis=0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Orchestration
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Orchestration ────────────────────────────────────────────────────────────────
 
 def generate_debug_artifacts(scores: dict, debug_dir: Path, top_k: int = 5) -> dict:
     debug_dir.mkdir(parents=True, exist_ok=True)

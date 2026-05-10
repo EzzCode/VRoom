@@ -1,16 +1,17 @@
-"""Final export and before/after verification renders.
+"""Final Per-Object Export and Before/After Verification Renders.
 
 For legacy seeded runs the parent ``ObjectGS`` model may be mutated in-place.
 For object training the parent and object models stay separate because
 their MLP checkpoints are independent. This module is responsible for:
 
-1. Building a fixed orbit of comparison cameras around an object's centroid
-    so the *same* viewpoints can be rendered before and after training.
-2. Saving either a mutated parent model or a scene package that points
-    at the reference scene plus per-object checkpoints.
-3. Writing a ``reintegration_metadata.json`` summary listing every object
-   that was replenished, its anchor counts, and scene-wide totals.
-
+    1. Building a fixed orbit of comparison cameras around an object's
+       centroid so the *same* viewpoints can be rendered before and after
+       training.
+    2. Saving either a mutated parent model or a scene package that points
+       at the reference scene plus per-object checkpoints.
+    3. Writing a ``reintegration_metadata.json`` summary listing every
+       object that was replenished, its anchor counts, and scene-wide
+       totals.
 """
 
 from __future__ import annotations
@@ -33,12 +34,11 @@ from .coordinate_frames import look_at_w2c
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Comparison cameras
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Comparison cameras ──────────────────────────────────────────────────────────────────
 
 @dataclass
 class _OrbitCam:
+    """Lightweight container for one comparison-orbit camera."""
     index: int
     azimuth_deg: float
     R: np.ndarray  # (3,3) R_w2c
@@ -189,9 +189,7 @@ def save_compare_grid(
                         cv2.cvtColor(diff, cv2.COLOR_RGB2BGR))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Final model export
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Final model export ─────────────────────────────────────────────────────────────────────────────
 
 def save_final_model(
     gaussians,

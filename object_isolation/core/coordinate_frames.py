@@ -51,9 +51,7 @@ from dataclasses import dataclass
 import numpy as np
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _unit(v: np.ndarray, fallback: np.ndarray | None = None) -> np.ndarray:
     """Return v normalized to unit length, or fallback if degenerate."""
@@ -96,9 +94,7 @@ def look_at_w2c(camera_center_W: np.ndarray, target_W: np.ndarray, up_W: np.ndar
     return R_w2c, T_w2c
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Frame W ↔ Frame L  (World ↔ Local Object)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Frame W ↔ Frame L  (World ↔ Local Object) ──────────────────────────────────────────────────
 
 @dataclass
 class WorldLocal:
@@ -161,9 +157,7 @@ class WorldLocal:
         return self.R_WL.T @ np.asarray(R_local, dtype=np.float64) @ self.R_WL
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Frame L ↔ Frame V  (Local ↔ Diffusion Virtual Camera)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Frame L ↔ Frame V  (Local ↔ Diffusion Virtual Camera) ─────────────────────────
 
 # Fixed permutation matrix mapping Local axes to Virtual axes.
 #
@@ -264,9 +258,7 @@ class LocalSV3D:
         return float(az), float(el)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Intrinsics for SV3D output
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Intrinsics for SV3D output ──────────────────────────────────────────────────────────────
 
 def make_K_for_sv3d_output(
     reference_K: np.ndarray,

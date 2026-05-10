@@ -1,5 +1,4 @@
-"""
-Visual debug for scope discovery + coordinate frames.
+"""Visual Debug for Scope Discovery + Coordinate Frames.
 
 Outputs (under <output_root>/obj_<id>/00_scope_debug/):
     summary.json             numeric snapshot of the scope
@@ -76,9 +75,7 @@ def _overlay_aabb(rgb_u8: np.ndarray, cam_p: dict,
         cv2.line(img, p1, p2, color[::-1], thickness, cv2.LINE_AA)
     return img
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Coordinate-frame round-trip unit test
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Coordinate-frame round-trip unit test ───────────────────────────────────
 
 def coord_roundtrip_test(world_local: WorldLocal, local_sv3d: LocalSV3D,
                          out_path: Path, n_pts: int = 100, seed: int = 0) -> dict:
@@ -131,9 +128,7 @@ def coord_roundtrip_test(world_local: WorldLocal, local_sv3d: LocalSV3D,
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Top-down plot
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Top-down plot ────────────────────────────────────────────────────────────────
 
 def make_topdown_plot(scope, world_local: WorldLocal, local_sv3d: LocalSV3D,
                       out_path: Path, canvas_px: int = 1024,
@@ -275,9 +270,7 @@ def make_topdown_plot(scope, world_local: WorldLocal, local_sv3d: LocalSV3D,
     return out_path
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# AABB overlays on training images
-# ─────────────────────────────────────────────────────────────────────────────
+# ── AABB overlays on training images ───────────────────────────────────────
 
 def render_aabb_overlays(scope, gaussians, pipe_config, out_dir: Path,
                          max_views: int = 6) -> list[Path]:
@@ -316,9 +309,7 @@ def render_aabb_overlays(scope, gaussians, pipe_config, out_dir: Path,
     return saved
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Orchestration
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Orchestration ────────────────────────────────────────────────────────────────
 
 def generate_debug_artifacts(scope, world_local, local_sv3d, gaussians, pipe, object_id: int, output_root: str,
                              max_aabb_views: int = 6) -> dict:

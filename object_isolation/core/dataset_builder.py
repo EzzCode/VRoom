@@ -1,4 +1,4 @@
-"""Build aligned real + hallucinated supervision views.
+"""Build Aligned Real + Hallucinated Supervision Views.
 
 Converts extraction outputs and novel-view hallucinations into the
 ``supervision_views`` list expected by the object-training optimizer:
@@ -20,9 +20,9 @@ Converts extraction outputs and novel-view hallucinations into the
     }, ...]
 
 Critical design points:
-- Real views use the original training camera R/T/K and extraction alpha mask.
-- Hallucinated views use the novel-view SV3D orbit camera and novel-view alpha mask.
-- If an image is resized, K is scaled by exactly the same x/y factors.
+    * Real views use the original training camera R/T/K and the extraction alpha mask.
+    * Hallucinated views use the novel-view SV3D orbit camera and novel-view alpha mask.
+    * If an image is resized, K is scaled by exactly the same x/y factors.
 """
 
 from __future__ import annotations

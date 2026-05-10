@@ -1,10 +1,10 @@
-"""Fresh object-only ObjectGS training for aligned real + hallucinated views.
+"""Fresh Per-Object ObjectGS Training (real + hallucinated views).
 
-This module intentionally does not use target_replenishment optimizers,
+This module intentionally does **not** use ``target_replenishment`` optimizers,
 backside seeding, or anchors from the already-trained ObjectGS model. It
 starts from the scene COLMAP point cloud, creates a fresh ObjectGS
-GaussianModel, and trains that model directly against the joint real +
-hallucinated view set.
+``GaussianModel``, and trains that model directly against the joint real +
+hallucinated view set produced by the earlier pipeline stages.
 """
 
 from __future__ import annotations
@@ -41,7 +41,10 @@ from scene.base_model import GaussianModel  # noqa: E402
 from utils.loss_utils import ssim  # noqa: E402
 
 
+# ── Tensor helpers ─────────────────────────────────────────────────────────────────────────
+
 def _to_tensor_image(rgb: np.ndarray) -> torch.Tensor:
+    """Convert an HWC numpy RGB image to a CHW float CUDA tensor in [0, 1]."""
     rgb_np = np.asarray(rgb)
     if rgb_np.dtype == np.uint8:
         rgb_np = rgb_np.astype(np.float32) / 255.0

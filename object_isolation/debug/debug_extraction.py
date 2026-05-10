@@ -1,5 +1,4 @@
-"""
-Visual debug for extraction.
+"""Visual Debug for Extraction.
 
 Outputs (under <output_root>/obj_<id>/01_extraction_debug/):
     triptych/<seq>__<cam_id>__<img_name>.png   real | M_real | M_objgs | M_hybrid | composite

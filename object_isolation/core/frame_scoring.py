@@ -1,5 +1,4 @@
-"""
-Frame scoring.
+"""SV3D Conditioning-Frame Scoring.
 
 Pick the SV3D conditioning frame (top-1) and rank backups (top-K). Five
 factors with locked weights:
@@ -41,9 +40,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Score weights (locked by user decision)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Score weights (locked by user decision) ───────────────────────────────────────────────────
 
 WEIGHTS = {
     "front":  0.35,
@@ -60,12 +57,10 @@ COVER_FLOOR = 0.02   # below 2% of image, treat as zero
 COVER_CEIL = 0.85    # above 85%, hard cut
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Component scoring functions
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Component scoring functions ───────────────────────────────────────────────────────────────
 
 def _front_score(az_deg: float, el_deg: float) -> float:
-    """1 at az=el=0, falls smoothly with angle. Elevation weighted as cos(el)."""
+    """1 at az=el=0; falls smoothly with angle. Elevation weighted as cos(el)."""
     if not math.isfinite(az_deg) or not math.isfinite(el_deg):
         return 0.0
     az = math.radians(az_deg)
@@ -124,12 +119,11 @@ def _occl_score(n_hybrid: int, n_objgs: int) -> float:
     return float(min(1.0, n_hybrid / max(n_objgs, 1)))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-frame metric collection
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Per-frame metric collection ───────────────────────────────────────────────────────────────
 
 @dataclass
 class FrameScore:
+    """Container for per-frame raw metrics, normalized components, and final score."""
     cam_index: int
     img_name: str
     image_path: str
@@ -194,14 +188,12 @@ def _rank_normalize(values: np.ndarray) -> np.ndarray:
     return ranks
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Top-level
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Top-level ────────────────────────────────────────────────────────────────────────────────
 
 def score_frames(extraction_index_path: Path, scope_cameras: list[dict],
                  weights: dict | None = None,
                  top_k: int = 5) -> dict:
-    """Score every frame in the extraction manifest. Return ranked scores."""
+    """Score every frame in the extraction manifest and return a ranked dict."""
     weights = weights or WEIGHTS
     with open(extraction_index_path) as f:
         manifest = json.load(f)
@@ -250,6 +242,7 @@ def score_frames(extraction_index_path: Path, scope_cameras: list[dict],
 
 def run_scoring(extraction_index_path: Path, scope_cameras: list[dict],
                 output_dir: Path, top_k: int = 5) -> dict:
+    """Run :func:`score_frames` and persist the result to ``scores.json``."""
     output_dir.mkdir(parents=True, exist_ok=True)
     result = score_frames(extraction_index_path, scope_cameras, top_k=top_k)
     with open(output_dir / "scores.json", "w") as f:

@@ -1,31 +1,30 @@
-"""
-Stable Video 3D backend (sv3d_p variant, pose-conditioned).
+"""Stable Video 3D Backend (``sv3d_p`` variant, pose-conditioned).
 
-Why sv3d_p over sv3d_u
-----------------------
-* sv3d_u was trained on circular orbits at 0° elevation only.
-* sv3d_p is trained with per-frame (polar, azimuth) conditioning, so the same
-  weights can render orbits at arbitrary elevations and (in principle)
+Why ``sv3d_p`` over ``sv3d_u``
+------------------------------
+* ``sv3d_u`` was trained on circular orbits at 0° elevation only.
+* ``sv3d_p`` is trained with per-frame ``(polar, azimuth)`` conditioning, so the
+  same weights can render orbits at arbitrary elevations and (in principle)
   arbitrary per-frame poses. We need this because our conditioning frame is
   rarely at exactly 0° elevation in the V (SV3D) frame.
 
-Why we vendor `chenguolin/sv3d-diffusers`
------------------------------------------
-The official Stability checkpoint at `stabilityai/sv3d` ships only raw
-`.safetensors` files (no `model_index.json`), and stock diffusers
-`StableVideoDiffusionPipeline` does not expose `polars_rad` / `azimuths_rad`.
+Why we vendor ``chenguolin/sv3d-diffusers``
+-------------------------------------------
+The official Stability checkpoint at ``stabilityai/sv3d`` ships only raw
+``.safetensors`` files (no ``model_index.json``), and stock diffusers
+``StableVideoDiffusionPipeline`` does not expose ``polars_rad`` /
+``azimuths_rad``. ``chenguolin/sv3d-diffusers`` is a community port that
+re-packages SV3D-p in diffusers convention and provides
+``SV3DUNetSpatioTemporalConditionModel`` + ``StableVideo3DDiffusionPipeline``
+with proper per-frame pose inputs.
 
-`chenguolin/sv3d-diffusers` is a community port that re-packages SV3D-p in
-diffusers convention and provides `SV3DUNetSpatioTemporalConditionModel` +
-`StableVideo3DDiffusionPipeline` with proper per-frame pose inputs.
-
-Expected to be cloned at:  `<workspace>/temp_deps/sv3d-diffusers/`
-(auto-injected into `sys.path` below).
+Expected to be cloned at:  ``<workspace>/temp_deps/sv3d-diffusers/``
+(auto-injected into ``sys.path`` below).
 
 Low-VRAM (≈8 GB)
-----------------
-* fp16 weights, sequential CPU offload, VAE slicing+tiling,
-  `decode_chunk_size=1`. `safe_mode=True` drops to 14 frames @ 512².
+-----------------
+* fp16 weights, sequential CPU offload, VAE slicing + tiling,
+  ``decode_chunk_size=1``. ``safe_mode=True`` drops to 14 frames @ 512².
 """
 from __future__ import annotations
 

@@ -1,5 +1,4 @@
-"""
-Visual debug for novel-view synthesis.
+"""Visual Debug for Novel-View Synthesis.
 
 Outputs (under <output_root>/obj_<id>/03_novel_views_debug/):
     conditioning_panel.png   — input image + mapped V-pose info
@@ -41,9 +40,7 @@ from object_isolation.core.diffusion_priors.sv3d import SV3DBackend
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _putlbl(img, text, org, fg=(255, 255, 255), bg=(0, 0, 0), scale=0.5, thick=1):
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, bg, thick + 2, cv2.LINE_AA)
@@ -65,9 +62,7 @@ def _to_bgr(img):
     return img
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Panel 1: conditioning view
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Panel 1: conditioning view ──────────────────────────────────────────────
 
 def make_conditioning_panel(manifest: dict, debug_dir: Path):
     cond = manifest["conditioning"]
@@ -89,9 +84,7 @@ def make_conditioning_panel(manifest: dict, debug_dir: Path):
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Panel 2: SV3D output grid
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Panel 2: SV3D output grid ──────────────────────────────────────────────
 
 def make_sv3d_grid(manifest: dict, debug_dir: Path, cols: int = 7, tile: int = 220):
     frames = manifest["frames"]
@@ -125,9 +118,7 @@ def make_sv3d_grid(manifest: dict, debug_dir: Path, cols: int = 7, tile: int = 2
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Panel 3: IoU strip (SV3D | ObjectGS | overlay)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Panel 3: IoU strip (SV3D | ObjectGS | overlay) ─────────────────────────
 
 def make_iou_strip(manifest: dict, debug_dir: Path, tile: int = 200, max_rows: int = 21):
     frames = manifest["frames"][:max_rows]
@@ -190,9 +181,7 @@ def make_iou_strip(manifest: dict, debug_dir: Path, tile: int = 200, max_rows: i
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Panel 4: polar coverage plot (real cams vs hallucinated)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Panel 4: polar coverage plot (real cams vs hallucinated) ───────────────
 
 def make_coverage_overlay(manifest: dict, scope_cameras: list, debug_dir: Path,
                           size: int = 600):
@@ -250,9 +239,7 @@ def make_coverage_overlay(manifest: dict, scope_cameras: list, debug_dir: Path,
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Orchestration
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Orchestration ────────────────────────────────────────────────────────────────
 
 def generate_debug_artifacts(manifest: dict, scope_cameras: list, debug_dir: Path) -> dict:
     debug_dir.mkdir(parents=True, exist_ok=True)

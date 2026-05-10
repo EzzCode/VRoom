@@ -1,10 +1,11 @@
-"""Visual debug for supervision and training outputs.
+"""Visual Debug for Supervision and Training Outputs.
 
-Outputs under <output_root>/obj_<id>/04_supervision_debug/:
-    alignment_audit_strip.png      before / after / ref / overlap for every hallucinated view
-    supervision_contact_sheet.png  real + retained supervision images
-    training_loss.png              training loss curve
-    compare_sheet.png              object/full-scene before-after comparison grids
+Outputs under ``<output_root>/obj_<id>/04_supervision_debug/``::
+
+    alignment_audit_strip.png      — before / after / ref / overlap per hallucinated view
+    supervision_contact_sheet.png  — real + retained supervision images
+    training_loss.png              — training loss curve
+    compare_sheet.png              — object/full-scene before-after comparison grids
     summary.json
 
 Run standalone (also executes training)::

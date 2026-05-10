@@ -1,4 +1,11 @@
-"""COLMAP point-cloud initialization for object scratch training."""
+"""COLMAP Point-Cloud Initialization for Object Scratch Training.
+
+Given a trained ObjectGS model and a per-object extraction manifest, locate
+the scene's COLMAP sparse reconstruction (``points3D.{bin,txt}``) and emit a
+small, object-local ``BasicPointCloud`` that seeds the fresh per-object
+Gaussian model. The output is intentionally sparse — densification fills it
+out during training.
+"""
 
 from __future__ import annotations
 

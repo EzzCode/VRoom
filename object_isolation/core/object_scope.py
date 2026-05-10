@@ -1,4 +1,17 @@
-"""Object scope discovery for object_isolation."""
+"""Object Scope Discovery.
+
+Given a trained ObjectGS model and a target ``object_label_id``, derive every
+piece of geometric metadata downstream stages need:
+
+    * The set of anchors belonging to that label (and their AABB / centroid)
+    * Principal axes via PCA on the anchor cloud
+    * A canonical orbit radius and an ``up`` / ``base_dir`` reference frame
+    * Which training cameras actually see the object (and from which V-frame
+      azimuths)
+
+The result is bundled in :class:`ObjectScope` and consumed by extraction,
+frame scoring, hallucination, and training stages.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

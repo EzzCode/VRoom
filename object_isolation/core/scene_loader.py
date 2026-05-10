@@ -1,4 +1,16 @@
-"""ObjectGS loading and camera graph helpers for object_isolation."""
+"""ObjectGS Loading and Camera-Graph Helpers.
+
+This module wraps the third-party ObjectGS package living under
+``temp_deps/ObjectGS`` so the rest of ``object_isolation`` can:
+
+    * Load a trained Gaussian model from disk (``load_gaussians``)
+    * Read camera poses from ``cameras.json`` and build an inter-camera
+      perspective graph used for view selection (``build_perspective_graph``)
+    * Estimate scene up-direction and an orbit base direction from cameras
+
+All public helpers are pure functions over numpy arrays / dataclasses so they
+are safe to call from any pipeline stage.
+"""
 
 from __future__ import annotations
 
@@ -25,18 +37,29 @@ from utils.general_utils import parse_cfg  # noqa: E402
 from utils.semantic_utils import OneHotEncoder  # noqa: E402
 
 
+# ── Data containers ───────────────────────────────────────────────────────────────
+
 @dataclass
 class PerspectiveGraph:
+    """Camera list plus a symmetric adjacency matrix of pairwise overlap."""
     cameras: list[dict]
     adjacency: np.ndarray
 
     @property
     def positions(self) -> np.ndarray:
+        """Stack of camera world positions, shape ``(N, 3)``."""
         return np.asarray([cam["position"] for cam in self.cameras], dtype=np.float32)
 
 
+# ── Model loading ─────────────────────────────────────────────────────────────────
+
 def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[GaussianModel, SimpleNamespace]:
-    model_path = Path(model_path)
+    """Load a trained ObjectGS ``GaussianModel`` and its pipeline config.
+
+    If ``iteration`` is ``-1`` (default), the latest ``iteration_*`` checkpoint
+    under ``<model_path>/point_cloud/`` is used. Falls back to a flat
+    ``<model_path>/point_cloud.ply`` if no iterations are present.
+    """
     config_path = model_path / "config.yaml"
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
@@ -97,19 +120,30 @@ def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[Gaussia
     return gaussians, pipe_config
 
 
+# ── Anchor / label accessors ────────────────────────────────────────────────────────────
+
 def get_anchor_positions(gaussians: GaussianModel) -> np.ndarray:
+    """Return anchor world positions as ``(N, 3)`` float32 numpy."""
     return gaussians.get_anchor.detach().cpu().numpy().astype(np.float32)
 
 
 def get_label_ids(gaussians: GaussianModel) -> np.ndarray:
+    """Return per-anchor label IDs as ``(N,)`` int64 numpy."""
     return gaussians.label_ids.detach().cpu().numpy().reshape(-1).astype(np.int64)
 
+
+# ── Camera graph construction ─────────────────────────────────────────────────────────
 
 def build_perspective_graph(
     cameras_json_path: str | Path,
     anchor_xyz: np.ndarray | None = None,
     overlap_method: str = "frustum",
 ) -> PerspectiveGraph:
+    """Read ``cameras.json`` and compute pairwise camera overlap.
+
+    ``overlap_method`` selects between cheap angular/proximity overlap and a
+    visibility-based overlap that requires ``anchor_xyz``.
+    """
     path = Path(cameras_json_path)
     if not path.exists():
         raise FileNotFoundError(f"cameras.json not found: {path}")
@@ -149,7 +183,10 @@ def build_perspective_graph(
     return PerspectiveGraph(cameras=cameras, adjacency=adjacency)
 
 
+# ── Geometry helpers ───────────────────────────────────────────────────────────────────
+
 def count_visible_anchors(cam: dict, points: np.ndarray) -> np.ndarray:
+    """Boolean mask marking which ``points`` project inside the camera frustum."""
     R = cam["R"]
     T = cam["T"]
     K = cam["K"]
@@ -164,6 +201,7 @@ def count_visible_anchors(cam: dict, points: np.ndarray) -> np.ndarray:
 
 
 def estimate_scene_up_from_cameras(raw_cameras: list[dict]) -> np.ndarray:
+    """Estimate a world up-vector from the average camera image up."""
     ups = []
     for cam in raw_cameras:
         R_c2w = np.asarray(cam["rotation"], dtype=np.float32)
@@ -177,6 +215,7 @@ def estimate_scene_up_from_cameras(raw_cameras: list[dict]) -> np.ndarray:
 
 
 def orbit_base_direction_from_cameras(cam_centers: np.ndarray, object_center: np.ndarray, up_vector: np.ndarray) -> np.ndarray:
+    """Pick a robust horizontal direction toward the typical camera location."""
     up = _normalize(up_vector, np.array([0.0, 0.0, 1.0], dtype=np.float32))
     fallback = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     dirs = np.asarray(cam_centers, dtype=np.float32) - np.asarray(object_center, dtype=np.float32).reshape(1, 3)
@@ -191,7 +230,10 @@ def orbit_base_direction_from_cameras(cam_centers: np.ndarray, object_center: np
     return _normalize(base, fallback)
 
 
+# ── Internal utilities ─────────────────────────────────────────────────────────────────
+
 def _normalize(vec: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    """Return ``vec`` normalized; substitute ``fallback`` if degenerate."""
     vec = np.asarray(vec, dtype=np.float32)
     norm = float(np.linalg.norm(vec))
     if not np.isfinite(norm) or norm < 1e-8:
@@ -200,6 +242,7 @@ def _normalize(vec: np.ndarray, fallback: np.ndarray) -> np.ndarray:
 
 
 def _compute_angular_overlap(cameras: list[dict]) -> np.ndarray:
+    """Cheap overlap proxy using forward-vector dot product + camera proximity."""
     positions = np.asarray([cam["position"] for cam in cameras], dtype=np.float32)
     forwards = np.asarray([cam["R"][2, :] for cam in cameras], dtype=np.float32)
     forwards /= np.linalg.norm(forwards, axis=1, keepdims=True) + 1e-8
@@ -212,6 +255,7 @@ def _compute_angular_overlap(cameras: list[dict]) -> np.ndarray:
 
 
 def _compute_visibility_overlap(cameras: list[dict], anchor_xyz: np.ndarray) -> np.ndarray:
+    """Pairwise IoU of which anchors project visibly into each camera."""
     visibility = np.zeros((len(cameras), len(anchor_xyz)), dtype=bool)
     for index, cam in enumerate(cameras):
         visibility[index] = count_visible_anchors(cam, anchor_xyz)

@@ -1,8 +1,12 @@
-"""Supervision alignment and object training.
+"""Per-Object Supervision Alignment and Object Training Driver.
 
-Uses only ``object_isolation`` internals.
+Wiring layer that, given a single object's scope and the SV3D hallucination
+manifest, builds the supervision view list, runs the fresh ObjectGS training
+in :mod:`object_isolation.core.trainer`, and persists the resulting model
+plus a per-object ``training_summary``. Uses only ``object_isolation``
+internals.
 
-Output layout (per object_id)::
+Output layout (per ``object_id``)::
 
     <output_dir>/obj_<id>/
         04_supervision_manifest.json

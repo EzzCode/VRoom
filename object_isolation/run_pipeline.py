@@ -1,14 +1,21 @@
-"""
-Complete pipeline orchestrator — end-to-end object isolation.
+"""End-to-end Object-Isolation Pipeline Orchestrator.
 
-Runs all object isolation stages in sequence:
-    Scope discovery  — Object scope discovery (automatic, embedded in extraction)
+Runs the complete sequence of object isolation stages for a single object:
+
+    Scope discovery  — Locate object scope in trained ObjectGS model
     Extraction       — Hybrid object extraction from real masks + ObjectGS renders
     Frame scoring    — Pick best conditioning view for SV3D novel-view synthesis
     Novel views      — SV3D novel-view hallucination
     Supervision      — Supervision dataset alignment
     Training         — Object model training (ObjectGS scratch)
     Comparison       — Before/after render comparison
+
+Usage:
+    python -m object_isolation.run_pipeline \\
+        --model_path <objectgs_output_dir> \\
+        --scene_dir <scene_dir> \\
+        --output_root object_isolation/outputs \\
+        --object_id 8
 
 Output layout per object::
 
@@ -79,10 +86,13 @@ if str(_PROJECT_ROOT) not in sys.path:
 logger = logging.getLogger(__name__)
 
 
+# ── Logging setup ────────────────────────────────────────────────────────────
+
 def _setup_logging(level: int = logging.INFO):
+    """Configure root logger with the project-standard format."""
     logging.basicConfig(
         level=level,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%H:%M:%S",
     )
 
@@ -126,10 +136,9 @@ def run_pipeline(
     skip_compare: bool = False,
     debug: bool = False,
 ) -> dict:
-    """
-    Run the complete object isolation pipeline for one object.
-    
-    Returns a summary dict with outputs from all stages.
+    """Run the complete object isolation pipeline for one object.
+
+    Returns a summary dict containing per-phase outputs and final paths.
     """
     import torch
     from object_isolation.core.object_scope import discover_object_scope
@@ -356,7 +365,10 @@ def run_pipeline(
     return summary
 
 
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
 def _parse_args() -> argparse.Namespace:
+    """Build and parse the command-line argument namespace."""
     p = argparse.ArgumentParser(
         description="Complete object isolation pipeline — end-to-end",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -444,9 +456,10 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
+    """CLI entrypoint: parse args, configure logging, and run the pipeline."""
     args = _parse_args()
     _setup_logging(getattr(logging, str(args.log_level).upper(), logging.INFO))
-    
+
     run_pipeline(
         model_path=args.model_path,
         scene_dir=args.scene_dir,

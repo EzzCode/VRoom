@@ -1,17 +1,17 @@
-"""
-Diffusion-prior backend interface.
+"""Diffusion-Prior Backend Interface.
 
 A backend takes one square RGB conditioning image and produces a series of
 novel-view RGB renders, plus a per-view azimuth/elevation in the SV3D
 V-frame (azimuth 0 at +Z_V, +X_V → +90°, elevation in [-90, +90]).
 
 Concrete backends so far:
-    sv3d.SV3DBackend  — Stable Video 3D (Stability AI), unconditional variant
-                        (sv3d_u): 21 frames, equispaced azimuths starting from
-                        the conditioning view, fixed elevation = cond elevation.
+    ``sv3d.SV3DBackend``  — Stable Video 3D (Stability AI), unconditional variant
+                            (``sv3d_u``): 21 frames, equispaced azimuths starting
+                            from the conditioning view, fixed elevation equal to
+                            the conditioning elevation.
 
 Backends MUST NOT touch the world frame; they live entirely in V-space.
-The caller (hallucination.py) is responsible for V→W pose mapping using
+The caller (``hallucination.py``) is responsible for V→W pose mapping using
 the coordinate-frame math.
 """
 from __future__ import annotations

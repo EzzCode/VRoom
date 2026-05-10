@@ -1,23 +1,23 @@
-"""
-Projection Audit — Two Sanity Tests Before Training
+"""Projection Audit — Two Sanity Tests Before Training.
 
 Test 1 — Projection Overlay
     Load the 8k COLMAP seed points for the object.
     Load every supervision view (real + hallucinated) and its camera (R, T, K).
     Project the 3D points onto each 2D image using raw matrix math (no ObjectGS).
     Overlay the projections as red dots on the supervision image and save to disk.
-    If the dots DON'T trace the banana silhouette → coordinate-frame is broken.
+    If the dots DON'T trace the object silhouette → coordinate-frame is broken.
 
 Test 2 — Point Cloud Geometry
     Print min/max/centroid/radius of the seed points.
     Print distance from centroid to each camera.
     Flag if anything looks pathological.
 
-Usage (from VRoom root):
+Usage::
+
     conda activate objectgs
-    python -m object_isolation.debug.projection_audit \
-        --model_path "temp_deps/ObjectGS/outputs/3dovs/2d_crossentropy_loss_01/2026-03-19_04-01-38" \
-        --output_root object_isolation/outputs \
+    python -m object_isolation.debug.projection_audit \\
+        --model_path "temp_deps/ObjectGS/outputs/3dovs/2d_crossentropy_loss_01/2026-03-19_04-01-38" \\
+        --output_root object_isolation/outputs \\
         --object_id 8
 """
 
@@ -49,20 +49,17 @@ def _signed_angle_delta_deg(a: float, b: float) -> float:
     return float(((float(a) - float(b) + 180.0) % 360.0) - 180.0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pure-numpy projection (no ObjectGS, no torch, no magic)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Pure-numpy projection (no ObjectGS, no torch, no magic) ────────────────────
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 2: Point Cloud Geometry
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Test 2: Point Cloud Geometry ─────────────────────────────────────────────────────────
 
 def test_point_cloud_geometry(
     xyz_W: np.ndarray,
     scope,
     supervision_views: list[dict],
 ) -> dict:
+    """Print and return a summary of seed-point geometry vs scope metadata."""
     centroid = xyz_W.mean(axis=0)
     pmin = xyz_W.min(axis=0)
     pmax = xyz_W.max(axis=0)
@@ -141,9 +138,7 @@ def test_point_cloud_geometry(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 1: Projection Overlay
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Test 1: Projection Overlay ──────────────────────────────────────────────
 
 def test_projection_overlay(
     xyz_W: np.ndarray,
@@ -227,11 +222,10 @@ def test_projection_overlay(
     return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Bonus Test 3: Inspect hallucination manifest frames
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Bonus Test 3: Inspect hallucination manifest frames ───────────────────────
 
 def test_halluc_manifest(halluc_index_path: Path) -> None:
+    """Print one-line acceptance status per frame from the SV3D manifest."""
     print("\n" + "=" * 65)
     print("TEST 3 — HALLUCINATION MANIFEST ACCEPTANCE")
     print("=" * 65)
@@ -264,9 +258,7 @@ def test_halluc_manifest(halluc_index_path: Path) -> None:
         print(f"  {idx:>3}  {az:>7.1f} {el:>7.1f}  {acc:>9}  {iou:>6.3f}  {path} {exists_mark}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────────────────────────────────
 
 def run(
     *,
@@ -274,10 +266,11 @@ def run(
     output_root: str,
     object_id: int,
 ) -> None:
+    """Run all projection-audit tests for one object and write debug images."""
     import logging
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%H:%M:%S",
     )
 

@@ -1,5 +1,4 @@
-"""
-Diffusion-prior orchestration for novel-view hallucination.
+"""Diffusion-Prior Orchestration for Novel-View Hallucination.
 
 Workflow:
     1. Load the frame-scoring top-1 frame (best SV3D conditioning view).
@@ -63,9 +62,7 @@ _ALPHA_THRESHOLD: float = 0.4
 _MIN_SV3D_MASK_PIXELS: int = 200
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Conditioning image prep
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Conditioning image prep ───────────────────────────────────────────────
 
 def _prepare_conditioning(rgba_path: Path, target_size: int = 576,
                           fill_frac: float = _SV3D_FILL_FRAC,
@@ -111,9 +108,7 @@ def _prepare_conditioning(rgba_path: Path, target_size: int = 576,
     return cv2.cvtColor(comp, cv2.COLOR_BGR2RGB)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# White-background mask extraction
-# ─────────────────────────────────────────────────────────────────────────────
+# ── White-background mask extraction ─────────────────────────────────────────
 
 def _alpha_from_white_bg(rgb: np.ndarray, sat_thresh: int = 12,
                          val_thresh: int = 245) -> np.ndarray:
@@ -318,9 +313,7 @@ def _load_sv3d_cache(out_dir: Path, cond_az: float, cond_el: float,
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Render ObjectGS at a hallucinated V-pose
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Render ObjectGS at a hallucinated V-pose ──────────────────────────────
 
 def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
                       object_label_id: int,
@@ -369,9 +362,7 @@ def _render_reference(scope: ObjectScope, local_sv3d, gaussians, pipe_config,
     return rgb_u8, alpha
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Manifest dataclass
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Manifest dataclass ─────────────────────────────────────────────────────
 
 @dataclass
 class HallucinatedFrame:
@@ -389,9 +380,7 @@ class HallucinatedFrame:
     objgs_ref_path: str
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main entry
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Main entry ───────────────────────────────────────────────────────────────
 
 def run_hallucination(
     scope: ObjectScope,

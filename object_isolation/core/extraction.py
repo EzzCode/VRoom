@@ -1,5 +1,4 @@
-"""
-Hybrid object extraction.
+"""Hybrid Object Extraction.
 
 For each visible training camera of an object, produce a clean RGBA tile of
 just the object cut out of the real photograph. Two-source mask:
@@ -54,9 +53,7 @@ from .object_scope import ObjectScope
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Filename resolution
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Filename resolution ────────────────────────────────────────────────────────
 
 def _resolve_id_map_path(id_map_dir: Path, img_name: str) -> Optional[Path]:
     """Try to find the id-map file for `img_name` under `id_map_dir`.
@@ -91,9 +88,7 @@ def _resolve_id_map_path(id_map_dir: Path, img_name: str) -> Optional[Path]:
     return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Module-1 ID auto-resolution
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Module-1 ID auto-resolution ────────────────────────────────────────────
 
 def auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir: Path,
                             n_probe_cams: int = 5,
@@ -159,9 +154,7 @@ def auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir: Path,
     return winner[0] if winner[1] > 0 else None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Mask post-processing
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Mask post-processing ────────────────────────────────────────────────────
 
 def _largest_cc(mask: np.ndarray, min_pixels: int = 64) -> np.ndarray:
     """Keep the largest 4-connected component if it has ≥ min_pixels;
@@ -193,9 +186,7 @@ def _close_and_fill(mask: np.ndarray, kernel: int = 3) -> np.ndarray:
     return ((closed | holes) > 0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-frame extraction
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Per-frame extraction ────────────────────────────────────────────────────
 
 @dataclass
 class FrameExtraction:
@@ -336,9 +327,7 @@ def extract_frame(scope: ObjectScope, gaussians, pipe_config,
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Top-level
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Top-level ───────────────────────────────────────────────────────────────
 
 def run_extraction(scope: ObjectScope, gaussians, pipe_config, *,
                    images_dir: Path,
