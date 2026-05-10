@@ -39,6 +39,8 @@ if str(_OBJECTGS_DIR) not in sys.path:
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
+from object_isolation.paths import EXTRACTION_DIR, NOVEL_VIEWS_DIR
+
 logger = logging.getLogger(__name__)
 
 
@@ -286,8 +288,8 @@ def run(
 
     output_root_p = Path(output_root)
     obj_dir = output_root_p / f"obj_{object_id}"
-    halluc_index = obj_dir / "novel_views" / "hallucination_index.json"
-    extraction_index = obj_dir / "extraction" / "extraction_index.json"
+    halluc_index = obj_dir / NOVEL_VIEWS_DIR / "hallucination_index.json"
+    extraction_index = obj_dir / EXTRACTION_DIR / "extraction_index.json"
     debug_out = obj_dir / "debug_projection_audit"
     debug_out.mkdir(parents=True, exist_ok=True)
 
