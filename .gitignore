@@ -71,7 +71,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-<<<<<<< HEAD
 *.egg
 *.egg-info/
 dist/

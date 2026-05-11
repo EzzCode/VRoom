@@ -96,7 +96,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Enhanced E2E VRoom Pipeline Runner")
     parser.add_argument("--data_path", required=True, help="Path to your scene dataset")
-    parser.add_argument("--base_config", required=True, help="Path to a base gs-train config YAML")
+    parser.add_argument("--base_config", required=True, help="Path to a base gstrain config YAML")
     args = parser.parse_args()
 
     data_path = Path(args.data_path).resolve()
@@ -171,7 +171,7 @@ def main():
         yaml.safe_dump(config, f, sort_keys=False)
 
     # STEP 3: Training
-    trainer_script = workspace_root / "gs-train" / "trainer.py"
+    trainer_script = workspace_root / "gstrain" / "trainer.py"
     stream_command(
         py_u + [str(trainer_script), "--config", str(new_config_path)],
         "GS Optimization",
