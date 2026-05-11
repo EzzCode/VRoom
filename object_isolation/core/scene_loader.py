@@ -60,6 +60,7 @@ def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[Gaussia
     under ``<model_path>/point_cloud/`` is used. Falls back to a flat
     ``<model_path>/point_cloud.ply`` if no iterations are present.
     """
+    model_path = Path(model_path)
     config_path = model_path / "config.yaml"
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
