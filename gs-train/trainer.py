@@ -11,7 +11,7 @@ from datetime import datetime
 import torch
 import yaml
 
-from vroom_core.models.facade import GaussianModel
+from vroom_core.models.gaussian_model import GaussianModel
 from vroom_core.training.orchestration import PipeConfig, PipelineConfig, TrainingConfig, TrainingOrchestrator as Trainer
 from vroom_core.utils.runtime import seed_everything
 from vroom_core.data.scene_pipeline import TrainingScene
@@ -115,7 +115,7 @@ def main():
     pipeline_config.save_vis = not args.no_vis
 
     model_kwargs = model_params.get("model_config", {}).get("kwargs", {})
-    gaussians = GaussianModel(
+    gaussian_model = GaussianModel(
         n_offsets=model_kwargs.get("n_offsets", 5),
         feat_dim=model_kwargs.get("feat_dim", 32),
         view_dim=model_kwargs.get("view_dim", 3),
@@ -129,8 +129,8 @@ def main():
     dataset_args = _build_dataset_args(model_params, source_path, model_path, pipeline_params)
     logger = _configure_logging()
     logger.info("Optimizing " + model_path)
-    scene = TrainingScene(dataset_args, gaussians, shuffle=pipeline_config.shuffle, logger=logger, weed_ratio=pipeline_config.weed_ratio)
-    trainer = Trainer(train_config, pipeline_config, gaussians, scene, output_dir=model_path, logger=logger)
+    scene = TrainingScene(dataset_args, gaussian_model, shuffle=pipeline_config.shuffle, logger=logger, weed_ratio=pipeline_config.weed_ratio)
+    trainer = Trainer(train_config, pipeline_config, gaussian_model, scene, output_dir=model_path, logger=logger)
     trainer.run()
     logger.info("\nTraining complete.")
 

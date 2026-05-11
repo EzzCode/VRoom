@@ -3,14 +3,14 @@ import torch
 from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_2dgs
 
 
-def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=True, object_mask=None):
+def render(viewpoint_camera, gaussian_model, pipe, bg_color, visible_mask=None, training=True, object_mask=None):
     """Rasterize visible neural Gaussians using gsplat."""
     if object_mask is None:
-        xyz, offset, color, opacity, scaling, rot, selection_mask, semantics = pc.generate_neural_gaussians(
+        xyz, offset, color, opacity, scaling, rot, selection_mask, semantics = gaussian_model.generate_neural_gaussians(
             viewpoint_camera, visible_mask, training
         )
     else:
-        xyz, offset, color, opacity, scaling, rot, selection_mask, semantics = pc.generate_neural_gaussians(
+        xyz, offset, color, opacity, scaling, rot, selection_mask, semantics = gaussian_model.generate_neural_gaussians(
             viewpoint_camera, visible_mask & object_mask, training
         )
 
@@ -27,7 +27,7 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
     )
     viewmat = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device)
 
-    if pc.gs_attr == "3D":
+    if gaussian_model.gs_attr == "3D":
         render_colors, render_alphas, render_semantics, info = gsplat.rasterization(
             means=xyz,
             quats=rot,
@@ -40,10 +40,10 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
             height=int(viewpoint_camera.image_height),
             backgrounds=bg_color[None],
             packed=False,
-            render_mode=pc.render_mode,
+            render_mode=gaussian_model.render_mode,
             features=semantics.detach(),
         )
-    elif pc.gs_attr == "2D":
+    elif gaussian_model.gs_attr == "2D":
         (
             render_colors,
             render_alphas,
@@ -64,15 +64,15 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
             width=int(viewpoint_camera.image_width),
             height=int(viewpoint_camera.image_height),
             backgrounds=bg_color[None]
-            if pc.render_mode not in ["RGB+D", "RGB+ED"]
+            if gaussian_model.render_mode not in ["RGB+D", "RGB+ED"]
             else torch.cat((bg_color[None], torch.zeros((1, 1), device=render_device)), dim=-1),
             packed=False,
-            tile_size=pc.tile_size_2dgs,
-            render_mode=pc.render_mode,
+            tile_size=gaussian_model.tile_size_2dgs,
+            render_mode=gaussian_model.render_mode,
             features=semantics.detach(),
         )
     else:
-        raise ValueError(f"Unknown gs_attr: {pc.gs_attr}")
+        raise ValueError(f"Unknown gs_attr: {gaussian_model.gs_attr}")
 
     if render_colors.shape[-1] == 4:
         colors, depths = render_colors[..., 0:3], render_colors[..., 3:4]
@@ -103,7 +103,7 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
         "render_alphas": render_alphas,
         "render_semantics": render_semantics,
     }
-    if pc.gs_attr == "2D":
+    if gaussian_model.gs_attr == "2D":
         return_dict.update(
             {
                 "render_normals": render_normals,
@@ -114,11 +114,11 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
     return return_dict
 
 
-def prefilter_voxel(viewpoint_camera, pc):
+def prefilter_voxel(viewpoint_camera, gaussian_model):
     """Project visible anchors and return a tightened visibility mask."""
-    means = pc.get_anchor[pc._anchor_mask]
-    scales = pc.get_scaling[pc._anchor_mask][:, :3]
-    quats = pc.get_rotation[pc._anchor_mask]
+    means = gaussian_model.get_anchor[gaussian_model._anchor_mask]
+    scales = gaussian_model.get_scaling[gaussian_model._anchor_mask][:, :3]
+    quats = gaussian_model.get_rotation[gaussian_model._anchor_mask]
     render_device = means.device
 
     Ks = torch.tensor(
@@ -132,7 +132,7 @@ def prefilter_voxel(viewpoint_camera, pc):
     )[None]
     viewmats = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device)[None]
 
-    if pc.gs_attr == "3D":
+    if gaussian_model.gs_attr == "3D":
         proj_results = fully_fused_projection(
             means,
             None,
@@ -150,7 +150,7 @@ def prefilter_voxel(viewpoint_camera, pc):
             sparse_grad=False,
             calc_compensations=False,
         )
-    elif pc.gs_attr == "2D":
+    elif gaussian_model.gs_attr == "2D":
         proj_results = fully_fused_projection_2dgs(
             means,
             quats,
@@ -167,9 +167,9 @@ def prefilter_voxel(viewpoint_camera, pc):
             sparse_grad=False,
         )
     else:
-        raise ValueError(f"Unknown gs_attr: {pc.gs_attr}")
+        raise ValueError(f"Unknown gs_attr: {gaussian_model.gs_attr}")
 
     radii = proj_results[0]
-    visible_mask = pc._anchor_mask.clone()
-    visible_mask[pc._anchor_mask] = radii.squeeze(0) > 0
+    visible_mask = gaussian_model._anchor_mask.clone()
+    visible_mask[gaussian_model._anchor_mask] = radii.squeeze(0) > 0
     return visible_mask

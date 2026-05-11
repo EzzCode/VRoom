@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from vroom_core.models.facade import GaussianModel
+from vroom_core.models.gaussian_model import GaussianModel
 from vroom_core.training.loss_engine import compute_losses
 from vroom_core.utils.runtime import exponential_lr_schedule
 
@@ -93,10 +93,10 @@ PipeConfig = PipelineConfig
 
 
 class TrainingOrchestrator:
-    def __init__(self, opt: TrainingConfig, pipe: PipelineConfig, gaussians: GaussianModel, scene, output_dir: str, logger=None):
+    def __init__(self, opt: TrainingConfig, pipe: PipelineConfig, gaussian_model: GaussianModel, scene, output_dir: str, logger=None):
         self.opt = opt
         self.pipe = pipe
-        self.gaussians = gaussians
+        self.gaussian_model = gaussian_model
         self.scene = scene
         self.output_dir = output_dir
         self.logger = logger
@@ -108,7 +108,7 @@ class TrainingOrchestrator:
 
     def run(self, first_iter: int = 0):
         from gaussian_renderer.render import prefilter_voxel, render
-        self.gaussians.setup_training(self.opt, grad_clip_norm=self.opt.grad_clip_norm)
+        self.gaussian_model.setup_training(self.opt, grad_clip_norm=self.opt.grad_clip_norm)
         camera_stack = None
         smoothed_loss = 0.0
         smoothed_depth = 0.0
@@ -117,21 +117,21 @@ class TrainingOrchestrator:
         progress = tqdm(range(first_iter, self.opt.iterations), desc="Training progress", dynamic_ncols=True, smoothing=0)
         first_iter += 1
         for iteration in range(first_iter, self.opt.iterations + 1):
-            self.gaussians.step_learning_rate(iteration)
+            self.gaussian_model.step_learning_rate(iteration)
 
             if not camera_stack:
                 camera_stack = self.scene.getTrainCameras().copy()
             viewpoint = camera_stack.pop(randint(0, len(camera_stack) - 1))
 
-            self.gaussians.set_anchor_mask(viewpoint.camera_center, viewpoint.resolution_scale)
-            visible_mask = prefilter_voxel(viewpoint, self.gaussians).squeeze() if self.pipe.add_prefilter else self.gaussians._anchor_mask
-            render_pkg = render(viewpoint, self.gaussians, self.pipe, self.scene.background, visible_mask)
+            self.gaussian_model.set_anchor_mask(viewpoint.camera_center, viewpoint.resolution_scale)
+            visible_mask = prefilter_voxel(viewpoint, self.gaussian_model).squeeze() if self.pipe.add_prefilter else self.gaussian_model._anchor_mask
+            render_pkg = render(viewpoint, self.gaussian_model, self.pipe, self.scene.background, visible_mask)
 
-            losses = compute_losses(render_pkg, viewpoint, self.gaussians, self.opt, iteration, self.depth_weight)
+            losses = compute_losses(render_pkg, viewpoint, self.gaussian_model, self.opt, iteration, self.depth_weight)
             total_loss = sum(losses.values())
             depth_loss = losses.get("depth_loss", torch.tensor(0.0, device=total_loss.device)).item()
             total_loss.backward()
-            self.gaussians.clip_gradients()
+            self.gaussian_model.clip_gradients()
 
             with torch.no_grad():
                 smoothed_loss = 0.4 * total_loss.item() + 0.6 * smoothed_loss
@@ -149,7 +149,7 @@ class TrainingOrchestrator:
                         "Loss": f"{smoothed_loss:.7f}",
                         "Depth Loss": f"{smoothed_depth:.7f}",
                         "psnr": f"{psnr:.3f}",
-                        "GS_num": f"{len(self.gaussians.get_anchor)}",
+                        "GS_num": f"{len(self.gaussian_model.get_anchor)}",
                         "prefilter": f"{self.pipe.add_prefilter}",
                     })
                     progress.update(10)
@@ -161,19 +161,19 @@ class TrainingOrchestrator:
                 self._save_training_vis(iteration, render_pkg, viewpoint)
 
             if self.opt.start_stat < iteration < self.opt.update_until:
-                self.gaussians.training_statis(self.opt, render_pkg, render_pkg["render"].shape[2], render_pkg["render"].shape[1])
+                self.gaussian_model.training_statis(self.opt, render_pkg, render_pkg["render"].shape[2], render_pkg["render"].shape[1])
                 densify_counter += 1
                 if self.opt.densification and iteration > self.opt.update_from and densify_counter % self.opt.update_interval == 0:
-                    self.gaussians.run_densify(self.opt, iteration)
+                    self.gaussian_model.run_densify(self.opt, iteration)
             elif iteration == self.opt.update_until:
-                self.gaussians.clean()
+                self.gaussian_model.clean()
 
             if iteration >= self.opt.iterations - self.pipe.no_prefilter_step:
                 self.pipe.add_prefilter = False
 
             if iteration < self.opt.iterations:
-                self.gaussians.optimizer.step()
-                self.gaussians.optimizer.zero_grad(set_to_none=True)
+                self.gaussian_model.optimizer.step()
+                self.gaussian_model.optimizer.zero_grad(set_to_none=True)
 
             # --- Checkpoint saves ---
             save_iters = set(self.pipe.save_iterations)
@@ -206,13 +206,13 @@ class TrainingOrchestrator:
             self.logger.info(f"\n[ITER {iteration}] Saving checkpoint")
         else:
             print(f"\n[ITER {iteration}] Saving checkpoint")
-        self.gaussians.save_ply(os.path.join(checkpoint_dir, "point_cloud.ply"))
-        self.gaussians.save_mlp_checkpoints(checkpoint_dir)
+        self.gaussian_model.save_ply(os.path.join(checkpoint_dir, "point_cloud.ply"))
+        self.gaussian_model.save_mlp_checkpoints(checkpoint_dir)
         if self.pipe.save_explicit:
-            self.gaussians.save_explicit(os.path.join(checkpoint_dir, "point_cloud_explicit.ply"))
+            self.gaussian_model.save_explicit(os.path.join(checkpoint_dir, "point_cloud_explicit.ply"))
         # Save full training state for resumption
         state_path = os.path.join(checkpoint_dir, "training_state.pth")
         try:
-            torch.save(self.gaussians.capture(), state_path)
+            torch.save(self.gaussian_model.capture(), state_path)
         except Exception:
             pass  # non-critical

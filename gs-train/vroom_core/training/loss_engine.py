@@ -62,7 +62,10 @@ def object_loss_fn(semantics, object_mask, id_encoder, opt, device):
         elif gt_ids.dim() == 4 and gt_ids.shape[1] == 1:
             gt_ids = gt_ids.squeeze(1)
         
-        object_loss = opt.lambda_object_loss * F.cross_entropy(logits, gt_ids, ignore_index=0, reduction="mean")
+        if (gt_ids != 0).sum() == 0:
+            object_loss = (semantics * 0.0).sum() # we keep semantic tensor for the computation graph
+        else:
+            object_loss = opt.lambda_object_loss * F.cross_entropy(logits, gt_ids, ignore_index=0, reduction="mean")
         zero_penalty = opt.lambda_zero_penalty * semantics[..., 0].mean()
         return object_loss, zero_penalty
     return None, None
@@ -121,15 +124,17 @@ def depth_loss_fn(render_pkg, viewpoint_cam, depth_weight, device):
 
 
 class LossComposer:
-    def compose(self, render_pkg, viewpoint_cam, gaussians, opt, iteration: int, depth_weight_fn) -> Dict[str, torch.Tensor]:
+    def compose(self, render_pkg, viewpoint_cam, gaussian_model, opt, iteration: int, depth_weight_fn) -> Dict[str, torch.Tensor]:
         prediction = render_pkg["render"]
         alpha = render_pkg["render_alphas"]
         semantics = render_pkg["render_semantics"]
         device = prediction.device
         target = viewpoint_cam.original_image.to(device)
         mask = viewpoint_cam.alpha_mask.to(device)
-        prediction = prediction * mask
-        target = target * mask
+
+        if mask.max() > 0.5:
+            prediction = prediction * mask
+            target = target * mask
 
         losses: Dict[str, torch.Tensor] = {}
         
@@ -142,7 +147,7 @@ class LossComposer:
             losses["scaling_loss"] = scaling_loss
 
         # Object Loss & Zero Penalty
-        object_loss, zero_penalty = object_loss_fn(semantics, viewpoint_cam.object_mask, gaussians.id_encoder, opt, device)
+        object_loss, zero_penalty = object_loss_fn(semantics, viewpoint_cam.object_mask, gaussian_model.id_encoder, opt, device)
         if object_loss is not None:
             losses["object_loss"] = object_loss
             losses["zero_penalty"] = zero_penalty
@@ -177,5 +182,5 @@ class LossComposer:
         return losses
 
 
-def compute_losses(render_pkg, viewpoint_cam, gaussians, opt, iteration, depth_w_fn) -> Dict[str, torch.Tensor]:
-    return LossComposer().compose(render_pkg, viewpoint_cam, gaussians, opt, iteration, depth_w_fn)
+def compute_losses(render_pkg, viewpoint_cam, gaussian_model, opt, iteration, depth_w_fn) -> Dict[str, torch.Tensor]:
+    return LossComposer().compose(render_pkg, viewpoint_cam, gaussian_model, opt, iteration, depth_w_fn)

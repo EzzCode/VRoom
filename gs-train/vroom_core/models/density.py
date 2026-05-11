@@ -54,12 +54,12 @@ class DensificationController:
         Supports both ``pruning_type in {'mean', 'max'}`` and
         ``growing_type in {'mean', 'max'}``.
         """
-        selection = render_pkg["selection_mask"]
-        visible = render_pkg["visible_mask"]
-        opacity = render_pkg["opacity"]
-        grad_points = render_pkg["viewspace_points"]
-        pixel_hits = render_pkg["visibility_filter"]
-        radii = render_pkg["radii"]
+        selection = render_pkg["selection_mask"] # a boolean mask indicating which child gaussian_model were selected for rendering. having opacity higher than a certain threshold. check decoder.py
+        visible = render_pkg["visible_mask"] # a boolean mask indicating which anchors were visible in the current frame.
+        opacity = render_pkg["opacity"] # children that survived the selection mask opacities
+        grad_points = render_pkg["viewspace_points"]  # 2D (x,y) tensor representin the center of where the 3D gaussian landed on the 2D screen. these have the .grad attribute attached tgat will be populated to tell us how to fix its physical position.
+        pixel_hits = render_pkg["visibility_filter"] # a boolean mask for children that survived after painting. after painting is completed some gaussian may end up not visible. or if its radii is small it doesn't cover a single pixel
+        radii = render_pkg["radii"] 
 
         if visible.numel() == 0:
             return
@@ -225,9 +225,12 @@ class DensificationController:
                     dim=0,
                 )
 
-            # --- stochastic thinning: fewer candidates at deeper levels ---
-            keep_prob = 1.0 - 0.5 ** (level + 1)
-            stochastic_filter = torch.rand_like(above_threshold.float()) > keep_prob
+            # --- stochastic thinning: survival rate *increases* with depth ---
+            # rand > 0.5**(level+1)
+            # level 0 -> 50% survive, level 1 -> 75%, level 2 -> 87.5% …
+            # Deeper levels compensate for their stricter gradient threshold by
+            # keeping more of the candidates that did pass it.
+            stochastic_filter = torch.rand_like(above_threshold.float()) > (0.5 ** (level + 1))
             candidates = above_threshold & stochastic_filter.to(self.device)
 
             if not candidates.any():
@@ -239,7 +242,7 @@ class DensificationController:
             scale_divisor = max(hierarchy_factor ** level, 1)
             cell_size = field.voxel_size * (init_factor // scale_divisor)
 
-            selected_xyz = child_xyz.reshape(-1, 3)[candidates]
+            selected_xyz = child_xyz.reshape(-1, 3)[candidates] # mismatch might have happened here, if it werent for padding
             novel_anchors, novel_features, novel_labels = self._filter_novel_voxels(
                 field, model, candidates, selected_xyz, cell_size, opt
             )
@@ -284,6 +287,7 @@ class DensificationController:
                 field.label_ids = torch.cat([field.label_ids, novel_labels], dim=0)
             elif novel_labels is not None:
                 field.label_ids = novel_labels
+          
             if field.label_ids is not None and field.codec is not None:
                 field.codec.fit(field.label_ids.view(-1))
 
@@ -327,21 +331,21 @@ class DensificationController:
                 None,
             )
 
-        if getattr(opt, "overlap", False):
-            novel = torch.ones(unique_grid.shape[0], dtype=torch.bool, device=self.device)
-        elif unique_grid.shape[0] > 0 and occupied_grid.shape[0] > 0:
-            novel = ~self._check_voxel_overlap(occupied_grid, unique_grid)
+        if getattr(opt, "overlap", False): # false is default
+            novel_cell_mask = torch.ones(unique_grid.shape[0], dtype=torch.bool, device=self.device)
+        elif unique_grid.shape[0] > 0 and occupied_grid.shape[0] > 0: # if there are candidates and existing anchors
+            novel_cell_mask = ~self._check_voxel_overlap(occupied_grid, unique_grid)
         else:
-            novel = torch.ones(unique_grid.shape[0], dtype=torch.bool, device=self.device)
+            novel_cell_mask = torch.ones(unique_grid.shape[0], dtype=torch.bool, device=self.device)
 
-        if not novel.any():
+        if not novel_cell_mask.any():
             return (
                 torch.zeros((0, 3), device=self.device),
                 torch.zeros((0, field.feature.shape[1]), device=self.device),
                 None,
             )
 
-        novel_positions = unique_grid[novel].float() * cell_size
+        novel_positions = unique_grid[novel_cell_mask].float() * cell_size
 
         # Pool features from contributing offsets
         repeated_feat = field.feature.repeat_interleave(
@@ -356,7 +360,7 @@ class DensificationController:
             0, inverse, torch.ones((inverse.shape[0], 1), device=self.device)
         )
         pooled = pooled / counts.clamp(min=1.0)
-        novel_features = pooled[novel]
+        novel_features = pooled[novel_cell_mask] # mask by the novel cell mask to ensure we only take unoccupied voxels into account
 
         # Pool labels from contributing offsets
         novel_labels = None
@@ -371,7 +375,7 @@ class DensificationController:
                 members = repeated_labels[inverse == idx]
                 if members.numel() > 0:
                     pooled_labels[idx] = torch.bincount(members).argmax()
-            novel_labels = pooled_labels[novel].view(-1, 1)
+            novel_labels = pooled_labels[novel_cell_mask].view(-1, 1)
 
         return novel_positions, novel_features, novel_labels
 

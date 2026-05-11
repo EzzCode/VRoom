@@ -10,7 +10,7 @@ from .data.colmap_io import (
 )
 from .data.scene_pipeline import SceneBundle, TrainingScene, camera_to_json, compute_nerf_normalization, load_colmap_bundle
 
-from .models.facade import GaussianModel
+from .models.gaussian_model import GaussianModel
 from .models.semantics import SemanticCodec
 
 from .utils.geometry import PointCloudSample, focal_to_fov, fov_to_focal, pil_image_to_tensor, projection_matrix, world_to_view_matrix

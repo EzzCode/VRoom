@@ -265,11 +265,11 @@ def camera_to_json(index, record: FrameRecord):
 
 
 class TrainingScene:
-    def __init__(self, args, gaussians, load_iteration=None, shuffle=True, logger=None, weed_ratio=0.0):
-        self.model_path = args.model_path
-        self.resolution_scales = args.resolution_scales
-        self.gaussians = gaussians
-        self.gaussians.weed_ratio = weed_ratio
+    def __init__(self, args, gaussian_model, load_iteration=None, shuffle=True, logger=None, weed_ratio=0.0):
+        self.model_path = args.model_path # path to save the model
+        self.resolution_scales = args.resolution_scales # resulotions we want to train on
+        self.gaussian_model = gaussian_model
+        self.gaussian_model.weed_ratio = weed_ratio
         self.background = self._background_from_args(args)
 
         if args.data_format != "colmap":
@@ -282,19 +282,20 @@ class TrainingScene:
             rng.shuffle(bundle.test_records)
 
         self.cameras_extent = bundle.normalization["radius"]
-        self.gaussians.set_appearance(len(bundle.train_records))
+        self.gaussian_model.set_appearance(len(bundle.train_records))
         self.train_cameras = {}
         self.test_cameras = {}
 
         if load_iteration:
             iteration_dir = os.path.join(self.model_path, "point_cloud", f"iteration_{load_iteration}")
-            self.gaussians.load_ply(os.path.join(iteration_dir, "point_cloud.ply"))
-            self.gaussians.load_mlp_checkpoints(iteration_dir)
+            self.gaussian_model.load_ply(os.path.join(iteration_dir, "point_cloud.ply"))
+            self.gaussian_model.load_mlp_checkpoints(iteration_dir)
         else:
             sampled = self.save_input_point_cloud(bundle.point_cloud, args.ratio, os.path.join(self.model_path, "input.ply"))
             with open(os.path.join(self.model_path, "cameras.json"), "w", encoding="utf-8") as handle:
                 json.dump([camera_to_json(index, record) for index, record in enumerate(bundle.test_records + bundle.train_records)], handle)
-            self.gaussians.initialize_anchors(sampled, self.cameras_extent, args.global_appearance, logger)
+            
+            self.gaussian_model.initialize_anchors(sampled, self.cameras_extent, args.global_appearance, logger)
 
         for scale in self.resolution_scales:
             self.train_cameras[scale] = build_camera_list(bundle.train_records, scale, args)
@@ -302,10 +303,10 @@ class TrainingScene:
 
     def _background_from_args(self, args):
         if args.random_background:
-            return torch.rand(3, dtype=torch.float32, device=self.gaussians.device)
+            return torch.rand(3, dtype=torch.float32, device=self.gaussian_model.device)
         if args.white_background:
-            return torch.ones(3, dtype=torch.float32, device=self.gaussians.device)
-        return torch.zeros(3, dtype=torch.float32, device=self.gaussians.device)
+            return torch.ones(3, dtype=torch.float32, device=self.gaussian_model.device)
+        return torch.zeros(3, dtype=torch.float32, device=self.gaussian_model.device)
 
     def save_input_point_cloud(self, point_cloud: PointCloudSample, ratio: int, path: str) -> PointCloudSample:
         stride = max(int(ratio), 1)
