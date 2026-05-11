@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field as dc_field
 from random import randint
 from typing import List, Optional
@@ -86,7 +87,7 @@ class PipelineConfig:
     weed_ratio: float = 0.0
     save_explicit: bool = False
     save_vis: bool = True
-    save_iterations: List[int] = dc_field(default_factory=lambda: [7000, 30000])
+    save_iterations: List[int] = dc_field(default_factory=lambda: [7000, 10000, 150000, 20000, 250000])
 
 
 PipeConfig = PipelineConfig
@@ -218,3 +219,19 @@ class TrainingOrchestrator:
             torch.save(self.gaussians.capture(), state_path)
         except Exception:
             pass  # non-critical
+
+        # Zip the entire output directory
+        try:
+            # We want to zip the entire self.output_dir and save it in the working directory
+            # Use the experiment name and iteration for the zip filename
+            parent_dir = os.path.basename(os.path.dirname(self.output_dir))
+            timestamp = os.path.basename(self.output_dir)
+            zip_filename = f"{parent_dir}_{timestamp}_iter_{iteration}"
+            zip_path = os.path.join(os.getcwd(), zip_filename)
+            
+            shutil.make_archive(zip_path, 'zip', self.output_dir)
+            if self.logger:
+                self.logger.info(f"Compressed entire output directory to {zip_path}.zip")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to zip output directory: {e}")

@@ -8,7 +8,7 @@ This entrypoint coordinates the four-stage processing pipeline:
 4) 3D voting/projection
 
 Usage:
-    python module1_runner.py --data_path /path/to/scene_folder
+    python module1_runner.py --data_path /path/to/scene_folder --output_path /path/to/writable_folder
 """
 
 import argparse
@@ -35,24 +35,31 @@ def run_step(step_name, cmd, dry_run=False):
         raise RuntimeError(f"Step failed: {step_name} (exit code {result.returncode})")
 
 
-def build_paths(data_path):
+def build_paths(data_path, output_path):
     """Build canonical per-stage filesystem paths for a scene folder."""
     image_root = data_path / "images"
     if not image_root.exists() and (data_path / "frames").exists():
         image_root = data_path / "frames"
+    
+    # If output_path is different from data_path, we might find images in output_path/images
+    # (e.g. symlinked by colmap_runner.py in known_pose mode)
+    if not image_root.exists() and (output_path / "images").exists():
+        image_root = output_path / "images"
+
     return {
         "images": image_root,
-        "sam_output": data_path / "sam_output",
-        "sam_masks": data_path / "sam_output" / "masks",
-        "tracked": data_path / "tracked",
-        "tracked_id_maps": data_path / "tracked" / "id_maps",
+        "sam_output": output_path / "sam_output",
+        "sam_masks": output_path / "sam_output" / "masks",
+        "tracked": output_path / "tracked",
+        "tracked_id_maps": output_path / "tracked" / "id_maps",
     }
 
 
 def main():
     """Parse CLI arguments, build stage commands, and execute pipeline."""
     parser = argparse.ArgumentParser(description="Run the full Module-1 pipeline")
-    parser.add_argument("--data_path", required=True, help="Scene folder containing images/")
+    parser.add_argument("--data_path", required=True, help="Scene folder containing images/ (read-only input)")
+    parser.add_argument("--output_path", help="Path to save all outputs (defaults to data_path)")
 
     parser.add_argument("--dry_run", action="store_true", help="Print commands without executing")
     parser.add_argument("--force_colmap", action="store_true", help="Pass --force to colmap_runner.py")
@@ -75,7 +82,7 @@ def main():
     parser.add_argument("--sam_ckpt", default="Module-1/models/sam3.pt", help="SAM3 checkpoint (e.g., sam3.pt, sam3_b.pt)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
-    parser.add_argument("--text_prompts", nargs="+", default=["chair", "table", "sofa", "bed", "desk", "cabinet"])
+    parser.add_argument("--text_prompts", nargs="+", default=["object"])
     parser.add_argument("--min_mask_area", type=int, default=120)
     parser.add_argument("--max_area_ratio", type=float, default=0.50)
     parser.add_argument("--border_touch_threshold", type=float, default=0.35)
@@ -99,7 +106,7 @@ def main():
 
     # Voting
     parser.add_argument("--algorithm", default="majority", choices=["majority", "prob", "corr"])
-    parser.add_argument("--output_dir", default="labeled_output", help="Output dir name inside data_path for vote.py")
+    parser.add_argument("--output_dir", default="labeled_output", help="Output dir name inside output_path for vote.py")
     parser.add_argument("--min_points", type=int, default=10)
     parser.add_argument("--disable_alias_merge", action="store_true", help="Disable correspondence-based alias merging in vote.py")
     parser.add_argument("--alias_iou_thresh", type=float, default=0.40, help="Min 3D IoU to consider two tracker IDs as aliases")
@@ -109,17 +116,25 @@ def main():
 
     script_dir = Path(__file__).resolve().parent
     data_path = Path(args.data_path).resolve()
+    output_path = Path(args.output_path).resolve() if args.output_path else data_path
 
     if not data_path.exists():
         raise FileNotFoundError(f"data_path does not exist: {data_path}")
 
-    paths = build_paths(data_path)
+    if not output_path.exists():
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    paths = build_paths(data_path, output_path)
     reconstruction_mode = args.reconstruction_mode
     if reconstruction_mode is None:
-        reconstruction_mode = "known_pose_triangulation" if (data_path / "manifest.json").exists() else "standard_sfm"
+        reconstruction_mode = "standard_sfm"
+        if (data_path / "manifest.json").exists():
+            print("ARCore manifest detected — using standard SfM with post-hoc metric alignment.")
 
-    if not paths["images"].exists() and (not args.skip_masks or not args.skip_tracking):
-        raise FileNotFoundError(f"Missing images directory: {paths['images']}")
+    if not paths["images"].exists() and not args.skip_colmap:
+         # In known_pose mode, colmap_runner will create output_path/images
+         if reconstruction_mode != "known_pose_triangulation":
+            raise FileNotFoundError(f"Missing images directory: {paths['images']}")
 
     py = sys.executable
 
@@ -129,6 +144,7 @@ def main():
             py,
             str(script_dir / "colmap_runner.py"),
             "--data_path", str(data_path),
+            "--output_path", str(output_path),
             "--camera_model", args.camera_model,
             "--matcher_type", args.matcher_type,
             "--reconstruction_mode", reconstruction_mode,
@@ -136,6 +152,9 @@ def main():
         if args.force_colmap:
             colmap_cmd.append("--force")
         run_step("COLMAP Reconstruction", colmap_cmd, dry_run=args.dry_run)
+        
+        # Refresh paths in case colmap_runner created output_path/images
+        paths = build_paths(data_path, output_path)
 
     # ── Stage 2: Mask Generation ──
     if not args.skip_masks:
@@ -187,7 +206,7 @@ def main():
         voting_cmd = [
             py,
             str(script_dir / "vote.py"),
-            "--data_path", str(data_path),
+            "--data_path", str(output_path),
             "--sparse_dir", "sparse/0",
             "--mask_dir", "tracked/id_maps",
             "--output_dir", args.output_dir,
