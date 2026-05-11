@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "VRoom",
+    "slug": "VRoom",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "newArchEnabled": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "VRoom needs access to your camera to scan the room and for AR experiences."
+      }
+    },
+    "android": {
+      "predictiveBackGestureEnabled": false,
+      "permissions": ["android.permission.CAMERA"],
+      "package": "com.anonymous.VRoom",
+      "newArchEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "VRoom needs access to your camera to scan the room.",
+          "enableMicrophonePermission": false
+        }
+      ],
+      [
+        "@reactvision/react-viro",
+        {
+          "android": {
+            "xRMode": "AR"
+          },
+          "ios": {
+            "cameraUsagePermission": "VRoom uses your camera for AR mesh projection.",
+            "microphoneUsagePermission": "VRoom uses your microphone for AR experiences.",
+            "photosPermission": "VRoom would like to access photos for AR experiences.",
+            "savephotosPermission": "VRoom would like to save AR screenshots to your library."
+          }
+        }
+      ]
+    ]
+  }
+}

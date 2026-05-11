@@ -16,7 +16,16 @@ from plyfile import PlyData, PlyElement
 
 from vroom_core.data.camera_system import FrameRecord, RenderCamera
 from vroom_core.data.colmap_io import read_extrinsics_binary, read_extrinsics_text, read_intrinsics_binary, read_intrinsics_text, quaternion_to_rotation
-from vroom_core.utils.geometry import PointCloudSample, apply_scene_transform, focal_to_fov, fov_to_focal, world_to_view_matrix
+from vroom_core.utils.geometry import (
+    PointCloudSample,
+    SceneTransform,
+    apply_scene_transform,
+    focal_to_fov,
+    fov_to_focal,
+    load_scene_transform,
+    save_scene_transform,
+    world_to_view_matrix,
+)
 
 
 @dataclass(frozen=True)
@@ -298,8 +307,9 @@ class TrainingScene:
         self.gaussians = gaussians
         self.gaussians.weed_ratio = weed_ratio
         self.background = self._background_from_args(args)
-        self.scene_translation = np.asarray(args.center, dtype=np.float32)
-        self.scene_scale = float(args.scale)
+        self.scene_transform = self._resolve_scene_transform(args)
+        self.scene_translation = np.asarray(self.scene_transform.offset, dtype=np.float32)
+        self.scene_scale = float(self.scene_transform.scale)
 
         if args.data_format != "colmap":
             raise NotImplementedError("VRoom core currently supports COLMAP datasets only.")
@@ -320,6 +330,9 @@ class TrainingScene:
             self.gaussians.load_ply(os.path.join(iteration_dir, "point_cloud.ply"))
             self.gaussians.load_mlp_checkpoints(iteration_dir)
         else:
+            os.makedirs(self.model_path, exist_ok=True)
+            save_scene_transform(os.path.join(self.model_path, "scene_transform.json"), self.scene_transform)
+            self._persist_scene_contract_artifacts(args)
             sampled = self.save_input_point_cloud(bundle.point_cloud, args.ratio, os.path.join(self.model_path, "input.ply"))
             with open(os.path.join(self.model_path, "cameras.json"), "w", encoding="utf-8") as handle:
                 json.dump([camera_to_json(index, record) for index, record in enumerate(bundle.test_records + bundle.train_records)], handle)
@@ -336,12 +349,46 @@ class TrainingScene:
             return torch.ones(3, dtype=torch.float32, device=self.gaussians.device)
         return torch.zeros(3, dtype=torch.float32, device=self.gaussians.device)
 
+    def _resolve_scene_transform(self, args) -> SceneTransform:
+        candidates = [
+            Path(args.model_path) / "scene_transform.json",
+            Path(args.source_path) / "scene_transform.json",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return load_scene_transform(candidate)
+        units = "meters" if (Path(args.source_path) / "manifest.json").exists() else "scene_units"
+        return SceneTransform(
+            offset=np.asarray(args.center, dtype=np.float32),
+            scale=float(args.scale),
+            units=units,
+            up_axis="y",
+            handedness="right",
+        )
+
+    def _persist_scene_contract_artifacts(self, args) -> None:
+        source_root = Path(args.source_path)
+        manifest_path = source_root / "manifest.json"
+        reconstruction_path = source_root / "reconstruction_summary.json"
+        payload = {
+            "source_path": str(source_root),
+            "scene_transform": self.scene_transform.to_dict(),
+        }
+        if manifest_path.exists():
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                payload["capture_manifest"] = json.load(handle)
+        if reconstruction_path.exists():
+            with open(reconstruction_path, "r", encoding="utf-8") as handle:
+                payload["reconstruction_summary"] = json.load(handle)
+        with open(Path(self.model_path) / "scene_manifest.json", "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+
     def save_input_point_cloud(self, point_cloud: PointCloudSample, ratio: int, path: str) -> PointCloudSample:
         stride = max(int(ratio), 1)
         transformed_points = apply_scene_transform(
             point_cloud.points,
-            getattr(self, "scene_translation", None),
-            getattr(self, "scene_scale", 1.0),
+            self.scene_transform.offset,
+            self.scene_transform.scale,
         )
         sampled = PointCloudSample(
             points=transformed_points[::stride],

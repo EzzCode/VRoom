@@ -1,4 +1,4 @@
-# ─── CUDA Compilation Artifacts ───────────────────────────────────────────────
+# CUDA compilation artifacts
 *.i
 *.ii
 *.gpu
@@ -6,7 +6,7 @@
 *.cubin
 *.fatbin
 
-# ─── Images & Media ───────────────────────────────────────────────────────────
+# Images and media
 *.png
 *.jpg
 *.jpeg
@@ -21,7 +21,7 @@
 *.ppm
 *.pgm
 
-# ─── ML Checkpoints & Weights ─────────────────────────────────────────────────
+# ML checkpoints and weights
 *.pt
 *.pth
 *.ckpt
@@ -30,7 +30,7 @@
 *.safetensors
 mlp.pt
 
-# ─── Gaussian Splatting Outputs ───────────────────────────────────────────────
+# Gaussian splatting outputs
 *.ply
 *.splat
 point_cloud/
@@ -38,75 +38,39 @@ output/
 outputs/
 */output/
 */outputs/
+*output*
 bed_vroom_output/
 office3dgsvroom/
 vroom_output/
 
-# ─── Datasets & Large Data ────────────────────────────────────────────────────
+# Datasets and large data
+\data
+\models
 datasets/
 *.db
 *.sqlite
 *.sqlite3
 
-# ─── Cloud / Storage Metadata ─────────────────────────────────────────────────
+# Cloud / storage metadata
 .identifier
 *.identifier
+*.Identifier
 
-# ─── Logs & Tensorboard ───────────────────────────────────────────────────────
+# Logs
 logs/
 *.log
 runs/
 wandb/
 events.out.tfevents.*
-
-# ─── Python ───────────────────────────────────────────────────────────────────
-\data
-\models
+npm-debug.*
+yarn-debug.*
+yarn-error.*
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-<<<<<<< HEAD
-*.egg
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# ─── Virtual Environments ─────────────────────────────────────────────────────
-.venv/
-venv/
-env/
-ENV/
-.env
-
-# ─── Jupyter ──────────────────────────────────────────────────────────────────
-.ipynb_checkpoints/
-*.ipynb
-
-# ─── IDEs & Editors ───────────────────────────────────────────────────────────
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# ─── OS ───────────────────────────────────────────────────────────────────────
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# ─── Archives & Temp ──────────────────────────────────────────────────────────
-*.zip
-*.tar.gz
-*.tar
-*.rar
-*.7z
-tmp/
-temp/
-
 .Python
 build/
 develop-eggs/
@@ -123,25 +87,50 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# Virtual environments and env files
 .env
 .venv
+.venv/
 venv/
-temp_deps/
+env/
+ENV/
+.env*.local
 
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs and editors
 .vscode/
-Scaffold-GS-Viewer/
-*output*
-# React Native / Expo
-# dependencies
-node_modules/
+.idea/
+*.swp
+*.swo
+*~
 
-# Expo
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Archives and temp
+*.zip
+*.tar.gz
+*.tar
+*.rar
+*.7z
+tmp/
+temp/
+temp_deps/
+exports/
+# React Native / Expo
+node_modules/
 .expo/
-dist/
 web-build/
 expo-env.d.ts
+.metro-health-check*
 
-# Native
+# Native mobile artifacts
 .kotlin/
 *.orig.*
 *.jks
@@ -149,27 +138,9 @@ expo-env.d.ts
 *.p12
 *.key
 *.mobileprovision
-
-# Metro
-.metro-health-check*
-
-# debug
-npm-debug.*
-yarn-debug.*
-yarn-error.*
-
-# macOS
-.DS_Store
-*.pem
-
-# local env files
-.env*.local
-
-# typescript
-*.tsbuildinfo
-
-# generated native folders
 ios/
 android/
 
-*.Identifier
+# Misc
+*.pem
+Scaffold-GS-Viewer/

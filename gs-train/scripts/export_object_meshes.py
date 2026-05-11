@@ -13,9 +13,18 @@ from argparse import ArgumentParser
 import torch
 import yaml
 
-from vroom_core.models.facade import GaussianModel
-from vroom_core.export.mesh_export import MeshFusionOptions, ObjectMeshExporter
 from vroom_core.data.scene_pipeline import TrainingScene
+from vroom_core.export import (
+    MeshFusionOptions,
+    ObjectMeshExporter,
+    build_measurement_record,
+    convert_mesh_to_metric_scene_space,
+    localize_metric_mesh,
+    load_scene_export_context,
+    save_measurement_record,
+    save_scene_index,
+)
+from vroom_core.models.facade import GaussianModel
 from typing import Optional, List, Dict, Tuple
 
 def _load_config(model_path: Path, config_path: Optional[str]) -> Tuple[Dict, Path]:
@@ -100,6 +109,7 @@ def main():
     parser.add_argument("--gpu", type=str, default="-1")
     parser.add_argument("--no_prefilter", action="store_true")
     parser.add_argument("--white_background", action="store_true")
+    parser.add_argument("--skip_metadata", action="store_true", help="Skip metric metadata export")
     args = parser.parse_args()
 
     model_path = Path(args.model_path).resolve()
@@ -154,12 +164,49 @@ def main():
     )
 
     output_root = model_path / "meshes"
+    metadata_records = []
+    export_context = None if args.skip_metadata else load_scene_export_context(model_path, source_path)
     for label_id in labels:
         result = exporter.export_label_mesh(scene.getTrainCameras(), label_id, output_root, options)
+        if export_context is not None:
+            label_dir = output_root / f"label_{label_id}"
+            metric_mesh_path = label_dir / "filtered_metric_scene.ply"
+            metric_vertices = convert_mesh_to_metric_scene_space(
+                result.filtered_path,
+                export_context.scene_transform,
+                output_path=metric_mesh_path,
+            )
+            local_mesh_path = label_dir / "filtered_local_object.ply"
+            localize_metric_mesh(metric_mesh_path, local_mesh_path)
+            object_id = f"label_{label_id:02d}"
+            metadata_path = label_dir / "metadata.json"
+            metadata = build_measurement_record(
+                export_context,
+                object_id=object_id,
+                label_id=label_id,
+                points_metric=metric_vertices,
+                artifacts={
+                    "raw_mesh_path": str(result.raw_path),
+                    "filtered_mesh_path": str(result.filtered_path),
+                    "metric_scene_mesh_path": str(metric_mesh_path),
+                    "local_object_mesh_path": str(local_mesh_path),
+                },
+            )
+            save_measurement_record(metadata_path, metadata)
+            metadata_records.append(
+                {
+                    "object_id": object_id,
+                    "label_id": label_id,
+                    "metadata_path": str(metadata_path),
+                    "mesh_path": str(metric_mesh_path),
+                }
+            )
         print(
             f"label {result.label_id}: raw={result.raw_path} ({result.num_vertices} verts), "
             f"filtered={result.filtered_path} ({result.num_vertices_filtered} verts)"
         )
+    if export_context is not None:
+        save_scene_index(output_root / "scene_objects_index.json", export_context, metadata_records)
 
 
 if __name__ == "__main__":

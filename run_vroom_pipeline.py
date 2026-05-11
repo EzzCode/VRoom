@@ -97,6 +97,12 @@ def main():
     parser = argparse.ArgumentParser(description="Enhanced E2E VRoom Pipeline Runner")
     parser.add_argument("--data_path", required=True, help="Path to your scene dataset")
     parser.add_argument("--base_config", required=True, help="Path to a base gs-train config YAML")
+    parser.add_argument(
+        "--reconstruction_mode",
+        default=None,
+        choices=["standard_sfm", "known_pose_triangulation"],
+        help="Override COLMAP reconstruction mode. Defaults to known_pose_triangulation when manifest.json is present.",
+    )
     args = parser.parse_args()
 
     data_path = Path(args.data_path).resolve()
@@ -116,6 +122,9 @@ def main():
     
     workspace_root = Path(__file__).parent.resolve()
     py = sys.executable
+    reconstruction_mode = args.reconstruction_mode
+    if reconstruction_mode is None:
+        reconstruction_mode = "known_pose_triangulation" if (data_path / "manifest.json").exists() else "standard_sfm"
 
     # Use 'python -u' for sub-commands as well
     py_u = [py, "-u"]
@@ -123,7 +132,11 @@ def main():
     # STEP 1: COLMAP
     print("\n[1/3] STAGE: Structure-from-Motion (COLMAP)")
     colmap_runner = workspace_root / "Module-1" / "colmap_runner.py"
-    stream_command(py_u + [str(colmap_runner), "--data_path", str(data_path)], "SfM Matching", total=total_images)
+    stream_command(
+        py_u + [str(colmap_runner), "--data_path", str(data_path), "--reconstruction_mode", reconstruction_mode],
+        "SfM Matching",
+        total=total_images,
+    )
 
     # STEP 2: SAM3 & Tracking
     print("\n[2/3] STAGE: Semantic Tracking (SAM3 + Tracker)")

@@ -10,6 +10,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vroom_core.data.camera_system import FrameRecord as CameraRecord
 from vroom_core.data.colmap_io import quaternion_to_rotation, read_extrinsics_binary, read_extrinsics_text, read_intrinsics_binary, read_intrinsics_text
 from vroom_core.data.scene_pipeline import compute_nerf_normalization
+from vroom_core.utils.geometry import (
+    apply_scene_transform,
+    arcore_camera_to_world_to_colmap_extrinsics,
+    invert_scene_transform,
+    load_scene_transform,
+    rotation_matrix_to_quaternion,
+    save_scene_transform,
+    SceneTransform,
+)
 
 
 def _dummy_image():
@@ -106,3 +115,83 @@ def test_nerf_normalization_centers_camera_cloud():
 
     assert np.allclose(normalization["translate"], np.array([-1.0, 0.0, 0.0]), atol=1e-6)
     assert np.isclose(normalization["radius"], 1.1, atol=1e-6)
+
+
+def test_scene_transform_round_trip_preserves_metric_points():
+    points = np.array(
+        [
+            [0.0, 1.0, 2.0],
+            [-3.5, 4.25, 0.5],
+            [10.0, -2.0, 8.0],
+        ],
+        dtype=np.float32,
+    )
+    offset = np.array([1.25, -0.5, 3.0], dtype=np.float32)
+    scale = 0.25
+
+    transformed = apply_scene_transform(points, offset=offset, scale=scale)
+    restored = invert_scene_transform(transformed, offset=offset, scale=scale)
+
+    assert np.allclose(restored, points, atol=1e-6)
+
+
+def test_scene_transform_serialization_round_trip(tmp_path):
+    transform = SceneTransform(
+        offset=np.array([1.0, -2.0, 0.5], dtype=np.float32),
+        scale=0.01,
+        units="meters",
+        up_axis="y",
+        handedness="right",
+    )
+    path = tmp_path / "scene_transform.json"
+
+    save_scene_transform(path, transform)
+    loaded = load_scene_transform(path)
+
+    assert np.allclose(loaded.offset, transform.offset, atol=1e-6)
+    assert np.isclose(loaded.scale, transform.scale)
+    assert loaded.units == "meters"
+    assert loaded.up_axis == "y"
+    assert loaded.handedness == "right"
+
+
+def test_arcore_pose_conversion_identity_pose_matches_colmap_axes():
+    camera_to_world = np.eye(4, dtype=np.float64)
+
+    rotation, translation = arcore_camera_to_world_to_colmap_extrinsics(camera_to_world)
+
+    assert np.allclose(rotation, np.diag([1.0, -1.0, -1.0]), atol=1e-6)
+    assert np.allclose(translation, np.zeros(3, dtype=np.float64), atol=1e-6)
+
+
+def test_arcore_pose_conversion_preserves_camera_center():
+    camera_to_world = np.eye(4, dtype=np.float64)
+    camera_to_world[:3, 3] = np.array([1.5, -2.0, 0.25], dtype=np.float64)
+
+    rotation, translation = arcore_camera_to_world_to_colmap_extrinsics(camera_to_world)
+    recovered_center = -rotation.T @ translation
+
+    assert np.allclose(recovered_center, camera_to_world[:3, 3], atol=1e-6)
+
+
+def test_arcore_pose_conversion_quaternion_round_trip():
+    angle = np.deg2rad(90.0)
+    rotation_world_from_camera = np.array(
+        [
+            [np.cos(angle), 0.0, np.sin(angle)],
+            [0.0, 1.0, 0.0],
+            [-np.sin(angle), 0.0, np.cos(angle)],
+        ],
+        dtype=np.float64,
+    )
+    camera_to_world = np.eye(4, dtype=np.float64)
+    camera_to_world[:3, :3] = rotation_world_from_camera
+    camera_to_world[:3, 3] = np.array([0.25, 1.0, -3.0], dtype=np.float64)
+
+    rotation, translation = arcore_camera_to_world_to_colmap_extrinsics(camera_to_world)
+    quaternion = rotation_matrix_to_quaternion(rotation)
+    reconstructed_rotation = quaternion_to_rotation(quaternion)
+    recovered_center = -reconstructed_rotation.T @ translation
+
+    assert np.allclose(reconstructed_rotation, rotation, atol=1e-6)
+    assert np.allclose(recovered_center, camera_to_world[:3, 3], atol=1e-6)
