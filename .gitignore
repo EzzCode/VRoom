@@ -5,10 +5,6 @@
 *.ptx
 *.cubin
 *.fatbin
-/inputs
-/objects
-/__pycache__/
-settings.json
 
 # Images and media
 *.png
