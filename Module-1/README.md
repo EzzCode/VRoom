@@ -1,26 +1,31 @@
-# VRoom Module-1: Feature Extraction & Object Tracking
+# VRoom Module-1: Object Segmentation, Tracking & 3D Labeling
 
-This module processes raw images to generate sparse 3D point clouds and per-object tracking masks. It combines **COLMAP** for Structure-from-Motion, **SAM 2** for high-quality object segmentation, and a **Multi-Modal Tracker** to maintain object IDs across frames. Finally, it projects masks back onto the 3D points for object labeling.
+This module processes raw images to generate labeled 3D point clouds with per-object identities. It combines **COLMAP** for Structure-from-Motion, **SAM 3** (Ultralytics) for open-vocabulary object segmentation, a **multi-modal tracker** with temporal consensus to maintain IDs across frames, and a **3D voting** stage with alias merging to label the sparse point cloud.
 
-## Overview
+## Architecture
 
-The pipeline consists of four main scripts:
-1. **`colmap_runner.py`**: Automates COLMAP feature extraction and sparse reconstruction.
-2. **`mask_processor.py`**: Uses SAM 2 to generate per-frame segmentation masks and filters backgrounds.
-3. **`object_tracker.py`**: Tracks segmented objects across frames using Optical Flow, Color, LBP texture, and centroid priors, generating consistent 16-bit ID maps.
-4. **`vote.py`**: Projects the 3D points from COLMAP onto the 2D ID maps to assign labels to the point cloud through multi-view voting.
+The pipeline consists of five source files orchestrated by a single runner:
+
+| File | Role |
+|---|---|
+| `colmap_runner.py` | Automates COLMAP feature extraction and sparse reconstruction |
+| `sam_inference.py` | Loads the Ultralytics SAM3 model and produces raw boolean masks |
+| `mask_processor.py` | Applies rule-based spatial post-processing (background filter, overlap/proximity merge, component split) |
+| `object_tracker.py` | Tracks segmented objects across frames using Kalman + Hungarian matching with temporal consensus |
+| `vote.py` | Projects 3D points onto tracked 2D ID maps, resolves labels via majority voting, and merges fragmented tracker IDs in 3D (alias merging) |
+
+Supporting files:
+- `colmap_loader.py` — Vendored COLMAP binary/text reader (Inria/GRAPHDECO)
+- `module1_runner.py` — End-to-end pipeline orchestrator
+- `models/` — Directory for model checkpoints (e.g. `sam3.pt`)
 
 ---
 
 ## Prerequisites & Installation
 
-```markdown
 ### 1. Python Dependencies
-Ensure you have the required Python packages installed.
 ```bash
-pip install numpy opencv-python scipy plyfile scikit-learn
-pip install "git+https://github.com/facebookresearch/sam2.git"
-```
+pip install numpy opencv-python scipy plyfile ultralytics
 ```
 
 ### 2. COLMAP
@@ -29,16 +34,15 @@ COLMAP is required for extracting camera poses and generating the sparse point c
 - **Setup**: Extract the COLMAP folder and add its path to your system's `PATH` environment variable.
 - **Verify**: Open a new terminal and run `colmap help`. It should print the COLMAP help text.
 
-### 3. SAM 2 Checkpoints
-The `mask_processor.py` script requires a pre-trained Segment Anything Model 2 (SAM 2) checkpoint.
-- **Download**: You need the `sam2.1_hiera_large.pt` checkpoint.
-  - [Download sam2.1_hiera_large.pt natively from Meta](https://github.com/facebookresearch/sam2#download-checkpoints)
-- **Placement**: Place the downloaded `.pt` file inside the `Module-1/models/` directory. Create the `models` folder if it doesn't exist.
+### 3. SAM 3 Checkpoint
+The segmentation stage requires an Ultralytics SAM3 checkpoint.
+- **Placement**: Place the downloaded `.pt` file inside the `Module-1/models/` directory.
 ```text
 VRoom/
 └── Module-1/
     ├── models/
-    │   └── sam2.1_hiera_large.pt  <-- Place here
+    │   └── sam3.pt  <-- Place here
+    ├── sam_inference.py
     ├── mask_processor.py
     └── ...
 ```
@@ -47,11 +51,9 @@ VRoom/
 
 ## Pipeline Usage
 
-Assuming your raw images are in `data/room_scene/images`, run the following steps in order from the `VRoom` system root or `Module-1` directory (paths in examples assume running from the root containing `Module-1`).
+Assuming your raw images are in `data/room_scene/images`, run the following from the `VRoom` root directory.
 
 ### One-Command Runner (Recommended)
-
-Run the full Module-1 pipeline end-to-end:
 
 ```bash
 python Module-1/module1_runner.py --data_path data/room_scene
@@ -60,26 +62,14 @@ python Module-1/module1_runner.py --data_path data/room_scene
 Useful options:
 
 ```bash
-# Balanced robust defaults (recommended)
-python Module-1/module1_runner.py --data_path data/room_scene --profile balanced
-
-# Conservative profile: avoid accidental object merges
-python Module-1/module1_runner.py --data_path data/room_scene --profile conservative
-
-# Recall profile: keep more candidate masks (for missing objects)
-python Module-1/module1_runner.py --data_path data/room_scene --profile recall
-
 # Rebuild COLMAP output
 python Module-1/module1_runner.py --data_path data/room_scene --force_colmap
 
-# Skip expensive earlier stages and only run voting
+# Skip expensive earlier stages and only re-run voting
 python Module-1/module1_runner.py --data_path data/room_scene --skip_colmap --skip_masks --skip_tracking
 
 # Use CPU for SAM (slower, but works without CUDA)
 python Module-1/module1_runner.py --data_path data/room_scene --device cpu
-
-# Tighten voting confidence
-python Module-1/module1_runner.py --data_path data/room_scene --min_confidence 0.45 --min_support 4
 ```
 
 ### Step 1: 3D Reconstruction (COLMAP)
@@ -90,7 +80,7 @@ python Module-1/colmap_runner.py --data_path data/room_scene
 ```
 **Output**: Creates a COLMAP database and a `sparse/0/` folder containing `cameras.bin`, `images.bin`, and `points3D.bin`.
 
-### Step 2: Mask Generation & Filtering (SAM 2)
+### Step 2: Mask Generation & Filtering (SAM 3)
 Generate foreground object masks for every image.
 
 ```bash
@@ -98,7 +88,7 @@ python Module-1/mask_processor.py \
     --input_dir data/room_scene/images \
     --output_dir data/room_scene/sam_output
 ```
-**Output**: Creates `masks/` (`.npz` archives keyed by the image stem) and `visible_masks/` (debug PNG overlays).
+**Output**: Creates `masks/` (`.npz` archives) and `visible_masks/` (debug PNG overlays).
 
 ### Step 3: Object Tracking
 Link the SAM masks across frames to assign consistent IDs.
@@ -109,8 +99,7 @@ python Module-1/object_tracker.py \
     --mask_dir data/room_scene/sam_output/masks \
     --output_dir data/room_scene/tracked
 ```
-*Note: This generates 16-bit PNG ID maps, where pixel values correspond to object IDs. A value of 0 is background.*
-**Output**: Creates `id_maps/` (16-bit PNGs whose filenames exactly match the source image stem) and `tracked_vis/` (debug tracking overlays).
+**Output**: Creates `id_maps/` (16-bit PNGs where pixel values = object IDs, 0 = background) and `tracked_vis/` (debug tracking overlays).
 
 ### Step 4: 3D Point Cloud Voting
 Project the 3D points onto the tracked 2D ID maps to label the scene in 3D space.
@@ -123,12 +112,12 @@ python Module-1/vote.py \
     --output_dir labeled_output \
     --algorithm majority
 ```
-**Output**: Creates labeled PLY point clouds in `data/room_scene/labeled_output/`, including separate clouds per tracked object.
+**Output**: Creates labeled PLY point clouds in `labeled_output/`, including per-object clouds and an `alias_merge_map.json` documenting how fragmented tracker IDs were consolidated.
 
 ### Naming Contract
 
-Module-1 now expects a strict one-to-one filename contract:
-- image `train_rgb_0000.png` -> tracker ID map `train_rgb_0000.png`
-- COLMAP image stem -> voter mask filename with the same stem plus `.png`
+Module-1 expects a strict one-to-one filename contract:
+- image `train_rgb_0000.png` → tracker ID map `train_rgb_0000.png`
+- COLMAP image stem → voter mask filename with the same stem plus `.png`
 
 The pipeline fails fast if a mask is missing instead of guessing an alternate frame name.

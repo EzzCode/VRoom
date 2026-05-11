@@ -1,5 +1,9 @@
 """SAM 3 Inference Module
 
+Encapsulates all interactions with the Ultralytics SAM3 model. This module
+owns model loading, checkpoint resolution, and raw mask extraction — fully
+decoupled from the rule-based spatial post-processing in mask_processor.py.
+
 Usage (as a library):
     from sam_inference import SAM3TextSegmenter
     segmenter = SAM3TextSegmenter(
@@ -8,22 +12,30 @@ Usage (as a library):
         text_prompts=["furniture"],
     )
     masks = segmenter.predict_raw_masks(frame_bgr)
-
 """
 
 import sys
 import os
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+# ── Ultralytics environment setup ────────────────────────────────────────────
+
 def _resolve_ultralytics_home(requested_home: Optional[str]) -> Path:
-    """Resolve and create the Ultralytics cache/checkpoint directory."""
+    """Resolve and create the Ultralytics cache/checkpoint directory.
+
+    If no explicit path is given, defaults to a `.ultralytics` folder beside
+    the active Python environment root (e.g. `d:/conda_envs/GP/.ultralytics`).
+    This keeps downloaded weights close to the env and avoids polluting the
+    user's home directory.
+    """
     if requested_home:
         home = Path(requested_home).expanduser().resolve()
     else:
@@ -34,8 +46,15 @@ def _resolve_ultralytics_home(requested_home: Optional[str]) -> Path:
     return home
 
 
+# ── SAM3 Segmenter ───────────────────────────────────────────────────────────
+
 class SAM3TextSegmenter:
-    """Thin SAM3 semantic segmenter wrapper for text-only inference."""
+    """Thin wrapper around Ultralytics SAM3SemanticPredictor.
+
+    Handles model loading with FP16, text-prompted inference, and conversion
+    of the Ultralytics results object into a plain list of boolean numpy masks.
+    """
+
     def __init__(
         self,
         checkpoint: str,
@@ -67,7 +86,7 @@ class SAM3TextSegmenter:
                 half=True,
                 device=self.device,
                 verbose=False,
-                save=False,
+                save=False,  # Prevent Ultralytics from dumping runs/segment/predict/
             )
         )
 
@@ -93,17 +112,22 @@ class SAM3TextSegmenter:
 
         return masks
 
-    def predict_raw_masks(self, frame_bgr: np.ndarray, text_prompts: Optional[List[str]] = None) -> List[np.ndarray]:
-        """Generate raw SAM3 masks for the frame without any rule-based post-processing.
-        
+    def predict_raw_masks(
+        self,
+        frame_bgr: np.ndarray,
+        text_prompts: Optional[List[str]] = None,
+    ) -> List[np.ndarray]:
+        """Generate raw SAM3 masks without any rule-based post-processing.
+
         Args:
-            frame_bgr: Input BGR frame.
-            text_prompts: Optional prompts to override the defaults. 
+            frame_bgr: Input image in BGR (OpenCV) format.
+            text_prompts: Optional text prompts to override instance defaults.
+
         Returns:
-            List of boolean masks.
+            List of boolean numpy masks, each with shape (H, W).
         """
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         prompts = text_prompts or self.text_prompts
-        
+
         results = self.semantic_predictor(source=frame_rgb, text=prompts, verbose=False)
         return self._extract_masks_from_results(results)
