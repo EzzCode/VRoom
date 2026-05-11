@@ -74,11 +74,11 @@ class GaussianDecoder(nn.Module):
             self.appearance = None
 
     def decode(self, field, viewpoint_camera, visible_mask: torch.Tensor, training: bool) -> DecodedGaussians:
-        anchors = field.anchor[visible_mask]
-        features = field.feature[visible_mask]
-        offsets = field.offset[visible_mask]
-        scaling = torch.exp(field.log_scaling[visible_mask])
-        semantics = self._semantic_vectors(field.codec, field.label_ids, visible_mask, anchors.shape[0], anchors.device)
+        anchors = field.anchors_positions[visible_mask]
+        features = field.anchor_features[visible_mask]
+        offsets = field.gaussians_offsets[visible_mask]
+        scaling = torch.exp(field.anchors_log_scales[visible_mask])
+        semantics = self._semantic_vectors(field.codec, field.semantic_labels, visible_mask, anchors.shape[0], anchors.device)
 
         observer = viewpoint_camera.camera_center.to(anchors.device)
         if self.view_dim > 0:

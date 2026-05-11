@@ -52,66 +52,66 @@ class GaussianModel(nn.Module):
         self._lr_schedulers = {}
         self.optimizer = None
 
-        self.field = AnchorCloud(n_offsets, feat_dim, float(voxel_size), device=device)
+        self.field = AnchorCloud(gaussians_per_anchor=n_offsets, feature_dim=feat_dim, voxel_size=float(voxel_size), device=device)
         self.decoder = GaussianDecoder(feat_dim, view_dim, appearance_dim, n_offsets, device=device)
         self.density = DensificationController(n_offsets, device=device)
         self.checkpoints = CheckpointManager(self)
 
     @property
     def _anchor(self):
-        return self.field.anchor
+        return self.field.anchors_positions
 
     @_anchor.setter
     def _anchor(self, value):
-        self.field.anchor = value
+        self.field.anchors_positions = value
 
     @property
     def _offset(self):
-        return self.field.offset
+        return self.field.gaussians_offsets
 
     @_offset.setter
     def _offset(self, value):
-        self.field.offset = value
+        self.field.gaussians_offsets = value
 
     @property
     def _anchor_feat(self):
-        return self.field.feature
+        return self.field.anchor_features
 
     @_anchor_feat.setter
     def _anchor_feat(self, value):
-        self.field.feature = value
+        self.field.anchor_features = value
 
     @property
     def _scaling(self):
-        return self.field.log_scaling
+        return self.field.anchors_log_scales
 
     @_scaling.setter
     def _scaling(self, value):
-        self.field.log_scaling = value
+        self.field.anchors_log_scales = value
 
     @property
     def _rotation(self):
-        return self.field.raw_rotation
+        return self.field.anchors_rotations
 
     @_rotation.setter
     def _rotation(self, value):
-        self.field.raw_rotation = value
+        self.field.anchors_rotations = value
 
     @property
     def _anchor_mask(self):
-        return self.field.visible
+        return self.field.visibility_mask
 
     @_anchor_mask.setter
     def _anchor_mask(self, value):
-        self.field.visible = value
+        self.field.visibility_mask = value
 
     @property
     def label_ids(self):
-        return self.field.label_ids
+        return self.field.semantic_labels
 
     @label_ids.setter
     def label_ids(self, value):
-        self.field.label_ids = value
+        self.field.semantic_labels = value
 
     @property
     def id_encoder(self):
@@ -131,31 +131,31 @@ class GaussianModel(nn.Module):
 
     @property
     def anchors(self) -> torch.Tensor:
-        return self.field.anchor
+        return self.field.anchors_positions
 
     @property
     def get_anchor(self) -> torch.Tensor:
-        return self.field.anchor
+        return self.field.anchors_positions
 
     @property
     def anchor_features(self) -> torch.Tensor:
-        return self.field.feature
+        return self.field.anchor_features
 
     @property
     def get_anchor_feat(self) -> torch.Tensor:
-        return self.field.feature
+        return self.field.anchor_features
 
     @property
     def offsets(self) -> torch.Tensor:
-        return self.field.offset
+        return self.field.gaussians_offsets
 
     @property
     def get_offset(self) -> torch.Tensor:
-        return self.field.offset
+        return self.field.gaussians_offsets
 
     @property
     def scaling(self) -> torch.Tensor:
-        return torch.exp(self.field.log_scaling)
+        return torch.exp(self.field.anchors_log_scales)
 
     @property
     def get_scaling(self) -> torch.Tensor:
@@ -163,7 +163,7 @@ class GaussianModel(nn.Module):
 
     @property
     def rotation(self) -> torch.Tensor:
-        return F.normalize(self.field.raw_rotation, dim=-1)
+        return F.normalize(self.field.anchors_rotations, dim=-1)
 
     @property
     def get_rotation(self) -> torch.Tensor:
@@ -171,9 +171,9 @@ class GaussianModel(nn.Module):
 
     @property
     def semantics(self) -> torch.Tensor:
-        if self.field.codec is None or self.field.label_ids is None:
-            return torch.zeros((self.field.anchor.shape[0], 1), dtype=torch.float32, device=self.device)
-        return self.field.codec.transform(self.field.label_ids.view(-1))
+        if self.field.codec is None or self.field.semantic_labels is None:
+            return torch.zeros((self.field.anchors_positions.shape[0], 1), dtype=torch.float32, device=self.device)
+        return self.field.codec.transform(self.field.semantic_labels.view(-1))
 
     @property
     def get_semantic(self) -> torch.Tensor:
@@ -195,8 +195,8 @@ class GaussianModel(nn.Module):
             logger = args[3] if len(args) >= 4 else kwargs.get("logger", None)
         
         self.field.voxel_size = self.voxel_size if self.voxel_size > 0 else kwargs.get("voxel_size", -1.0)
-        seeds = self.field.build_from_points(points, labels, logger)
-        self.field.replace(seeds)
+        seeds = self.field._generate_anchors(points, labels)
+        self.field.set_anchors_cloud(seeds)
         self.spatial_lr_scale = spatial_lr_scale
 
     def configure_appearance(self, num_cameras: int):
@@ -205,11 +205,11 @@ class GaussianModel(nn.Module):
     set_appearance = configure_appearance
 
     def set_anchor_mask(self, *_args):
-        self._anchor_mask = torch.ones(self.field.anchor.shape[0], dtype=torch.bool, device=self.device)
+        self._anchor_mask = torch.ones(self.field.anchors_positions.shape[0], dtype=torch.bool, device=self.device)
 
     def generate_neural_gaussians(self, viewpoint_camera, visible_mask: Optional[torch.Tensor] = None, training: bool = True):
         if visible_mask is None:
-            visible_mask = torch.ones(self.field.anchor.shape[0], dtype=torch.bool, device=self.device)
+            visible_mask = torch.ones(self.field.anchors_positions.shape[0], dtype=torch.bool, device=self.device)
         decoded = self.decoder.decode(self.field, viewpoint_camera, visible_mask, training)
         return (
             decoded.xyz,
@@ -226,7 +226,7 @@ class GaussianModel(nn.Module):
         self._training_args = training_args
         self._grad_clip_norm = grad_clip_norm
         self.rebuild_optimizer()
-        self.density.reset(self.field.anchor.shape[0])
+        self.density.reset(self.field.anchors_positions.shape[0])
 
     training_setup = setup_training
 
@@ -302,11 +302,11 @@ class GaussianModel(nn.Module):
             return
         args = self._training_args
         groups = [
-            {"params": [self.field.anchor], "lr": args.position_lr_init * self.spatial_lr_scale, "name": "anchor"},
-            {"params": [self.field.offset], "lr": args.offset_lr_init * self.spatial_lr_scale, "name": "offset"},
-            {"params": [self.field.feature], "lr": args.feature_lr, "name": "feature"},
-            {"params": [self.field.log_scaling], "lr": args.scaling_lr, "name": "scaling"},
-            {"params": [self.field.raw_rotation], "lr": args.rotation_lr, "name": "rotation"},
+            {"params": [self.field.anchors_positions], "lr": args.position_lr_init * self.spatial_lr_scale, "name": "anchor"},
+            {"params": [self.field.gaussians_offsets], "lr": args.offset_lr_init * self.spatial_lr_scale, "name": "offset"},
+            {"params": [self.field.anchor_features], "lr": args.feature_lr, "name": "feature"},
+            {"params": [self.field.anchors_log_scales], "lr": args.scaling_lr, "name": "scaling"},
+            {"params": [self.field.anchors_rotations], "lr": args.rotation_lr, "name": "rotation"},
             {"params": self.decoder.opacity_head.parameters(), "lr": args.mlp_opacity_lr_init, "name": "opacity_head"},
             {"params": self.decoder.covariance_head.parameters(), "lr": args.mlp_cov_lr_init, "name": "covariance_head"},
             {"params": self.decoder.color_head.parameters(), "lr": args.mlp_color_lr_init, "name": "color_head"},
@@ -346,18 +346,18 @@ class GaussianModel(nn.Module):
         keep = ~mask
         if self.optimizer is not None and self._training_args is not None:
             updated = self.prune_optimizer_state(keep)
-            self.field.anchor = updated["anchor"]
-            self.field.offset = updated["offset"]
-            self.field.feature = updated["feature"]
-            self.field.log_scaling = updated["scaling"]
-            self.field.raw_rotation = updated["rotation"]
+            self.field.anchors_positions = updated["anchor"]
+            self.field.gaussians_offsets = updated["offset"]
+            self.field.anchor_features = updated["feature"]
+            self.field.anchors_log_scales = updated["scaling"]
+            self.field.anchors_rotations = updated["rotation"]
         else:
             self.field.prune(mask)
-        if self.field.label_ids is not None:
-            self.field.label_ids = self.field.label_ids[keep]
+        if self.field.semantic_labels is not None:
+            self.field.semantic_labels = self.field.semantic_labels[keep]
             if self.field.codec is not None:
-                self.field.codec.fit(self.field.label_ids.view(-1))
-        self.field.visible = torch.ones(self.field.anchor.shape[0], dtype=torch.bool, device=self.device)
+                self.field.codec.fit(self.field.semantic_labels.view(-1))
+        self.field.visibility_mask = torch.ones(self.field.anchors_positions.shape[0], dtype=torch.bool, device=self.device)
         return mask
 
     def save_ply(self, path: str):
@@ -366,16 +366,16 @@ class GaussianModel(nn.Module):
     def load_ply(self, path: str):
         payload = self.checkpoints.load_anchor_field(path)
         seeds = AnchorCloudData(
-            anchors=payload["anchor"],
-            offsets=payload["offset"],
-            features=payload["feature"],
-            log_scaling=payload["log_scaling"],
-            rotations=payload["rotation"],
+            anchors_positions=payload["anchor"],
+            gaussians_offsets=payload["offset"],
+            anchor_features=payload["feature"],
+            anchors_log_scales=payload["log_scaling"],
+            anchors_rotations=payload["rotation"],
             labels=payload["labels"],
             codec=None if payload["labels"] is None else SemanticCodec.from_labels(payload["labels"].view(-1)),
             voxel_size=float(torch.exp(payload["log_scaling"][:, :3]).mean().item()) if payload["log_scaling"].numel() > 0 else 1.0,
         )
-        self.field.replace(seeds)
+        self.field.set_anchors_cloud(seeds)
     def save_mlp_checkpoints(self, path: str):
         self.checkpoints.save_decoder(path)
 
@@ -409,12 +409,12 @@ class GaussianModel(nn.Module):
     def capture(self) -> dict:
         """Snapshot all training state for mid-training checkpoint resumption."""
         state = {
-            "anchor": self.field.anchor.detach(),
-            "offset": self.field.offset.detach(),
-            "feature": self.field.feature.detach(),
-            "log_scaling": self.field.log_scaling.detach(),
-            "rotation": self.field.raw_rotation.detach(),
-            "label_ids": self.field.label_ids,
+            "anchor": self.field.anchors_positions.detach(),
+            "offset": self.field.gaussians_offsets.detach(),
+            "feature": self.field.anchor_features.detach(),
+            "log_scaling": self.field.anchors_log_scales.detach(),
+            "rotation": self.field.anchors_rotations.detach(),
+            "label_ids": self.field.semantic_labels,
             "spatial_lr_scale": self.spatial_lr_scale,
         }
         if self.optimizer is not None:
@@ -429,16 +429,16 @@ class GaussianModel(nn.Module):
     def restore(self, state: dict, training_args=None):
         """Restore training state from a previously captured snapshot."""
         seeds = AnchorCloudData(
-            anchors=state["anchor"],
-            offsets=state["offset"],
-            features=state["feature"],
-            log_scaling=state["log_scaling"],
-            rotations=state["rotation"],
+            anchors_positions=state["anchor"],
+            gaussians_offsets=state["offset"],
+            anchor_features=state["feature"],
+            anchors_log_scales=state["log_scaling"],
+            anchors_rotations=state["rotation"],
             labels=state.get("label_ids"),
             codec=None if state.get("label_ids") is None else SemanticCodec.from_labels(state["label_ids"].view(-1)),
             voxel_size=self.field.voxel_size,
         )
-        self.field.replace(seeds)
+        self.field.set_anchors_cloud(seeds)
         self.spatial_lr_scale = state.get("spatial_lr_scale", 1.0)
         self.decoder.opacity_head.load_state_dict(state["opacity_head"])
         self.decoder.covariance_head.load_state_dict(state["covariance_head"])

@@ -178,7 +178,7 @@ class DensificationController:
         self.state.anchor_opacity = self.state.anchor_opacity[remaining]
         self.state.anchor_visits = self.state.anchor_visits[remaining]
         self.state.max_radii = torch.zeros(
-            model.field.anchor.shape[0] * self.n_offsets,
+            model.field.anchors_positions.shape[0] * self.n_offsets,
             dtype=torch.float,
             device=self.device,
         )
@@ -201,7 +201,7 @@ class DensificationController:
         """
         field = model.field
         total_added = 0
-        baseline_n = field.anchor.shape[0] * self.n_offsets
+        baseline_n = field.anchors_positions.shape[0] * self.n_offsets
 
         depth_levels = getattr(opt, "update_depth", 3)
         hierarchy_factor = max(getattr(opt, "update_hierachy_factor", 4), 1)
@@ -210,14 +210,14 @@ class DensificationController:
 
         for level in range(depth_levels):
             # --- recompute anchor_extent every level (field may have grown) ---
-            anchor_extent = torch.exp(field.log_scaling)[:, :3]
+            anchor_extent = torch.exp(field.anchors_log_scales)[:, :3]
 
             # --- threshold grows exponentially per level ---
             level_threshold = base_threshold * ((hierarchy_factor // 2) ** level)
             above_threshold = (scores >= level_threshold) & ready
 
             # --- pad candidate mask to match current (possibly larger) field ---
-            current_n_offsets = field.anchor.shape[0] * self.n_offsets
+            current_n_offsets = field.anchors_positions.shape[0] * self.n_offsets
             growth_delta = current_n_offsets - above_threshold.shape[0]
             if growth_delta > 0:
                 above_threshold = torch.cat(
@@ -237,7 +237,7 @@ class DensificationController:
                 continue
 
             child_xyz = (
-                field.anchor.unsqueeze(1) + field.offset * anchor_extent.unsqueeze(1)
+                field.anchors_positions.unsqueeze(1) + field.gaussians_offsets * anchor_extent.unsqueeze(1)
             )
             scale_divisor = max(hierarchy_factor ** level, 1)
             cell_size = field.voxel_size * (init_factor // scale_divisor)
@@ -271,11 +271,11 @@ class DensificationController:
             }
             if model.optimizer is not None:
                 updated = model.extend_optimizer_state(extension)
-                field.anchor = updated["anchor"]
-                field.offset = updated["offset"]
-                field.feature = updated["feature"]
-                field.log_scaling = updated["scaling"]
-                field.raw_rotation = updated["rotation"]
+                field.anchors_positions = updated["anchor"]
+                field.gaussians_offsets = updated["offset"]
+                field.anchor_features = updated["feature"]
+                field.anchors_log_scales = updated["scaling"]
+                field.anchors_rotations = updated["rotation"]
             else:
                 field.append(
                     novel_anchors, new_offsets, novel_features,
@@ -283,13 +283,13 @@ class DensificationController:
                 )
 
             # --- update labels separately (not an optimizer group) ---
-            if novel_labels is not None and field.label_ids is not None:
-                field.label_ids = torch.cat([field.label_ids, novel_labels], dim=0)
+            if novel_labels is not None and field.semantic_labels is not None:
+                field.semantic_labels = torch.cat([field.semantic_labels, novel_labels], dim=0)
             elif novel_labels is not None:
-                field.label_ids = novel_labels
+                field.semantic_labels = novel_labels
           
-            if field.label_ids is not None and field.codec is not None:
-                field.codec.fit(field.label_ids.view(-1))
+            if field.semantic_labels is not None and field.codec is not None:
+                field.codec.fit(field.semantic_labels.view(-1))
 
             # --- extend density accumulators ---
             n_new = novel_anchors.shape[0]
@@ -301,8 +301,8 @@ class DensificationController:
                 self.state.anchor_visits,
                 torch.zeros((n_new, 1), device=self.device),
             ], dim=0)
-            field.visible = torch.ones(
-                field.anchor.shape[0], dtype=torch.bool, device=self.device
+            field.visibility_mask = torch.ones(
+                field.anchors_positions.shape[0], dtype=torch.bool, device=self.device
             )
 
             total_added += n_new
@@ -320,14 +320,14 @@ class DensificationController:
         opt,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Deduplicate candidates and discard those overlapping existing anchors."""
-        occupied_grid = torch.round(field.anchor / cell_size).to(torch.int64)
+        occupied_grid = torch.round(field.anchors_positions / cell_size).to(torch.int64)
         candidate_grid = torch.round(selected_xyz / cell_size).to(torch.int64)
         unique_grid, inverse = torch.unique(candidate_grid, return_inverse=True, dim=0)
 
         if unique_grid.numel() == 0:
             return (
                 torch.zeros((0, 3), device=self.device),
-                torch.zeros((0, field.feature.shape[1]), device=self.device),
+                torch.zeros((0, field.anchor_features.shape[1]), device=self.device),
                 None,
             )
 
@@ -341,18 +341,18 @@ class DensificationController:
         if not novel_cell_mask.any():
             return (
                 torch.zeros((0, 3), device=self.device),
-                torch.zeros((0, field.feature.shape[1]), device=self.device),
+                torch.zeros((0, field.anchor_features.shape[1]), device=self.device),
                 None,
             )
 
         novel_positions = unique_grid[novel_cell_mask].float() * cell_size
 
         # Pool features from contributing offsets
-        repeated_feat = field.feature.repeat_interleave(
+        repeated_feat = field.anchor_features.repeat_interleave(
             model.n_offsets, dim=0
         )[candidates]
         pooled = torch.zeros(
-            (unique_grid.shape[0], field.feature.shape[1]), device=self.device
+            (unique_grid.shape[0], field.anchor_features.shape[1]), device=self.device
         )
         counts = torch.zeros((unique_grid.shape[0], 1), device=self.device)
         pooled.index_add_(0, inverse, repeated_feat)
@@ -364,8 +364,8 @@ class DensificationController:
 
         # Pool labels from contributing offsets
         novel_labels = None
-        if field.label_ids is not None:
-            repeated_labels = field.label_ids.repeat_interleave(
+        if field.semantic_labels is not None:
+            repeated_labels = field.semantic_labels.repeat_interleave(
                 model.n_offsets, dim=0
             ).view(-1)[candidates]
             pooled_labels = torch.zeros(
@@ -401,7 +401,7 @@ class DensificationController:
 
     def _pad_offset_buffers(self, model, opt, ready: torch.Tensor) -> None:
         """Zero-out visited offset slots and pad buffers for newly grown anchors."""
-        total_offsets = model.field.anchor.shape[0] * self.n_offsets
+        total_offsets = model.field.anchors_positions.shape[0] * self.n_offsets
 
         ready = ready[: self.state.offset_visits.shape[0]]
         self.state.offset_visits[ready] = 0
