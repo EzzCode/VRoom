@@ -54,7 +54,7 @@ def scaling_loss_fn(scaling, opt):
 
 def object_loss_fn(semantics, object_mask, id_encoder, opt, device):
     if opt.lambda_object_loss > 0 and id_encoder is not None:
-        gt_ids = id_encoder.label_to_index(object_mask.to(device)).long()
+        gt_ids = id_encoder.label_to_index(object_mask.to(device)).long().to(device)
         logits = semantics.permute(0, 3, 1, 2)
         # Ensure gt_ids has the same spatial dimensions as logits
         if gt_ids.dim() == 2:

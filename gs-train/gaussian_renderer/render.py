@@ -25,7 +25,7 @@ def render(viewpoint_camera, gaussian_model, pipe, bg_color, visible_mask=None, 
         dtype=torch.float32,
         device=render_device,
     )
-    viewmat = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device)
+    viewmat = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()
 
     if gaussian_model.gs_attr == "3D":
         render_colors, render_alphas, render_semantics, info = gsplat.rasterization(
@@ -130,7 +130,7 @@ def prefilter_voxel(viewpoint_camera, gaussian_model):
         dtype=torch.float32,
         device=render_device,
     )[None]
-    viewmats = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device)[None]
+    viewmats = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()[None]
 
     if gaussian_model.gs_attr == "3D":
         proj_results = fully_fused_projection(

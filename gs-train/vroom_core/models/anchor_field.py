@@ -123,6 +123,8 @@ class AnchorCloud(nn.Module):
                 device=self.device,
             )
         )
+        print(f"Generated {self.anchors_positions.shape[0]} anchors")
+        print(f"voxel size = {self.voxel_size}")
 
         return AnchorCloudData(
             anchors_positions=self.anchors_positions,
@@ -149,7 +151,7 @@ class AnchorCloud(nn.Module):
             point_cloud.detach().cpu().numpy()
         )
         distances, _ = knn_model.kneighbors(point_cloud.detach().cpu().numpy())
-        return torch.from_numpy(distances).to(self.device)
+        return torch.from_numpy(distances).float().to(self.device)
 
     def _quantize_cloud(self, point_cloud, voxel_size):
         """
