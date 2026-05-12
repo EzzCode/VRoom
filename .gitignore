@@ -5,10 +5,6 @@
 *.ptx
 *.cubin
 *.fatbin
-/inputs
-/objects
-/__pycache__/
-settings.json
 # ─── Images & Media ───────────────────────────────────────────────────────────
 *.png
 *.jpg
@@ -44,6 +40,10 @@ outputs/
 bed_vroom_output/
 office3dgsvroom/
 vroom_output/
+
+# ─── Module4 / Mesh Pipeline ──────────────────────────────────────────────────
+Module4/inputs/
+Module4/objects/
 
 # ─── Datasets & Large Data ────────────────────────────────────────────────────
 datasets/
@@ -94,6 +94,7 @@ ENV/
 *.swp
 *.swo
 *~
+settings.json
 
 # ─── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store
