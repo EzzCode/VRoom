@@ -92,8 +92,8 @@ class AnchorCloud(nn.Module):
             point_cloud, self.voxel_size
         )  # updates anchors tensor
 
-        self.anchors_positions = (
-            unique_voxels * self.voxel_size
+        self.anchors_positions = nn.Parameter(
+            (unique_voxels * self.voxel_size).float()
         )  # quantized points (anchors)
 
         # resolve label for each anchor based on majority vote of the points in the voxel
@@ -102,14 +102,16 @@ class AnchorCloud(nn.Module):
         )
 
         # set scale and rotation for each anchor
-        self.anchors_log_scales, self.anchors_rotations = (
-            self._set_anchors_scale_and_rotation()
-        )
+        log_scales, rotations = self._set_anchors_scale_and_rotation()
+        self.anchors_log_scales = nn.Parameter(log_scales)
+        self.anchors_rotations = nn.Parameter(rotations, requires_grad=False)
 
-        self.anchor_features = torch.zeros(
-            (self.anchors_positions.shape[0], self.feature_dim),
-            dtype=torch.float32,
-            device=self.device,
+        self.anchor_features = nn.Parameter(
+            torch.zeros(
+                (self.anchors_positions.shape[0], self.feature_dim),
+                dtype=torch.float32,
+                device=self.device,
+            )
         )
 
         self.codec = SemanticCodec.from_labels(self.anchor_labels)
@@ -144,9 +146,9 @@ class AnchorCloud(nn.Module):
     def _knn(self, point_cloud, k):
         """finds the k nearest neighbors of each point in the point cloud"""
         knn_model = NearestNeighbors(n_neighbors=k, algorithm="ball_tree").fit(
-            point_cloud.cpu().numpy()
+            point_cloud.detach().cpu().numpy()
         )
-        distances, _ = knn_model.kneighbors(point_cloud.cpu().numpy())
+        distances, _ = knn_model.kneighbors(point_cloud.detach().cpu().numpy())
         return torch.from_numpy(distances).to(self.device)
 
     def _quantize_cloud(self, point_cloud, voxel_size):
