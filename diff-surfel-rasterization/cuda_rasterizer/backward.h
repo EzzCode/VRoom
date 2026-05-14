@@ -42,31 +42,6 @@ namespace BACKWARD
 		float* dL_dopacity,
 		float* dL_dcolors);
 
-	// gsplat-style backward render using tile_offsets + flatten_ids
-	void render_v2(
-		const dim3 grid, dim3 block,
-		const int32_t* tile_offsets,
-		const int32_t* flatten_ids,
-		int n_isects,
-		int W, int H,
-		float focal_x, float focal_y,
-		int num_color_feat_channels,
-		const float* bg_color,
-		const float2* means2D,
-		const float4* normal_opacity,
-		const float* transMats,
-		const float* colors,
-		const float* depths,
-		const float* final_Ts,
-		const uint32_t* n_contrib,
-		const float* dL_dpixels,
-		const float* dL_depths,
-		float * dL_dtransMat,
-		float3* dL_dmean2D,
-		float* dL_dnormal3D,
-		float* dL_dopacity,
-		float* dL_dcolors);
-
 	void preprocess(
 		int P, int D, int M,
 		const float3* means,

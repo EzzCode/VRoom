@@ -67,26 +67,6 @@ namespace FORWARD
 		const float* bg_color,
 		float* out_color,
 		float* out_others);
-
-	// gsplat-style render using tile_offsets + flatten_ids
-	void render_v2(
-		const dim3 grid, dim3 block,
-		const int32_t* tile_offsets,
-		const int32_t* flatten_ids,
-		int n_isects,
-		int W, int H,
-		float focal_x, float focal_y,
-		int num_color_feat_channels,
-		const float2* points_xy_image,
-		const float* features,
-		const float* transMats,
-		const float* depths,
-		const float4* normal_opacity,
-		float* final_T,
-		uint32_t* n_contrib,
-		const float* bg_color,
-		float* out_color,
-		float* out_others);
 }
 
 

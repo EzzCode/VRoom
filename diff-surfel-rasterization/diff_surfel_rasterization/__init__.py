@@ -247,166 +247,6 @@ def _next_supported(n) -> int:
             return s
     return _SUPPORTED_CHANNELS[-1]
 
-
-def rasterize_gaussians_v2(
-    means3D,
-    colors_precomp,
-    opacities,
-    scales,
-    rotations,
-    cov3Ds_precomp,
-    raster_settings,
-):
-    return _RasterizeGaussians_v2.apply(
-        means3D,
-        colors_precomp,
-        opacities,
-        scales,
-        rotations,
-        cov3Ds_precomp,
-        raster_settings,
-    )
-
-
-class _RasterizeGaussians_v2(torch.autograd.Function):
-    """gsplat-style autograd function using individual tensor buffers.
-    
-    Key differences from _RasterizeGaussians:
-    - No byte blobs (geomBuffer, binningBuffer, imgBuffer)
-    - Individual per-Gaussian tensors saved for backward
-    - means2D returned as forward output (not pre-allocated leaf)
-    - This fixes the gradient scale for densification
-    """
-    @staticmethod
-    def forward(
-        ctx,
-        means3D,
-        colors_precomp,
-        opacities,
-        scales,
-        rotations,
-        cov3Ds_precomp,
-        raster_settings,
-    ):
-        args = (
-            raster_settings.bg,
-            means3D,
-            colors_precomp,
-            opacities,
-            scales,
-            rotations,
-            raster_settings.scale_modifier,
-            cov3Ds_precomp,
-            raster_settings.viewmatrix,
-            raster_settings.projmatrix,
-            raster_settings.tanfovx,
-            raster_settings.tanfovy,
-            raster_settings.image_height,
-            raster_settings.image_width,
-            torch.Tensor([]).cuda(),  # sh (empty — we always use colors_precomp)
-            raster_settings.sh_degree,
-            raster_settings.campos,
-            raster_settings.prefiltered,
-            raster_settings.debug,
-        )
-
-        (num_rendered, color, depth, radii,
-         means2D, depths_buf, transMats_buf, normal_opacity,
-         accum_alpha, n_contrib, tile_offsets, flatten_ids
-        ) = _C.rasterize_gaussians_v2(*args)
-
-        ctx.raster_settings = raster_settings
-        ctx.num_rendered = num_rendered
-        ctx.save_for_backward(
-            colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii,
-            means2D, depths_buf, transMats_buf, normal_opacity,
-            accum_alpha, n_contrib, tile_offsets, flatten_ids,
-        )
-        return color, radii, depth, means2D
-
-    @staticmethod
-    def backward(ctx, grad_out_color, grad_radii, grad_depth, grad_means2D):
-        num_rendered = ctx.num_rendered
-        raster_settings = ctx.raster_settings
-
-        (colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii,
-         means2D, depths_buf, transMats_buf, normal_opacity,
-         accum_alpha, n_contrib, tile_offsets, flatten_ids,
-        ) = ctx.saved_tensors
-
-        args = (
-            raster_settings.bg,
-            means3D,
-            radii,
-            colors_precomp,
-            scales,
-            rotations,
-            raster_settings.scale_modifier,
-            cov3Ds_precomp,
-            raster_settings.viewmatrix,
-            raster_settings.projmatrix,
-            raster_settings.tanfovx,
-            raster_settings.tanfovy,
-            grad_out_color,
-            grad_depth,
-            torch.Tensor([]).cuda(),  # sh (empty)
-            raster_settings.sh_degree,
-            raster_settings.campos,
-            # Saved individual tensors
-            means2D,
-            depths_buf,
-            transMats_buf,
-            normal_opacity,
-            accum_alpha,
-            n_contrib,
-            tile_offsets,
-            flatten_ids,
-            num_rendered,
-            raster_settings.debug,
-        )
-
-        (grad_means2D, grad_colors_precomp, grad_opacities,
-         grad_means3D, grad_cov3Ds_precomp, grad_sh,
-         grad_scales, grad_rotations) = _C.rasterize_gaussians_backward_v2(*args)
-
-        grads = (
-            grad_means3D,
-            grad_colors_precomp,
-            grad_opacities,
-            grad_scales,
-            grad_rotations,
-            grad_cov3Ds_precomp,
-            None,  # raster_settings
-        )
-
-        return grads
-
-
-class GaussianRasterizer_v2(nn.Module):
-    """gsplat-style rasterizer using individual tensor buffers."""
-    def __init__(self, raster_settings):
-        super().__init__()
-        self.raster_settings = raster_settings
-
-    def forward(self, means3D, opacities, colors_precomp, scales, rotations, cov3D_precomp=None):
-        raster_settings = self.raster_settings
-
-        if colors_precomp is None:
-            raise Exception('v2 rasterizer requires precomputed colors')
-
-        if cov3D_precomp is None:
-            cov3D_precomp = torch.Tensor([]).cuda()
-
-        return rasterize_gaussians_v2(
-            means3D,
-            colors_precomp,
-            opacities,
-            scales,
-            rotations,
-            cov3D_precomp,
-            raster_settings,
-        )
-
 def _get_projection_matrix(znear, zfar, fovX, fovY, device):
     """Build OpenGL-style projection matrix from FoV."""
     tanHalfFovY = math.tan(fovY / 2)
@@ -869,6 +709,8 @@ def rasterization_2dgs_inria_wrapper(
                 ).detach()
                 _colors = torch.cat([_colors, pad], dim=-1)
 
+            
+
             # Call the rasterizer
             if color_idx == 0:
                 # This is the first time we call the rasterizer, so we need to get the radii and allmap
@@ -896,7 +738,7 @@ def rasterization_2dgs_inria_wrapper(
                     cov3D_precomp=None,
                 )
             if shape_before[-1] < stride:
-                _render_colors_ = _render_colors_[:shape_before[-1], :, ...]
+                _render_colors_ = _render_colors_[:shape_before[-1], :, :]
             render_colors_.append(_render_colors_)
             color_idx += stride
 
