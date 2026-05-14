@@ -26,6 +26,9 @@ namespace cg = cooperative_groups;
 #include "forward.h"
 #include "backward.h"
 
+// For CUB sort scratch allocation via PyTorch's caching allocator
+#include <c10/cuda/CUDACachingAllocator.h>
+
 // Helper function to find the next-highest bit of the MSB
 // on the CPU.
 uint32_t getHigherMsb(uint32_t n)
@@ -141,7 +144,7 @@ void CudaRasterizer::Rasterizer::markVisible(
 	float* projmatrix,
 	bool* present)
 {
-	checkFrustum <<<(P + 255) / 256, 256 >>> (
+	checkFrustum <<< (P + 255) / 256, 256 >>> (
 		P,
 		means3D,
 		viewmatrix, projmatrix,
@@ -182,26 +185,12 @@ CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, s
 	return img;
 }
 
-CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chunk, size_t P)
-{
-	BinningState binning;
-	obtain(chunk, binning.point_list, P, 128);
-	obtain(chunk, binning.point_list_unsorted, P, 128);
-	obtain(chunk, binning.point_list_keys, P, 128);
-	obtain(chunk, binning.point_list_keys_unsorted, P, 128);
-	cub::DeviceRadixSort::SortPairs(
-		nullptr, binning.sorting_size,
-		binning.point_list_keys_unsorted, binning.point_list_keys,
-		binning.point_list_unsorted, binning.point_list, P);
-	obtain(chunk, binning.list_sorting_space, binning.sorting_size, 128);
-	return binning;
-}
+// BinningState::fromChunk has been removed — binning uses tensors now.
 
 // Forward rendering procedure for differentiable rasterization
 // of Gaussians.
 int CudaRasterizer::Rasterizer::forward(
 	std::function<char* (size_t)> geometryBuffer,
-	std::function<char* (size_t)> binningBuffer,
 	std::function<char* (size_t)> imageBuffer,
 	const int P, int D, int M,
 	const float* background,
@@ -223,6 +212,7 @@ int CudaRasterizer::Rasterizer::forward(
 	float* out_others,
 	int num_color_feat_channels,
 	int* radii,
+	CudaRasterizer::Rasterizer::BinningAllocFn binningAllocator,
 	bool debug)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
@@ -288,40 +278,60 @@ int CudaRasterizer::Rasterizer::forward(
 	int num_rendered;
 	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 
-	size_t binning_chunk_size = required<BinningState>(num_rendered);
-	char* binning_chunkptr = binningBuffer(binning_chunk_size);
-	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
+	// =========================================================================
+	// TILE-OPS: Tensor-based binning pipeline (replaces BinningState byte-blob)
+	// Call the binning allocator callback to get typed tensor pointers.
+	// The caller (rasterize_points.cu) allocates torch::Tensors of the right
+	// size and returns their data pointers.
+	// =========================================================================
+	CudaRasterizer::Rasterizer::BinningPtrs binning = binningAllocator(num_rendered);
 
-	// For each instance to be rendered, produce adequate [ tile | depth ] key 
-	// and corresponding dublicated Gaussian indices to be sorted
-	duplicateWithKeys <<<(P + 255) / 256, 256 >>> (
-		P,
-		geomState.means2D,
-		geomState.depths,
-		geomState.point_offsets,
-		binningState.point_list_keys_unsorted,
-		binningState.point_list_unsorted,
-		radii,
-		tile_grid)
-	CHECK_CUDA(, debug)
+	if (num_rendered > 0)
+	{
+		// For each instance to be rendered, produce adequate [ tile | depth ] key 
+		// and corresponding duplicated Gaussian indices to be sorted
+		duplicateWithKeys <<< (P + 255) / 256, 256 >>> (
+			P,
+			geomState.means2D,
+			geomState.depths,
+			geomState.point_offsets,
+			binning.keys_unsorted,
+			binning.values_unsorted,
+			radii,
+			tile_grid);
+		CHECK_CUDA(, debug)
 
-	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
+		int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
-	// Sort complete list of (duplicated) Gaussian indices by keys
-	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
-		binningState.list_sorting_space,
-		binningState.sorting_size,
-		binningState.point_list_keys_unsorted, binningState.point_list_keys,
-		binningState.point_list_unsorted, binningState.point_list,
-		num_rendered, 0, 32 + bit), debug)
+		// Sort using CUB with PyTorch's caching allocator for scratch memory
+		// (replaces pre-allocated scratch in the old BinningState byte-blob)
+		{
+			size_t temp_storage_bytes = 0;
+			CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
+				nullptr, temp_storage_bytes,
+				binning.keys_unsorted, binning.keys_sorted,
+				binning.values_unsorted, binning.point_list,
+				num_rendered, 0, 32 + bit), debug);
+
+			auto& caching_allocator = *::c10::cuda::CUDACachingAllocator::get();
+			auto temp_storage = caching_allocator.allocate(temp_storage_bytes);
+
+			CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
+				temp_storage.get(), temp_storage_bytes,
+				binning.keys_unsorted, binning.keys_sorted,
+				binning.values_unsorted, binning.point_list,
+				num_rendered, 0, 32 + bit), debug);
+			// temp_storage freed automatically via RAII
+		}
+	}
 
 	CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
 
 	// Identify start and end of per-tile workloads in sorted list
 	if (num_rendered > 0)
-		identifyTileRanges <<<(num_rendered + 255) / 256, 256 >>> (
+		identifyTileRanges <<< (num_rendered + 255) / 256, 256 >>> (
 			num_rendered,
-			binningState.point_list_keys,
+			binning.keys_sorted,
 			imgState.ranges);
 	CHECK_CUDA(, debug)
 
@@ -331,7 +341,7 @@ int CudaRasterizer::Rasterizer::forward(
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
 		imgState.ranges,
-		binningState.point_list,
+		binning.point_list,
 		width, height,
 		focal_x, focal_y,
 		num_color_feat_channels,
@@ -368,8 +378,8 @@ void CudaRasterizer::Rasterizer::backward(
 	const float tan_fovx, float tan_fovy,
 	const int* radii,
 	char* geom_buffer,
-	char* binning_buffer,
-	char* img_buffer,
+	const uint32_t* point_list,  // sorted Gaussian IDs (tensor, not blob)
+	char* image_buffer,
 	const float* dL_dpix,
 	const float* dL_depths,
 	float* dL_dmean2D,
@@ -386,8 +396,8 @@ void CudaRasterizer::Rasterizer::backward(
 {
 	const bool need_sh = (colors_precomp == nullptr);
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P, num_color_feat_channels, need_sh);
-	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
-	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
+	// BinningState removed — point_list is now passed directly as a tensor pointer
+	ImageState imgState = ImageState::fromChunk(image_buffer, width * height);
 
 	if (radii == nullptr)
 	{
@@ -410,7 +420,7 @@ void CudaRasterizer::Rasterizer::backward(
 		tile_grid,
 		block,
 		imgState.ranges,
-		binningState.point_list,
+		point_list,
 		width, height,
 		focal_x, focal_y,
 		num_color_feat_channels,
@@ -433,7 +443,6 @@ void CudaRasterizer::Rasterizer::backward(
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
 	// use the one we computed ourselves.
-	// const float* transMat_ptr = (transMat_precomp != nullptr) ? transMat_precomp : geomState.transMat;
 	CHECK_CUDA(BACKWARD::preprocess(P, D, M,
 		(float3*)means3D,
 		radii,

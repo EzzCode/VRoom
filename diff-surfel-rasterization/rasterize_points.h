@@ -57,7 +57,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& campos,
 	const torch::Tensor& geomBuffer,
 	const int R,
-	const torch::Tensor& binningBuffer,
+	const torch::Tensor& point_list,  // sorted Gaussian IDs tensor (was binningBuffer)
 	const torch::Tensor& imageBuffer,
 	const bool debug);
 		

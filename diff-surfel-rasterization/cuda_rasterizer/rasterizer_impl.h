@@ -49,17 +49,10 @@ namespace CudaRasterizer
 		static ImageState fromChunk(char*& chunk, size_t N);
 	};
 
-	struct BinningState
-	{
-		size_t sorting_size;
-		uint64_t* point_list_keys_unsorted;
-		uint64_t* point_list_keys;
-		uint32_t* point_list_unsorted;
-		uint32_t* point_list;
-		char* list_sorting_space;
-
-		static BinningState fromChunk(char*& chunk, size_t P);
-	};
+	// BinningState has been removed (Phase 1 tile-ops migration).
+	// Binning arrays (keys, values, sort scratch) are now allocated as
+	// individual tensors by the caller, not carved from a monolithic byte-blob.
+	// The sorted point_list and tile ranges are passed explicitly.
 
 	template<typename T> 
 	size_t required(size_t P, int num_color_feat_channels = 3)
@@ -68,6 +61,8 @@ namespace CudaRasterizer
 		T::fromChunk(size, P);
 		return ((size_t)size) + 128;
 	}
+
+	// Note: required<BinningState> is no longer needed — binning uses tensors.
 	
 	template<> 
 	inline size_t required<GeometryState>(size_t P, int num_color_feat_channels)

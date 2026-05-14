@@ -13,6 +13,8 @@
 #define CUDA_RASTERIZER_H_INCLUDED
 
 #include <functional>
+#include <cstdint>
+#include <cuda_runtime.h>
 
 namespace CudaRasterizer
 {
@@ -27,9 +29,19 @@ namespace CudaRasterizer
 			float* projmatrix,
 			bool* present);
 
+		// Callback type for allocating binning arrays after n_isects is known.
+		// The caller provides this callback; forward() calls it with n_isects.
+		// Returns raw pointers to four pre-allocated arrays.
+		struct BinningPtrs {
+			uint64_t* keys_unsorted;
+			uint64_t* keys_sorted;
+			uint32_t* values_unsorted;
+			uint32_t* point_list;  // sorted values — saved for backward
+		};
+		using BinningAllocFn = std::function<BinningPtrs(int n_isects)>;
+
 		static int forward(
 			std::function<char* (size_t)> geometryBuffer,
-			std::function<char* (size_t)> binningBuffer,
 			std::function<char* (size_t)> imageBuffer,
 			const int P, int D, int M,
 			const float* background,
@@ -49,8 +61,9 @@ namespace CudaRasterizer
 			const bool prefiltered,
 			float* out_color,
 			float* out_others,
-			int num_color_feat_channels = 3,
-			int* radii = nullptr,
+			int num_color_feat_channels,
+			int* radii,
+			BinningAllocFn binningAllocator,
 			bool debug = false);
 
 		static void backward(
@@ -70,7 +83,7 @@ namespace CudaRasterizer
 			const float tan_fovx, float tan_fovy,
 			const int* radii,
 			char* geom_buffer,
-			char* binning_buffer,
+			const uint32_t* point_list,  // sorted Gaussian IDs (tensor, not blob)
 			char* image_buffer,
 			const float* dL_dpix,
 			const float* dL_depths,

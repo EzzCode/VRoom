@@ -19,7 +19,7 @@
 #include "cuda_rasterizer/rasterizer.h"
 #include <functional>
 
-#define CHECK_INPUT(x)											\
+#define CHECK_INPUT(x)										\
 	AT_ASSERTM(x.type().is_cuda(), #x " must be a CUDA tensor")
 	// AT_ASSERTM(x.is_contiguous(), #x " must be contiguous")
 
@@ -85,12 +85,42 @@ RasterizeGaussiansCUDA(
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
   torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
-  torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
   torch::Tensor imgBuffer = torch::empty({0}, options.device(device));
   std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer);
-  std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
   std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
+
+  // =========================================================================
+  // Tensor-based binning: Allocate typed tensors instead of one opaque blob.
+  // The point_list tensor (sorted Gaussian IDs) is saved for backward pass.
+  // The other binning tensors (keys, unsorted values) are temporaries.
+  // =========================================================================
+  auto i64_opts = means3D.options().dtype(torch::kInt64);
+  auto i32_opts = means3D.options().dtype(torch::kInt32);
   
+  // These will be resized inside the binning allocator callback
+  torch::Tensor binning_keys_unsorted = torch::empty({0}, i64_opts);
+  torch::Tensor binning_keys_sorted = torch::empty({0}, i64_opts);
+  torch::Tensor binning_values_unsorted = torch::empty({0}, i32_opts);
+  torch::Tensor point_list = torch::empty({0}, i32_opts);  // saved for backward
+
+  // Binning allocator callback: called by forward() after n_isects is known
+  CudaRasterizer::Rasterizer::BinningAllocFn binningAlloc = 
+	[&](int n_isects) -> CudaRasterizer::Rasterizer::BinningPtrs {
+		CudaRasterizer::Rasterizer::BinningPtrs ptrs = {};
+		if (n_isects > 0) {
+			binning_keys_unsorted.resize_({(long long)n_isects});
+			binning_keys_sorted.resize_({(long long)n_isects});
+			binning_values_unsorted.resize_({(long long)n_isects});
+			point_list.resize_({(long long)n_isects});
+			ptrs.keys_unsorted = binning_keys_unsorted.data_ptr<int64_t>() != nullptr 
+				? reinterpret_cast<uint64_t*>(binning_keys_unsorted.data_ptr<int64_t>()) : nullptr;
+			ptrs.keys_sorted = reinterpret_cast<uint64_t*>(binning_keys_sorted.data_ptr<int64_t>());
+			ptrs.values_unsorted = reinterpret_cast<uint32_t*>(binning_values_unsorted.data_ptr<int32_t>());
+			ptrs.point_list = reinterpret_cast<uint32_t*>(point_list.data_ptr<int32_t>());
+		}
+		return ptrs;
+	};
+
   int rendered = 0;
   if(P != 0)
   {
@@ -102,7 +132,6 @@ RasterizeGaussiansCUDA(
 
 	  rendered = CudaRasterizer::Rasterizer::forward(
 		geomFunc,
-		binningFunc,
 		imgFunc,
 		P, degree, M,
 		background.contiguous().data<float>(),
@@ -125,9 +154,12 @@ RasterizeGaussiansCUDA(
 		out_others.contiguous().data<float>(),
 		num_color_feat_channels,
 		radii.contiguous().data<int>(),
+		binningAlloc,
 		debug);
   }
-  return std::make_tuple(rendered, out_color, out_others, radii, geomBuffer, binningBuffer, imgBuffer);
+  // Return point_list (sorted Gaussian IDs) instead of binningBuffer.
+  // geomBuffer and imgBuffer still use the old byte-blob pattern (Phase 1).
+  return std::make_tuple(rendered, out_color, out_others, radii, geomBuffer, point_list, imgBuffer);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -151,7 +183,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& campos,
 	const torch::Tensor& geomBuffer,
 	const int R,
-	const torch::Tensor& binningBuffer,
+	const torch::Tensor& point_list,  // sorted Gaussian IDs tensor (was binningBuffer)
 	const torch::Tensor& imageBuffer,
 	const bool debug) 
 {
@@ -167,7 +199,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
   CHECK_INPUT(projmatrix);
   CHECK_INPUT(sh);
   CHECK_INPUT(campos);
-  CHECK_INPUT(binningBuffer);
+  CHECK_INPUT(point_list);
   CHECK_INPUT(imageBuffer);
   CHECK_INPUT(geomBuffer);
 
@@ -211,7 +243,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  tan_fovy,
 	  radii.contiguous().data<int>(),
 	  reinterpret_cast<char*>(geomBuffer.contiguous().data_ptr()),
-	  reinterpret_cast<char*>(binningBuffer.contiguous().data_ptr()),
+	  // point_list tensor replaces binningBuffer blob
+	  reinterpret_cast<const uint32_t*>(point_list.contiguous().data_ptr<int32_t>()),
 	  reinterpret_cast<char*>(imageBuffer.contiguous().data_ptr()),
 	  dL_dout_color.contiguous().data<float>(),
 	  dL_dout_others.contiguous().data<float>(),
