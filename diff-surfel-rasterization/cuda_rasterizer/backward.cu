@@ -401,10 +401,15 @@ renderCUDA(
 				dL_dz += alpha * T * dL_ddepth;
 #endif
 
+				// Decouple depth gradient from geometry to stabilize training (gsplat-style).
+				// This prevents the grazing-angle singularity (1/p.z) from exploding 
+				// when multiplied by high-multiplier depth gradients from low-alpha pixels.
+				float dL_dz_geom = 0.0f; 
+
 				if (rho3d <= rho2d) {
 					const float2 dL_ds = {
-						dL_dG * -G * s.x + dL_dz * Tw.x,
-						dL_dG * -G * s.y + dL_dz * Tw.y
+						dL_dG * -G * s.x + dL_dz_geom * Tw.x,
+						dL_dG * -G * s.y + dL_dz_geom * Tw.y
 					};
 					const float3 dz_dTw = {s.x, s.y, 1.0};
 					const float dsx_pz = dL_ds.x / p.z;
@@ -415,9 +420,9 @@ renderCUDA(
 					const float3 dL_dTu = {-dL_dk.x, -dL_dk.y, -dL_dk.z};
 					const float3 dL_dTv = {-dL_dl.x, -dL_dl.y, -dL_dl.z};
 					const float3 dL_dTw = {
-						pixf.x * dL_dk.x + pixf.y * dL_dl.x + dL_dz * dz_dTw.x,
-						pixf.x * dL_dk.y + pixf.y * dL_dl.y + dL_dz * dz_dTw.y,
-						pixf.x * dL_dk.z + pixf.y * dL_dl.z + dL_dz * dz_dTw.z};
+						pixf.x * dL_dk.x + pixf.y * dL_dl.x + dL_dz_geom * dz_dTw.x,
+						pixf.x * dL_dk.y + pixf.y * dL_dl.y + dL_dz_geom * dz_dTw.y,
+						pixf.x * dL_dk.z + pixf.y * dL_dl.z + dL_dz_geom * dz_dTw.z};
 					v_transMat[0] = dL_dTu.x; v_transMat[1] = dL_dTu.y; v_transMat[2] = dL_dTu.z;
 					v_transMat[3] = dL_dTv.x; v_transMat[4] = dL_dTv.y; v_transMat[5] = dL_dTv.z;
 					v_transMat[6] = dL_dTw.x; v_transMat[7] = dL_dTw.y; v_transMat[8] = dL_dTw.z;
@@ -426,9 +431,9 @@ renderCUDA(
 					const float dG_ddely = -G * FilterInvSquare * d.y;
 					v_mean2D_x = dL_dG * dG_ddelx;
 					v_mean2D_y = dL_dG * dG_ddely;
-					v_transMat[6] = s.x * dL_dz;
-					v_transMat[7] = s.y * dL_dz;
-					v_transMat[8] = dL_dz;
+					v_transMat[6] = s.x * dL_dz_geom;
+					v_transMat[7] = s.y * dL_dz_geom;
+					v_transMat[8] = dL_dz_geom;
 				}
 
 				v_opacity = G * dL_dalpha;
@@ -650,8 +655,8 @@ __global__ void preprocessCUDA(
 	
 	// hack the gradient here for densitification
 	float depth = transMats[idx * 9 + 8];
-	dL_dmean2Ds[idx].x = dL_dtransMats[idx * 9 + 2] * depth * 0.5 * float(W); // to ndc 
-	dL_dmean2Ds[idx].y = dL_dtransMats[idx * 9 + 5] * depth * 0.5 * float(H); // to ndc
+	dL_dmean2Ds[idx].x = dL_dtransMats[idx * 9 + 2] * depth * 0.5f;
+	dL_dmean2Ds[idx].y = dL_dtransMats[idx * 9 + 5] * depth * 0.5f;
 }
 
 void BACKWARD::preprocess(

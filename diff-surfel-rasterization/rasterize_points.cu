@@ -15,7 +15,6 @@
 #include <tuple>
 #include <stdio.h>
 #include <cuda_runtime_api.h>
-#include "cuda_rasterizer/config.h"
 #include "cuda_rasterizer/rasterizer.h"
 #include <functional>
 
@@ -77,7 +76,7 @@ RasterizeGaussiansCUDA(
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
 
-  int num_color_feat_channels = (colors.size(0) > 0) ? colors.size(1) : NUM_COLOR_CHANNELS;
+  int num_color_feat_channels = colors.size(1);
   torch::Tensor out_color = torch::full({num_color_feat_channels, H, W}, 0.0, float_opts);
   torch::Tensor out_others = torch::full({3+3+1, H, W}, 0.0, float_opts);
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));

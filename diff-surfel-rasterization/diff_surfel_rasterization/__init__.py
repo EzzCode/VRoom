@@ -567,7 +567,11 @@ def rasterization_2dgs(
     if render_mode in ["RGB+D", "RGB+ED"]:
         depth_hw = render_depth.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, 1]
         if render_mode == "RGB+ED":
-            depth_hw = depth_hw / render_alpha.permute(1, 2, 0).unsqueeze(0).clamp(min=1e-10)
+            # Gradient Masking Trick: prevents explosion at near-empty pixels
+            _alpha = render_alpha.permute(1, 2, 0).unsqueeze(0)
+            _depth_norm = depth_hw / _alpha.clamp(min=1e-6)
+            _mask = (_alpha > 0.005).float().detach()
+            depth_hw = _depth_norm * _mask + _depth_norm.detach() * (1.0 - _mask)
         render_colors_out = torch.cat([render_colors_out, depth_hw], dim=-1)
     
     render_alphas_out = render_alpha.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, 1]
@@ -580,7 +584,10 @@ def rasterization_2dgs(
     # Normals from depth
     depth_for_normal = render_depth.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, 1]
     if render_mode == "RGB+ED":
-        depth_for_normal = depth_for_normal / render_alphas_out.clamp(min=1e-10)
+        # Gradient Masking Trick: prevents explosion at near-empty pixels
+        _depth_norm = depth_for_normal / render_alphas_out.clamp(min=1e-6)
+        _mask = (render_alphas_out > 0.005).float().detach()
+        depth_for_normal = _depth_norm * _mask + _depth_norm.detach() * (1.0 - _mask)
     render_normals_from_depth = _depth_to_normal(
         depth_for_normal, torch.linalg.inv(viewmats), Ks
     )
@@ -757,9 +764,16 @@ def rasterization_2dgs_inria_wrapper(
     render_dist = allmap[..., 6:7]
 
     render_normal = render_normal @ (world_view_transform[:3, :3].T)
-    render_depth_expected = render_depth_expected / render_alphas
-    render_depth_expected = torch.nan_to_num(render_depth_expected, 0, 0)
-    render_depth_median = torch.nan_to_num(render_depth_median, 0, 0)
+    # Gradient Masking Trick: prevents cross-pixel gradient leakage and F.normalize singularities.
+    # Threshold 0.005 caps the depth multiplier at 200x, preventing gradient explosion.
+    if render_alphas.min() < 0.005:
+        print(f"[DEBUG] Low alpha detected: min={render_alphas.min().item():.2e}, masking gradients")
+    _depth_norm = render_depth_expected / render_alphas.clamp(min=1e-6)
+    _mask = (render_alphas > 0.005).float().detach()
+    render_depth_expected = _depth_norm * _mask + _depth_norm.detach() * (1.0 - _mask)
+    
+    render_depth_expected = torch.nan_to_num(render_depth_expected, nan=0.0, posinf=0.0, neginf=0.0)
+    render_depth_median = torch.nan_to_num(render_depth_median, nan=0.0, posinf=0.0, neginf=0.0)
 
     # render_depth is either median or expected by setting depth_ratio to 1 or 0
     # for bounded scene, use median depth, i.e., depth_ratio = 1;
