@@ -166,6 +166,7 @@ renderCUDA(
 	constexpr int block_x = (C <= 32) ? 16 : 8;
 	constexpr int block_y = (C <= 32) ? 16 : 8;
 	constexpr int block_size = block_x * block_y;
+	constexpr int color_stride = (C > 32) ? (block_size + 1) : block_size;
 
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -187,7 +188,7 @@ renderCUDA(
 	__shared__ int collected_id[block_size];
 	__shared__ float2 collected_xy[block_size];
 	__shared__ float4 collected_normal_opacity[block_size];
-	__shared__ float collected_colors[C * block_size];
+	__shared__ float collected_colors[C * color_stride];
 	__shared__ float3 collected_Tu[block_size];
 	__shared__ float3 collected_Tv[block_size];
 	__shared__ float3 collected_Tw[block_size];
@@ -273,7 +274,7 @@ renderCUDA(
 			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
 			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
 			for (int i = 0; i < C; i++)
-				collected_colors[i * block_size + block.thread_rank()] = colors[coll_id * C + i];
+				collected_colors[i * color_stride + block.thread_rank()] = colors[coll_id * C + i];
 			// collected_depths[block.thread_rank()] = depths[coll_id];
 		}
 		block.sync();
@@ -352,7 +353,7 @@ renderCUDA(
 				float dL_dalpha = 0.0f;
 				for (int ch = 0; ch < C; ch++)
 				{
-					const float c = collected_colors[ch * block_size + j];
+					const float c = collected_colors[ch * color_stride + j];
 					accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
 					last_color[ch] = c;
 					const float dL_dchannel = dL_dpixel[ch];
@@ -457,17 +458,25 @@ renderCUDA(
 			// Only lane 0 of each warp writes to global memory
 			if (warp.thread_rank() == 0) {
 				const int global_id = collected_id[j];
-				for (int ch = 0; ch < C; ch++)
-					atomicAdd(&(dL_dcolors[global_id * C + ch]), v_colors[ch]);
-				for (int k = 0; k < 9; k++)
-					atomicAdd(&dL_dtransMat[global_id * 9 + k], v_transMat[k]);
-				if (v_mean2D_x != 0 || v_mean2D_y != 0) {
+				for (int ch = 0; ch < C; ch++) {
+					if (v_colors[ch] != 0.0f)
+						atomicAdd(&(dL_dcolors[global_id * C + ch]), v_colors[ch]);
+				}
+				for (int k = 0; k < 9; k++) {
+					if (v_transMat[k] != 0.0f)
+						atomicAdd(&dL_dtransMat[global_id * 9 + k], v_transMat[k]);
+				}
+				if (v_mean2D_x != 0.0f || v_mean2D_y != 0.0f) {
 					atomicAdd(&dL_dmean2D[global_id].x, v_mean2D_x);
 					atomicAdd(&dL_dmean2D[global_id].y, v_mean2D_y);
 				}
-				for (int ch = 0; ch < 3; ch++)
-					atomicAdd(&dL_dnormal3D[global_id * 3 + ch], v_normal3D[ch]);
-				atomicAdd(&(dL_dopacity[global_id]), v_opacity);
+				for (int ch = 0; ch < 3; ch++) {
+					if (v_normal3D[ch] != 0.0f)
+						atomicAdd(&dL_dnormal3D[global_id * 3 + ch], v_normal3D[ch]);
+				}
+				if (v_opacity != 0.0f) {
+					atomicAdd(&(dL_dopacity[global_id]), v_opacity);
+				}
 			}
 		}
 	}
