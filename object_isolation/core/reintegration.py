@@ -39,8 +39,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class _OrbitCam:
     """Lightweight container for one comparison-orbit camera."""
-    index: int
-    azimuth_deg: float
     R: np.ndarray  # (3,3) R_w2c
     T: np.ndarray  # (3,)
     K: np.ndarray  # (3,3)
@@ -99,7 +97,6 @@ def build_orbit_cameras(
         )
         R, T = _look_at(cam_pos, center.astype(np.float32), up)
         cams.append(_OrbitCam(
-            index=i, azimuth_deg=float(np.degrees(a)),
             R=R, T=T, K=K.copy(), width=int(width), height=int(height),
         ))
     return cams

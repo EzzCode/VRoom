@@ -4,8 +4,8 @@ This module wraps the local ``gstrain`` runtime so the rest of
 ``object_isolation`` can:
 
     * Load a trained Gaussian model from disk (``load_gaussians``)
-    * Read camera poses from ``cameras.json`` and build an inter-camera
-      perspective graph used for view selection (``build_perspective_graph``)
+        * Read camera poses from ``cameras.json`` for view selection
+            (``build_perspective_graph``)
     * Estimate scene up-direction and an orbit base direction from cameras
 
 All public helpers are pure functions over numpy arrays / dataclasses so they
@@ -36,9 +36,8 @@ from gstrain.vroom_core.utils.checkpoints import CheckpointManager
 
 @dataclass
 class PerspectiveGraph:
-    """Camera list plus a symmetric adjacency matrix of pairwise overlap."""
+    """Camera list parsed from ``cameras.json``."""
     cameras: list[dict]
-    adjacency: np.ndarray
 
     @property
     def positions(self) -> np.ndarray:
@@ -159,16 +158,8 @@ def get_label_ids(gaussians: GaussianModel) -> np.ndarray:
 
 # ── Camera graph construction ─────────────────────────────────────────────────────────
 
-def build_perspective_graph(
-    cameras_json_path: str | Path,
-    anchor_xyz: np.ndarray | None = None,
-    overlap_method: str = "frustum",
-) -> PerspectiveGraph:
-    """Read ``cameras.json`` and compute pairwise camera overlap.
-
-    ``overlap_method`` selects between cheap angular/proximity overlap and a
-    visibility-based overlap that requires ``anchor_xyz``.
-    """
+def build_perspective_graph(cameras_json_path: str | Path) -> PerspectiveGraph:
+    """Read ``cameras.json`` into render-ready camera dictionaries."""
     path = Path(cameras_json_path)
     if not path.exists():
         raise FileNotFoundError(f"cameras.json not found: {path}")
@@ -199,13 +190,8 @@ def build_perspective_graph(
             "fy": fy,
         })
 
-    adjacency = (
-        _compute_visibility_overlap(cameras, anchor_xyz)
-        if overlap_method == "visibility" and anchor_xyz is not None
-        else _compute_angular_overlap(cameras)
-    )
-    logger.info("Perspective graph: %d cameras, mean adjacency=%.3f", len(cameras), float(adjacency.mean()))
-    return PerspectiveGraph(cameras=cameras, adjacency=adjacency)
+    logger.info("Perspective graph: %d cameras", len(cameras))
+    return PerspectiveGraph(cameras=cameras)
 
 
 # ── Geometry helpers ───────────────────────────────────────────────────────────────────
@@ -266,32 +252,3 @@ def _normalize(vec: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     return (vec / norm).astype(np.float32)
 
 
-def _compute_angular_overlap(cameras: list[dict]) -> np.ndarray:
-    """Cheap overlap proxy using forward-vector dot product + camera proximity."""
-    positions = np.asarray([cam["position"] for cam in cameras], dtype=np.float32)
-    forwards = np.asarray([cam["R"][2, :] for cam in cameras], dtype=np.float32)
-    forwards /= np.linalg.norm(forwards, axis=1, keepdims=True) + 1e-8
-    angular = (forwards @ forwards.T + 1.0) / 2.0
-    dists = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2)
-    proximity = 1.0 - dists / (dists.max() + 1e-8)
-    adjacency = (0.6 * angular + 0.4 * proximity).astype(np.float32)
-    np.fill_diagonal(adjacency, 1.0)
-    return adjacency
-
-
-def _compute_visibility_overlap(cameras: list[dict], anchor_xyz: np.ndarray) -> np.ndarray:
-    """Pairwise IoU of which anchors project visibly into each camera."""
-    visibility = np.zeros((len(cameras), len(anchor_xyz)), dtype=bool)
-    for index, cam in enumerate(cameras):
-        visibility[index] = count_visible_anchors(cam, anchor_xyz)
-
-    adjacency = np.zeros((len(cameras), len(cameras)), dtype=np.float32)
-    for i in range(len(cameras)):
-        for j in range(i, len(cameras)):
-            inter = float(np.logical_and(visibility[i], visibility[j]).sum())
-            union = float(np.logical_or(visibility[i], visibility[j]).sum())
-            score = inter / max(union, 1e-8)
-            adjacency[i, j] = score
-            adjacency[j, i] = score
-    np.fill_diagonal(adjacency, 1.0)
-    return adjacency

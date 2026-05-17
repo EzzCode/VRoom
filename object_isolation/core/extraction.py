@@ -193,10 +193,7 @@ class FrameExtraction:
     cam_index: int
     img_name: str
     image_path: str
-    width: int
-    height: int
     n_pixels_objgs: int
-    n_pixels_real: int
     n_pixels_hybrid: int
     bbox_xywh: list  # in original image pixels
     fg_fraction: float
@@ -313,10 +310,7 @@ def extract_frame(scope: ObjectScope, gaussians, pipe_config,
         cam_index=cam_index,
         img_name=img_name,
         image_path=str(img_path),
-        width=W_img,
-        height=H_img,
         n_pixels_objgs=int(m_objgs_rs.sum()),
-        n_pixels_real=int(m_real.sum()) if used_real else -1,
         n_pixels_hybrid=n_pix_hybrid,
         bbox_xywh=bbox,
         fg_fraction=float(n_pix_hybrid) / float(H_img * W_img),
