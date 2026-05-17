@@ -1,7 +1,7 @@
 import gsplat
 import torch
 from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_2dgs
-from diff_surfel_rasterization import rasterization_2dgs, rasterization_2dgs_inria_wrapper
+from diff_surfel_rasterization import rasterization_2dgs_inria_wrapper
 
 
 def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=True, object_mask=None):
