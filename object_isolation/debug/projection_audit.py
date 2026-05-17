@@ -33,9 +33,6 @@ import numpy as np
 
 # ── path setup ─────────────────────────────────────────────────────────────
 _VROOM_ROOT = Path(__file__).resolve().parents[2]
-_OBJECTGS_DIR = _VROOM_ROOT / "temp_deps" / "ObjectGS"
-if str(_OBJECTGS_DIR) not in sys.path:
-    sys.path.insert(0, str(_OBJECTGS_DIR))
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 

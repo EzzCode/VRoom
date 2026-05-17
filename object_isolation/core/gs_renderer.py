@@ -1,12 +1,12 @@
-"""Thin Rendering Wrapper for ObjectGS.
+"""Thin rendering wrapper for gstrain.
 
-Used by the object-isolation pipeline. Imports DIRECTLY from
-``temp_deps/ObjectGS``; has NO dependency on ``target_replenishment``.
+Used by the object-isolation pipeline. This keeps the local camera/render API
+small while delegating Gaussian rasterization to ``gstrain``.
 
 Public API
 ----------
 ``VirtualCamera(R, T, K, width, height)``
-    Lightweight camera object compatible with ObjectGS render.
+    Lightweight camera object compatible with gstrain render.
 
 ``create_camera(R, T, K, width, height) -> VirtualCamera``
     Convenience constructor.
@@ -15,43 +15,27 @@ Public API
     Returns ``{'rgb': (3, H, W) float32 cuda, 'alpha': (H, W) float32 cuda}``.
 
 ``prefilter_anchors(gaussians, cam) -> bool mask (N,) cuda``
-    Voxel prefilter — returns visible anchor mask.
+    Voxel prefilter - returns visible anchor mask.
 """
 
 from __future__ import annotations
 
-import sys
 import logging
-from pathlib import Path
 
 import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
 
-# ── ObjectGS path setup ──────────────────────────────────────────────────────
-
-_VROOM_ROOT = Path(__file__).resolve().parent.parent.parent
-_OBJECTGS_DIR = _VROOM_ROOT / "temp_deps" / "ObjectGS"
-
-if not _OBJECTGS_DIR.exists():
-    raise ImportError(
-        f"ObjectGS not found at {_OBJECTGS_DIR}. "
-        "Clone it: git clone https://github.com/RuijieZhu94/ObjectGS.git temp_deps/ObjectGS"
-    )
-
-if str(_OBJECTGS_DIR) not in sys.path:
-    sys.path.insert(0, str(_OBJECTGS_DIR))
-
-from utils.graphics_utils import getProjectionMatrix                   # noqa: E402
-from gaussian_renderer.render import render as _ogs_render             # noqa: E402
-from gaussian_renderer.render import prefilter_voxel as _prefilter     # noqa: E402
+from gstrain.gaussian_renderer.render import prefilter_voxel as _prefilter
+from gstrain.gaussian_renderer.render import render as _gstrain_render
+from gstrain.vroom_core.utils.geometry import projection_matrix
 
 
 # ── VirtualCamera ────────────────────────────────────────────────────────────
 
 class VirtualCamera:
-    """Lightweight camera compatible with ObjectGS render / prefilter_voxel."""
+    """Lightweight camera compatible with gstrain render / prefilter_voxel."""
 
     def __init__(
         self,
@@ -75,14 +59,14 @@ class VirtualCamera:
         self.FoVx = 2.0 * np.arctan(width / (2.0 * self.fx))
         self.FoVy = 2.0 * np.arctan(height / (2.0 * self.fy))
 
-        # World-view transform: column-major [R|T] (ObjectGS stores transposed).
+        # World-view transform: column-major [R|T] (renderer expects transposed).
         Rt = np.eye(4, dtype=np.float32)
         Rt[:3, :3] = self.R
         Rt[:3, 3] = self.T
         self.world_view_transform = torch.tensor(Rt, dtype=torch.float32).transpose(0, 1).cuda()
 
         self.projection_matrix = (
-            getProjectionMatrix(znear=0.01, zfar=100.0, fovX=self.FoVx, fovY=self.FoVy)
+            projection_matrix(znear=0.01, zfar=100.0, fov_x=self.FoVx, fov_y=self.FoVy)
             .transpose(0, 1)
             .cuda()
         )
@@ -114,7 +98,7 @@ def create_camera(
 def prefilter_anchors(gaussians, cam: VirtualCamera) -> torch.Tensor:
     """Return a boolean mask (N_anchors,) marking anchors visible from *cam*.
 
-    Calls ObjectGS's voxel prefilter if ``pipe_config.add_prefilter`` is
+    Calls gstrain's voxel prefilter if ``pipe_config.add_prefilter`` is
     enabled (inferred from model), otherwise falls back to the model's own
     ``_anchor_mask``.  Always safe to call before render.
     """
@@ -154,7 +138,7 @@ def render_rgba(
         When given, render every anchor except this label. Ignored if
         ``object_label_id`` is set.
     training:
-        Passed through to ``objectgs_render``.  Set ``True`` during gradient
+        Passed through to ``gstrain`` render. Set ``True`` during gradient
         accumulation; ``False`` for comparison renders.
 
     Returns
@@ -181,7 +165,7 @@ def render_rgba(
     elif exclude_object_label_id is not None:
         object_mask = (gaussians.label_ids.squeeze() != int(exclude_object_label_id))
 
-    pkg = _ogs_render(
+    pkg = _gstrain_render(
         cam,
         gaussians,
         pipe_config,

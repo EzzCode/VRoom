@@ -1,8 +1,8 @@
-"""Fresh Per-Object ObjectGS Training (real + hallucinated views).
+"""Fresh per-object gstrain training (real + hallucinated views).
 
 This module intentionally does **not** use ``target_replenishment`` optimizers,
-backside seeding, or anchors from the already-trained ObjectGS model. It
-starts from the scene COLMAP point cloud, creates a fresh ObjectGS
+backside seeding, or anchors from the already-trained scene model. It
+starts from the scene COLMAP point cloud, creates a fresh gstrain
 ``GaussianModel``, and trains that model directly against the joint real +
 hallucinated view set produced by the earlier pipeline stages.
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -30,15 +29,10 @@ from .object_scope import ObjectScope
 
 logger = logging.getLogger(__name__)
 
-_VROOM_ROOT = Path(__file__).resolve().parents[2]
-_OBJECTGS_DIR = _VROOM_ROOT / "temp_deps" / "ObjectGS"
-if str(_OBJECTGS_DIR) not in sys.path:
-    sys.path.insert(0, str(_OBJECTGS_DIR))
-
-from gaussian_renderer.render import render as _ogs_render  # noqa: E402
-from gaussian_renderer.render import prefilter_voxel as _prefilter  # noqa: E402
-from scene.base_model import GaussianModel  # noqa: E402
-from utils.loss_utils import ssim  # noqa: E402
+from gstrain.gaussian_renderer.render import prefilter_voxel as _prefilter
+from gstrain.gaussian_renderer.render import render as _gstrain_render
+from gstrain.vroom_core.models.facade import GaussianModel
+from gstrain.vroom_core.training.loss_engine import ssim_loss as _ssim_loss
 
 
 # ── Tensor helpers ─────────────────────────────────────────────────────────────────────────
@@ -79,23 +73,18 @@ def _as_alpha_tensor(alpha) -> torch.Tensor:
 
 def _model_kwargs_from_parent(parent_gaussians=None) -> dict:
     keys = (
-        "fork", "gs_attr", "color_attr", "feat_dim", "view_dim", "appearance_dim",
-        "n_offsets", "voxel_size", "render_mode", "update_depth",
-        "update_init_factor", "update_hierachy_factor",
+        "gs_attr", "feat_dim", "view_dim", "appearance_dim",
+        "n_offsets", "voxel_size", "render_mode", "tile_size_2dgs",
     )
     defaults = {
-        "fork": 2,
         "gs_attr": "2D",
-        "color_attr": "RGB",
         "feat_dim": 32,
         "view_dim": 3,
         "appearance_dim": 0,
         "n_offsets": 10,
         "voxel_size": 0.001,
         "render_mode": "RGB+ED",
-        "update_depth": 3,
-        "update_init_factor": 16,
-        "update_hierachy_factor": 4,
+        "tile_size_2dgs": 8,
     }
     if parent_gaussians is None:
         return defaults
@@ -132,7 +121,7 @@ def _render_parent_object_depth_target(
             visible_mask = parent_gaussians._anchor_mask
 
         bg = torch.zeros(3, dtype=torch.float32, device="cuda")
-        pkg = _ogs_render(
+        pkg = _gstrain_render(
             cam,
             parent_gaussians,
             pipe_config,
@@ -243,7 +232,7 @@ def train_object(
     max_scale_growth: float = 1.35,
     max_offset_abs: float = 0.45,
 ) -> dict:
-    """Train a fresh object-only ObjectGS model from COLMAP seed points."""
+    """Train a fresh object-only gstrain model from COLMAP seed points."""
     if not supervision_views:
         raise RuntimeError("Cannot train object model with no supervision views.")
 
@@ -300,7 +289,7 @@ def train_object(
     _prepare_direct_render_model(gaussians)
     gaussians.set_appearance(len(entries))
     spatial_extent = max(float(scope.radius), float(np.linalg.norm(scope.aabb_max_W - scope.aabb_min_W)))
-    gaussians.create_from_pcd(pcd, spatial_extent, "", logger)
+    gaussians.initialize_anchors(pcd, spatial_extent, logger=logger)
 
     opt = _training_options(
         int(n_iterations),
@@ -317,7 +306,7 @@ def train_object(
     if not hasattr(pipe, "add_prefilter"):
         pipe.add_prefilter = True
 
-    # White background: object-only training. Supervision images (both real ObjectGS renders
+    # White background: object-only training. Supervision images (both real gstrain renders
     # and denormalized SV3D hallucinations) have white background for non-object pixels.
     # rgb_bg loss then correctly penalizes any alpha > 0 outside the object mask.
     background = torch.ones(3, dtype=torch.float32, device="cuda")
@@ -346,7 +335,7 @@ def train_object(
         gaussians.update_learning_rate(iteration)
         gaussians.set_anchor_mask(cam.camera_center, cam.resolution_scale)
         visible_mask = _prefilter(cam, gaussians).squeeze() if getattr(pipe, "add_prefilter", True) else gaussians._anchor_mask
-        render_pkg = _ogs_render(cam, gaussians, pipe, background, visible_mask=visible_mask, training=True)
+        render_pkg = _gstrain_render(cam, gaussians, pipe, background, visible_mask=visible_mask, training=True)
         pred = torch.clamp(render_pkg["render"], 0.0, 1.0)
         alpha = render_pkg["render_alphas"]
         if alpha.ndim == 3:
@@ -358,7 +347,7 @@ def train_object(
         n_bg = (1.0 - mask).sum().clamp(min=1.0)
         rgb_fg = torch.abs((pred - gt) * mask).sum() / (3.0 * n_fg)
         rgb_bg = torch.abs((pred - gt) * (1.0 - mask)).sum() / (3.0 * n_bg)
-        ssim_loss = 1.0 - ssim(pred.unsqueeze(0) * mask.unsqueeze(0), gt.unsqueeze(0) * mask.unsqueeze(0))
+        ssim_loss = _ssim_loss(pred.unsqueeze(0) * mask.unsqueeze(0), gt.unsqueeze(0) * mask.unsqueeze(0))
         alpha_fg = (mask * (1.0 - alpha)).mean()
         alpha_bg = ((1.0 - mask) * alpha).mean()
         scale_reg = render_pkg["scaling"].prod(dim=1).mean() if render_pkg["scaling"].numel() else torch.tensor(0.0, device="cuda")

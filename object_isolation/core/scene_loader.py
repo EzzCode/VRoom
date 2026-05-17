@@ -1,7 +1,7 @@
-"""ObjectGS Loading and Camera-Graph Helpers.
+"""Gaussian loading and camera-graph helpers.
 
-This module wraps the third-party ObjectGS package living under
-``temp_deps/ObjectGS`` so the rest of ``object_isolation`` can:
+This module wraps the local ``gstrain`` runtime so the rest of
+``object_isolation`` can:
 
     * Load a trained Gaussian model from disk (``load_gaussians``)
     * Read camera poses from ``cameras.json`` and build an inter-camera
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,14 +26,10 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_VROOM_ROOT = Path(__file__).resolve().parents[2]
-_OBJECTGS_DIR = _VROOM_ROOT / "temp_deps" / "ObjectGS"
-if str(_OBJECTGS_DIR) not in sys.path:
-    sys.path.insert(0, str(_OBJECTGS_DIR))
-
-from scene.base_model import GaussianModel  # noqa: E402
-from utils.general_utils import parse_cfg  # noqa: E402
-from utils.semantic_utils import OneHotEncoder  # noqa: E402
+from gstrain.vroom_core.models.facade import GaussianModel
+from gstrain.vroom_core.models.semantics import SemanticCodec
+from gstrain.vroom_core.training.orchestration import PipelineConfig
+from gstrain.vroom_core.utils.checkpoints import CheckpointManager
 
 
 # ── Data containers ───────────────────────────────────────────────────────────────
@@ -53,8 +48,37 @@ class PerspectiveGraph:
 
 # ── Model loading ─────────────────────────────────────────────────────────────────
 
+_GSTRAIN_MODEL_KWARGS = {
+    "n_offsets",
+    "feat_dim",
+    "view_dim",
+    "appearance_dim",
+    "voxel_size",
+    "gs_attr",
+    "render_mode",
+    "tile_size_2dgs",
+}
+
+
+def _pipeline_config_from_yaml(cfg: dict) -> SimpleNamespace:
+    values = dict(cfg.get("pipeline_params", {}) or {})
+    defaults = PipelineConfig()
+    for key, value in vars(defaults).items():
+        values.setdefault(key, value)
+    return SimpleNamespace(**values)
+
+
+def _model_kwargs_from_yaml(cfg: dict, model_dir: Path) -> dict:
+    model_params = cfg.get("model_params", {}) or {}
+    raw_kwargs = ((model_params.get("model_config", {}) or {}).get("kwargs", {}) or {})
+    kwargs = {key: raw_kwargs[key] for key in _GSTRAIN_MODEL_KWARGS if key in raw_kwargs}
+    if kwargs:
+        return kwargs
+    return CheckpointManager(GaussianModel()).infer_bundle_kwargs(model_dir)
+
+
 def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[GaussianModel, SimpleNamespace]:
-    """Load a trained ObjectGS ``GaussianModel`` and its pipeline config.
+    """Load a trained ``gstrain`` ``GaussianModel`` and its pipeline config.
 
     If ``iteration`` is ``-1`` (default), the latest ``iteration_*`` checkpoint
     under ``<model_path>/point_cloud/`` is used. Falls back to a flat
@@ -67,7 +91,7 @@ def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[Gaussia
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
-    lp, _op, pipe_config = parse_cfg(cfg)
+    pipe_config = _pipeline_config_from_yaml(cfg)
 
     pc_base = model_path / "point_cloud"
     root_model_dir = model_path if (model_path / "point_cloud.ply").exists() else None
@@ -93,7 +117,7 @@ def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[Gaussia
             model_dir = root_model_dir
             loaded_iteration = -1
         else:
-            raise FileNotFoundError(f"No ObjectGS checkpoint found under {pc_base}")
+            raise FileNotFoundError(f"No gstrain checkpoint found under {pc_base}")
     else:
         candidates = [pc_base / f"iteration_{int(iteration)}", pc_base / f"iteration_{int(iteration):05d}"]
         model_dir = next((path for path in candidates if path.exists()), None)
@@ -105,17 +129,17 @@ def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[Gaussia
     if not ply_path.exists():
         raise FileNotFoundError(f"PLY not found: {ply_path}")
 
-    model_config = lp.model_config
-    gaussians = GaussianModel(**model_config["kwargs"])
+    gaussians = GaussianModel(**_model_kwargs_from_yaml(cfg, model_dir))
     gaussians.load_ply(str(ply_path))
     gaussians.load_mlp_checkpoints(str(model_dir))
-    gaussians.id_encoder = OneHotEncoder(gaussians.label_ids)
+    if gaussians.label_ids is not None:
+        gaussians.id_encoder = SemanticCodec.from_labels(gaussians.label_ids.view(-1))
     gaussians.explicit_gs = False
     gaussians.weed_ratio = 0.0
-    gaussians.eval()
+    gaussians.set_eval()
 
     logger.info(
-        "Loaded ObjectGS model from %s (iteration %s): %d anchors, n_offsets=%d, gs_attr=%s",
+        "Loaded gstrain model from %s (iteration %s): %d anchors, n_offsets=%d, gs_attr=%s",
         model_dir, loaded_iteration, int(gaussians.get_anchor.shape[0]), int(gaussians.n_offsets), gaussians.gs_attr,
     )
     return gaussians, pipe_config
