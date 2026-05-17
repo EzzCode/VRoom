@@ -236,7 +236,7 @@ import math
 import torch.nn.functional as F
 
 # Supported template sizes for feature chunking
-_SUPPORTED_CHANNELS = [1, 3, 4, 8, 16, 32]
+_SUPPORTED_CHANNELS = [1, 3, 4, 8, 16, 32, 64, 128]
 
 def _next_supported(n) -> int:
     """Find the smallest supported channel count >= n. 
@@ -388,234 +388,6 @@ def depth_to_normal(
     normals = F.pad(normals, (0, 0, 1, 1, 1, 1), value=0.0)  # [..., H, W, 3]
     return normals
 
-def rasterization_2dgs(
-    means,          # [N, 3]
-    quats,          # [N, 4]
-    scales,         # [N, 3] — only first 2 used
-    opacities,      # [N]
-    colors,         # [N, D] or [N, K, 3] for SH
-    viewmats,       # [C, 4, 4]
-    Ks,             # [C, 3, 3]
-    width,
-    height,
-    near_plane=0.01,
-    far_plane=100.0,
-    backgrounds=None,  # [C, D]
-    packed=False,
-    sh_degree=None,
-    render_mode="RGB",
-    features=None,     # [N, F] — per-Gaussian semantic features
-    tile_size=16,      # unused (hardcoded to 16 in diff-surfel)
-    **kwargs,
-):
-    """
-    gsplat-compatible wrapper around diff-surfel-rasterization.
-    
-    Returns:
-        render_colors, render_alphas, render_normals, render_normals_from_depth,
-        render_distort, render_median, render_features, info
-    """
-    device = means.device
-    C = len(viewmats)  # number of cameras (usually 1)
-    
-    # Normalize quats (diff-surfel doesn't do this internally)
-    quats = F.normalize(quats, dim=-1).contiguous()
-    # diff-surfel CUDA kernel reads scales as glm::vec2 (stride-2).
-    # Must pass exactly (N, 2)
-    scales_2d = scales[:, :2].contiguous()
-    
-    all_render_colors = []
-    all_render_features = []
-    all_infos = []
-    
-    for cid in range(C):
-        K = Ks[cid]
-        fx, fy = K[0, 0].item(), K[1, 1].item()
-        cx, cy = K[0, 2].item(), K[1, 2].item()
-        
-        # K → FoV
-        FoVx = 2 * math.atan(width / (2 * fx))
-        FoVy = 2 * math.atan(height / (2 * fy))
-        tanfovx = math.tan(FoVx * 0.5)
-        tanfovy = math.tan(FoVy * 0.5)
-        
-        # Build projection matrix
-        world_view_transform = viewmats[cid].transpose(0, 1)
-        projection_matrix = _get_projection_matrix(
-            near_plane, far_plane, FoVx, FoVy, device
-        ).transpose(0, 1)
-        full_proj_transform = (
-            world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))
-        ).squeeze(0)
-        camera_center = world_view_transform.inverse()[3, :3]
-        
-        background = (
-            backgrounds[cid] if backgrounds is not None
-            else torch.zeros(3, device=device)
-        )
-        
-        raster_settings = GaussianRasterizationSettings(
-            image_height=height,
-            image_width=width,
-            tanfovx=tanfovx,
-            tanfovy=tanfovy,
-            bg=background,
-            scale_modifier=1.0,
-            viewmatrix=world_view_transform,
-            projmatrix=full_proj_transform,
-            sh_degree=0 if sh_degree is None else sh_degree,
-            campos=camera_center,
-            prefiltered=False,
-            debug=False,
-        )
-        
-        rasterizer = GaussianRasterizer(raster_settings=raster_settings)
-        means2D = torch.zeros_like(means, requires_grad=True, device=device)
-        
-        # Determine colors
-        if sh_degree is not None and colors.dim() == 3:
-            shs = colors
-            colors_precomp = None
-        else:
-            shs = None
-            colors_precomp = colors
-        
-        render_feat = None
-        use_single_pass = (
-            features is not None 
-            and shs is None 
-            and colors_precomp is not None
-            and (3 + features.shape[-1] <= _SUPPORTED_CHANNELS[-1])
-        )
-        
-        # force standard fallback dual-pass. diff-surfel 2DGS kernel math fundamentally destructs normal/distort geometry matrices for C > 3.
-        # --- 1. Rasterize RGB Natively (C=3) ---
-        color, radii, allmap = rasterizer(
-            means3D=means,
-            means2D=means2D,
-            shs=shs,
-            colors_precomp=colors_precomp,
-            opacities=(opacities[:, None] if opacities.dim() == 1 else opacities).contiguous(),
-            scales=scales_2d,
-            rotations=quats,
-        )
-        
-        # --- 2. Rasterize Features ---
-        render_feat = None
-        if features is not None:
-            # Drop fragmentations
-            torch.cuda.empty_cache() 
-            
-            F_dim = features.shape[-1]
-            padded_c = _next_supported(F_dim)
-            
-            chunk = features
-            if padded_c > F_dim:
-                chunk = torch.cat([chunk, torch.zeros(chunk.shape[0], padded_c - F_dim, device=device)], dim=-1).detach().contiguous()
-                
-            bg_feat = torch.zeros(padded_c, device=device)
-            feat_settings = GaussianRasterizationSettings(
-                image_height=height,
-                image_width=width,
-                tanfovx=tanfovx,
-                tanfovy=tanfovy,
-                bg=bg_feat,
-                scale_modifier=1.0,
-                viewmatrix=world_view_transform,
-                projmatrix=full_proj_transform,
-                sh_degree=0,
-                campos=camera_center,
-                prefiltered=False,
-                debug=False,
-            )
-            feat_rasterizer = GaussianRasterizer(raster_settings=feat_settings)
-            
-            # Evaluate geometry gradients cleanly isolated from allmap regularizers
-            feat_color, _, _ = feat_rasterizer(
-                means3D=means,
-                means2D=means2D,
-                shs=None,
-                colors_precomp=chunk,
-                opacities=(opacities[:, None] if opacities.dim() == 1 else opacities).contiguous(),
-                scales=scales_2d,
-                rotations=quats,
-            )
-            
-            # P=0 Pad fix natively for the feature return
-            if feat_color.shape[0] < padded_c:
-                padding = torch.zeros(padded_c - feat_color.shape[0], height, width, device=device)
-                feat_color = torch.cat([feat_color, padding], dim=0)
-                
-            render_feat = feat_color[:F_dim]
-                
-        all_render_colors.append(color)
-        all_render_features.append(render_feat)
-        all_infos.append({'radii': radii, 'means2d': means2D, 'allmap': allmap})
-    
-    # Unpack allmap [7, H, W] → individual outputs (using camera 0)
-    allmap = all_infos[0]['allmap']  # [7, H, W]
-    render_depth = allmap[0:1]           # [1, H, W]
-    render_alpha = allmap[1:2]           # [1, H, W]
-    render_normal = allmap[2:5]          # [3, H, W]
-    render_median = allmap[5:6]          # [1, H, W]
-    render_distort = allmap[6:7]         # [1, H, W]
-    
-    # Convert to gsplat output format: [1, H, W, C]
-    render_colors_out = all_render_colors[0].unsqueeze(0).permute(0, 2, 3, 1)  # [1, H, W, 3]
-    
-    # Add depth to colors if render_mode requires it
-    if render_mode in ["RGB+D", "RGB+ED"]:
-        depth_hw = render_depth.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, 1]
-        if render_mode == "RGB+ED":
-            # Gradient Masking Trick: prevents explosion at near-empty pixels
-            _alpha = render_alpha.permute(1, 2, 0).unsqueeze(0)
-            _depth_norm = depth_hw / _alpha.clamp(min=1e-6)
-            _mask = (_alpha > 0.005).float().detach()
-            depth_hw = _depth_norm * _mask + _depth_norm.detach() * (1.0 - _mask)
-        render_colors_out = torch.cat([render_colors_out, depth_hw], dim=-1)
-    
-    render_alphas_out = render_alpha.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, 1]
-    
-    # Normals: camera space → world space
-    R_cam = viewmats[0, :3, :3].T
-    render_normals_cam = render_normal.permute(1, 2, 0)  # [H, W, 3]
-    render_normals_out = (render_normals_cam @ R_cam).unsqueeze(0)  # [1, H, W, 3]
-    
-    # Normals from depth
-    depth_for_normal = render_depth.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, 1]
-    if render_mode == "RGB+ED":
-        # Gradient Masking Trick: prevents explosion at near-empty pixels
-        _depth_norm = depth_for_normal / render_alphas_out.clamp(min=1e-6)
-        _mask = (render_alphas_out > 0.005).float().detach()
-        depth_for_normal = _depth_norm * _mask + _depth_norm.detach() * (1.0 - _mask)
-    render_normals_from_depth = _depth_to_normal(
-        depth_for_normal, torch.linalg.inv(viewmats), Ks
-    )
-    
-    render_distort_out = render_distort.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, 1]
-    render_median_out = render_median.permute(1, 2, 0).unsqueeze(0)    # [1, H, W, 1]
-    
-    # Features: [F, H, W] → [1, H, W, F]
-    render_features_out = None
-    if all_render_features[0] is not None:
-        render_features_out = all_render_features[0].permute(1, 2, 0).unsqueeze(0)
-    
-    info = {
-        'radii': all_infos[0]['radii'].unsqueeze(0),
-        'means2d': all_infos[0]['means2d'],   # leaf tensor — .grad populated during backward
-    }
-    
-    return (
-        render_colors_out,
-        render_alphas_out,
-        render_normals_out,
-        render_normals_from_depth,
-        render_distort_out,
-        render_median_out,
-        render_features_out,
-        info,
-    )
-
 
 def rasterization_2dgs_inria_wrapper(
     means: Tensor,  # [N, 3]
@@ -714,9 +486,7 @@ def rasterization_2dgs_inria_wrapper(
                 pad = torch.zeros(
                     _colors.shape[0], stride - _colors.shape[-1], device=device
                 ).detach()
-                _colors = torch.cat([_colors, pad], dim=-1)
-
-            
+                _colors = torch.cat([_colors, pad], dim=-1)  
 
             # Call the rasterizer
             if color_idx == 0:
@@ -766,8 +536,6 @@ def rasterization_2dgs_inria_wrapper(
     render_normal = render_normal @ (world_view_transform[:3, :3].T)
     # Gradient Masking Trick: prevents cross-pixel gradient leakage and F.normalize singularities.
     # Threshold 0.005 caps the depth multiplier at 200x, preventing gradient explosion.
-    if render_alphas.min() < 0.005:
-        print(f"[DEBUG] Low alpha detected: min={render_alphas.min().item():.2e}, masking gradients")
     _depth_norm = render_depth_expected / render_alphas.clamp(min=1e-6)
     _mask = (render_alphas > 0.005).float().detach()
     render_depth_expected = _depth_norm * _mask + _depth_norm.detach() * (1.0 - _mask)

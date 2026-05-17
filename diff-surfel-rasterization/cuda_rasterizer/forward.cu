@@ -230,8 +230,10 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		radius = ceil(max(max(extent.x, extent.y), cutoff * FilterSize));
 	}
 
+	constexpr int block_x = (C <= 32) ? 16 : 8;
+	constexpr int block_y = (C <= 32) ? 16 : 8;
 	uint2 rect_min, rect_max;
-	getRect(point_image, radius, rect_min, rect_max, grid);
+	getRect(point_image, (int)radius, rect_min, rect_max, grid, block_x, block_y);
 	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
 		return;
 
@@ -254,7 +256,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 // block, each thread treats one pixel. Alternates between fetching 
 // and rasterizing data.
 template <uint32_t CHANNELS>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+__global__ void __launch_bounds__(256)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -271,11 +273,15 @@ renderCUDA(
 	float* __restrict__ out_color,
 	float* __restrict__ out_others)
 {
+	constexpr int block_x = (CHANNELS <= 32) ? 16 : 8;
+	constexpr int block_y = (CHANNELS <= 32) ? 16 : 8;
+	constexpr int block_size = block_x * block_y;
+
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
-	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
-	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
-	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	uint32_t horizontal_blocks = (W + block_x - 1) / block_x;
+	uint2 pix_min = { block.group_index().x * block_x, block.group_index().y * block_y };
+	uint2 pix_max = { min(pix_min.x + block_x, W), min(pix_min.y + block_y , H) };
 	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
 	uint32_t pix_id = W * pix.y + pix.x;
 	float2 pixf = { (float)pix.x, (float)pix.y};
@@ -287,16 +293,16 @@ renderCUDA(
 
 	// Load start/end range of IDs to process in bit sorted list.
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
-	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	const int rounds = ((range.y - range.x + block_size - 1) / block_size);
 	int toDo = range.y - range.x;
 
 	// Allocate storage for batches of collectively fetched data.
-	__shared__ int collected_id[BLOCK_SIZE];
-	__shared__ float2 collected_xy[BLOCK_SIZE];
-	__shared__ float4 collected_normal_opacity[BLOCK_SIZE];
-	__shared__ float3 collected_Tu[BLOCK_SIZE];
-	__shared__ float3 collected_Tv[BLOCK_SIZE];
-	__shared__ float3 collected_Tw[BLOCK_SIZE];
+	__shared__ int collected_id[block_size];
+	__shared__ float2 collected_xy[block_size];
+	__shared__ float4 collected_normal_opacity[block_size];
+	__shared__ float3 collected_Tu[block_size];
+	__shared__ float3 collected_Tv[block_size];
+	__shared__ float3 collected_Tw[block_size];
 
 	// Initialize helper variables
 	float T = 1.0f;
@@ -321,15 +327,15 @@ renderCUDA(
 #endif
 
 	// Iterate over batches until all done or range is complete
-	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	for (int i = 0; i < rounds; i++, toDo -= block_size)
 	{
 		// End if entire block votes that it is done rasterizing
 		int num_done = __syncthreads_count(done);
-		if (num_done == BLOCK_SIZE)
+		if (num_done == block_size)
 			break;
 
 		// Collectively fetch per-Gaussian data from global to shared
-		int progress = i * BLOCK_SIZE + block.thread_rank();
+		int progress = i * block_size + block.thread_rank();
 		if (range.x + progress < range.y)
 		{
 			int coll_id = point_list[range.x + progress];
@@ -343,7 +349,7 @@ renderCUDA(
 		block.sync();
 
 		// Iterate over current batch
-		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
+		for (int j = 0; j < min(block_size, toDo); j++)
 		{
 			// Warp-level early exit: if all threads in this warp are done, skip
 			if (warp.all(done))
@@ -474,113 +480,39 @@ void FORWARD::render(
     float *out_color,
     float *out_others)
 {
+#define __RENDER_CALL_(N)                                                      \
+    case N:                                                                    \
+        renderCUDA<N><<<grid, block>>>(                                        \
+            ranges,                                                            \
+            point_list,                                                        \
+            W, H,                                                              \
+            focal_x, focal_y,                                                  \
+            means2D,                                                           \
+            colors,                                                            \
+            transMats,                                                         \
+            depths,                                                            \
+            normal_opacity,                                                    \
+            final_T,                                                           \
+            n_contrib,                                                         \
+            bg_color,                                                          \
+            out_color,                                                         \
+            out_others);                                                       \
+        break;
+
     switch (num_color_feat_channels)
     {
-    case 1:
-        renderCUDA<1><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            means2D,
-            colors,
-            transMats,
-            depths,
-            normal_opacity,
-            final_T,
-            n_contrib,
-            bg_color,
-            out_color,
-            out_others);
-        break;
-    case 3:
-        renderCUDA<3><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            means2D,
-            colors,
-            transMats,
-            depths,
-            normal_opacity,
-            final_T,
-            n_contrib,
-            bg_color,
-            out_color,
-            out_others);
-        break;
-    case 4:
-        renderCUDA<4><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            means2D,
-            colors,
-            transMats,
-            depths,
-            normal_opacity,
-            final_T,
-            n_contrib,
-            bg_color,
-            out_color,
-            out_others);
-        break;
-    case 8:
-        renderCUDA<8><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            means2D,
-            colors,
-            transMats,
-            depths,
-            normal_opacity,
-            final_T,
-            n_contrib,
-            bg_color,
-            out_color,
-            out_others);
-        break;
-    case 16:
-        renderCUDA<16><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            means2D,
-            colors,
-            transMats,
-            depths,
-            normal_opacity,
-            final_T,
-            n_contrib,
-            bg_color,
-            out_color,
-            out_others);
-        break;
-    case 32:
-        renderCUDA<32><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            means2D,
-            colors,
-            transMats,
-            depths,
-            normal_opacity,
-            final_T,
-            n_contrib,
-            bg_color,
-            out_color,
-            out_others);
-        break;
+        __RENDER_CALL_(1)
+        __RENDER_CALL_(3)
+        __RENDER_CALL_(4)
+        __RENDER_CALL_(8)
+        __RENDER_CALL_(16)
+        __RENDER_CALL_(32)
+        __RENDER_CALL_(64)
+        __RENDER_CALL_(128)
     default:
         break; // Should never reach here - Python pads to supported sizes
     }
+#undef __RENDER_CALL_
 }
 
 void FORWARD::preprocess(int P, int D, int M,
@@ -610,177 +542,48 @@ void FORWARD::preprocess(int P, int D, int M,
                          uint32_t *tiles_touched,
                          bool prefiltered)
 {
+#define __PREPROCESS_CALL_(N)                                                  \
+    case N:                                                                    \
+        preprocessCUDA<N><<<(P + 255) / 256, 256>>>(                           \
+            P, D, M,                                                           \
+            means3D,                                                           \
+            scales,                                                            \
+            scale_modifier,                                                    \
+            rotations,                                                         \
+            opacities,                                                         \
+            shs,                                                               \
+            clamped,                                                           \
+            transMat_precomp,                                                  \
+            colors_precomp,                                                    \
+            viewmatrix,                                                        \
+            projmatrix,                                                        \
+            cam_pos,                                                           \
+            W, H,                                                              \
+            tan_fovx, tan_fovy,                                                \
+            focal_x, focal_y,                                                  \
+            radii,                                                             \
+            means2D,                                                           \
+            depths,                                                            \
+            transMats,                                                         \
+            rgb,                                                               \
+            normal_opacity,                                                    \
+            grid,                                                              \
+            tiles_touched,                                                     \
+            prefiltered);                                                      \
+        break;
+
     switch (num_color_feat_channels)
     {
-    case 1:
-        preprocessCUDA<1><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            means3D,
-            scales,
-            scale_modifier,
-            rotations,
-            opacities,
-            shs,
-            clamped,
-            transMat_precomp,
-            colors_precomp,
-            viewmatrix,
-            projmatrix,
-            cam_pos,
-            W, H,
-            tan_fovx, tan_fovy,
-            focal_x, focal_y,
-            radii,
-            means2D,
-            depths,
-            transMats,
-            rgb,
-            normal_opacity,
-            grid,
-            tiles_touched,
-            prefiltered);
-        break;
-    case 3:
-        preprocessCUDA<3><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            means3D,
-            scales,
-            scale_modifier,
-            rotations,
-            opacities,
-            shs,
-            clamped,
-            transMat_precomp,
-            colors_precomp,
-            viewmatrix,
-            projmatrix,
-            cam_pos,
-            W, H,
-            tan_fovx, tan_fovy,
-            focal_x, focal_y,
-            radii,
-            means2D,
-            depths,
-            transMats,
-            rgb,
-            normal_opacity,
-            grid,
-            tiles_touched,
-            prefiltered);
-        break;
-    case 4:
-        preprocessCUDA<4><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            means3D,
-            scales,
-            scale_modifier,
-            rotations,
-            opacities,
-            shs,
-            clamped,
-            transMat_precomp,
-            colors_precomp,
-            viewmatrix,
-            projmatrix,
-            cam_pos,
-            W, H,
-            tan_fovx, tan_fovy,
-            focal_x, focal_y,
-            radii,
-            means2D,
-            depths,
-            transMats,
-            rgb,
-            normal_opacity,
-            grid,
-            tiles_touched,
-            prefiltered);
-        break;
-    case 8:
-        preprocessCUDA<8><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            means3D,
-            scales,
-            scale_modifier,
-            rotations,
-            opacities,
-            shs,
-            clamped,
-            transMat_precomp,
-            colors_precomp,
-            viewmatrix,
-            projmatrix,
-            cam_pos,
-            W, H,
-            tan_fovx, tan_fovy,
-            focal_x, focal_y,
-            radii,
-            means2D,
-            depths,
-            transMats,
-            rgb,
-            normal_opacity,
-            grid,
-            tiles_touched,
-            prefiltered);
-        break;
-    case 16:
-        preprocessCUDA<16><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            means3D,
-            scales,
-            scale_modifier,
-            rotations,
-            opacities,
-            shs,
-            clamped,
-            transMat_precomp,
-            colors_precomp,
-            viewmatrix,
-            projmatrix,
-            cam_pos,
-            W, H,
-            tan_fovx, tan_fovy,
-            focal_x, focal_y,
-            radii,
-            means2D,
-            depths,
-            transMats,
-            rgb,
-            normal_opacity,
-            grid,
-            tiles_touched,
-            prefiltered);
-        break;
-    case 32:
-        preprocessCUDA<32><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            means3D,
-            scales,
-            scale_modifier,
-            rotations,
-            opacities,
-            shs,
-            clamped,
-            transMat_precomp,
-            colors_precomp,
-            viewmatrix,
-            projmatrix,
-            cam_pos,
-            W, H,
-            tan_fovx, tan_fovy,
-            focal_x, focal_y,
-            radii,
-            means2D,
-            depths,
-            transMats,
-            rgb,
-            normal_opacity,
-            grid,
-            tiles_touched,
-            prefiltered);
-        break;
+        __PREPROCESS_CALL_(1)
+        __PREPROCESS_CALL_(3)
+        __PREPROCESS_CALL_(4)
+        __PREPROCESS_CALL_(8)
+        __PREPROCESS_CALL_(16)
+        __PREPROCESS_CALL_(32)
+        __PREPROCESS_CALL_(64)
+        __PREPROCESS_CALL_(128)
     default:
         break; // Should never reach here - Python pads to supported sizes
     }
+#undef __PREPROCESS_CALL_
 }

@@ -66,28 +66,28 @@ __forceinline__ __device__ float ndc2Pix(float v, int S)
 	return ((v + 1.0) * S - 1.0) * 0.5;
 }
 
-__forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)
+__forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid, int block_x, int block_y)
 {
 	rect_min = {
-		(unsigned int)max(0, min((int)grid.x, (int)((p.x - max_radius) / BLOCK_X))),
-		(unsigned int)max(0, min((int)grid.y, (int)((p.y - max_radius) / BLOCK_Y)))
+		(unsigned int)max(0, min((int)grid.x, (int)((p.x - max_radius) / block_x))),
+		(unsigned int)max(0, min((int)grid.y, (int)((p.y - max_radius) / block_y)))
 	};
 	rect_max = {
-		(unsigned int)max(0, min((int)grid.x, (int)((p.x + max_radius + BLOCK_X - 1) / BLOCK_X))),
-		(unsigned int)max(0, min((int)grid.y, (int)((p.y + max_radius + BLOCK_Y - 1) / BLOCK_Y)))
+		(unsigned int)max(0, min((int)grid.x, (int)((p.x + max_radius + block_x - 1) / block_x))),
+		(unsigned int)max(0, min((int)grid.y, (int)((p.y + max_radius + block_y - 1) / block_y)))
 	};
 }
 
 // Asymmetric bounding box: separate x/y radii for elongated surfels
-__forceinline__ __device__ void getRect(const float2 p, int radius_x, int radius_y, uint2& rect_min, uint2& rect_max, dim3 grid)
+__forceinline__ __device__ void getRect(const float2 p, int radius_x, int radius_y, uint2& rect_min, uint2& rect_max, dim3 grid, int block_x, int block_y)
 {
 	rect_min = {
-		(unsigned int)max(0, min((int)grid.x, (int)((p.x - radius_x) / BLOCK_X))),
-		(unsigned int)max(0, min((int)grid.y, (int)((p.y - radius_y) / BLOCK_Y)))
+		(unsigned int)max(0, min((int)grid.x, (int)((p.x - radius_x) / block_x))),
+		(unsigned int)max(0, min((int)grid.y, (int)((p.y - radius_y) / block_y)))
 	};
 	rect_max = {
-		(unsigned int)max(0, min((int)grid.x, (int)((p.x + radius_x + BLOCK_X - 1) / BLOCK_X))),
-		(unsigned int)max(0, min((int)grid.y, (int)((p.y + radius_y + BLOCK_Y - 1) / BLOCK_Y)))
+		(unsigned int)max(0, min((int)grid.x, (int)((p.x + radius_x + block_x - 1) / block_x))),
+		(unsigned int)max(0, min((int)grid.y, (int)((p.y + radius_y + block_y - 1) / block_y)))
 	};
 }
 

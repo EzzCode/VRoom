@@ -141,7 +141,7 @@ __device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::
 
 // Backward version of the rendering procedure.
 template <uint32_t C>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+__global__ void __launch_bounds__(256)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -163,11 +163,15 @@ renderCUDA(
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors)
 {
+	constexpr int block_x = (C <= 32) ? 16 : 8;
+	constexpr int block_y = (C <= 32) ? 16 : 8;
+	constexpr int block_size = block_x * block_y;
+
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
-	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
-	const uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
-	const uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	const uint32_t horizontal_blocks = (W + block_x - 1) / block_x;
+	const uint2 pix_min = { block.group_index().x * block_x, block.group_index().y * block_y };
+	const uint2 pix_max = { min(pix_min.x + block_x, W), min(pix_min.y + block_y , H) };
 	const uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
 	const uint32_t pix_id = W * pix.y + pix.x;
 	const float2 pixf = {(float)pix.x, (float)pix.y};
@@ -175,19 +179,19 @@ renderCUDA(
 	const bool inside = pix.x < W&& pix.y < H;
 	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 
-	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	const int rounds = ((range.y - range.x + block_size - 1) / block_size);
 
 	bool done = !inside;
 	int toDo = range.y - range.x;
 
-	__shared__ int collected_id[BLOCK_SIZE];
-	__shared__ float2 collected_xy[BLOCK_SIZE];
-	__shared__ float4 collected_normal_opacity[BLOCK_SIZE];
-	__shared__ float collected_colors[C * BLOCK_SIZE];
-	__shared__ float3 collected_Tu[BLOCK_SIZE];
-	__shared__ float3 collected_Tv[BLOCK_SIZE];
-	__shared__ float3 collected_Tw[BLOCK_SIZE];
-	// __shared__ float collected_depths[BLOCK_SIZE];
+	__shared__ int collected_id[block_size];
+	__shared__ float2 collected_xy[block_size];
+	__shared__ float4 collected_normal_opacity[block_size];
+	__shared__ float collected_colors[C * block_size];
+	__shared__ float3 collected_Tu[block_size];
+	__shared__ float3 collected_Tv[block_size];
+	__shared__ float3 collected_Tw[block_size];
+	// __shared__ float collected_depths[block_size];
 
 	// In the forward, we stored the final value for T, the
 	// product of all (1 - alpha) factors. 
@@ -253,12 +257,12 @@ renderCUDA(
 	const float ddely_dy = 0.5 * H;
 
 	// Traverse all Gaussians
-	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	for (int i = 0; i < rounds; i++, toDo -= block_size)
 	{
 		// Load auxiliary data into shared memory, start in the BACK
 		// and load them in revers order.
 		block.sync();
-		const int progress = i * BLOCK_SIZE + block.thread_rank();
+		const int progress = i * block_size + block.thread_rank();
 		if (range.x + progress < range.y)
 		{
 			const int coll_id = point_list[range.y - progress - 1];
@@ -269,13 +273,13 @@ renderCUDA(
 			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
 			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
 			for (int i = 0; i < C; i++)
-				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
-				// collected_depths[block.thread_rank()] = depths[coll_id];
+				collected_colors[i * block_size + block.thread_rank()] = colors[coll_id * C + i];
+			// collected_depths[block.thread_rank()] = depths[coll_id];
 		}
 		block.sync();
 
 		// Iterate over Gaussians
-		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
+		for (int j = 0; j < min(block_size, toDo); j++)
 		{
 			// Keep track of current Gaussian ID. Skip, if this one
 			// is behind the last contributor for this pixel.
@@ -348,7 +352,7 @@ renderCUDA(
 				float dL_dalpha = 0.0f;
 				for (int ch = 0; ch < C; ch++)
 				{
-					const float c = collected_colors[ch * BLOCK_SIZE + j];
+					const float c = collected_colors[ch * block_size + j];
 					accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
 					last_color[ch] = c;
 					const float dL_dchannel = dL_dpixel[ch];
@@ -684,172 +688,49 @@ void BACKWARD::preprocess(
     glm::vec2 *dL_dscales,
     glm::vec4 *dL_drots)
 {
+#define __PREPROCESS_CALL_(N)                                                  \
+    case N:                                                                    \
+        preprocessCUDA<N><<<(P + 255) / 256, 256>>>(                           \
+            P, D, M,                                                           \
+            (float3 *)means3D,                                                 \
+            transMats,                                                         \
+            radii,                                                             \
+            shs,                                                               \
+            clamped,                                                           \
+            (glm::vec2 *)scales,                                               \
+            (glm::vec4 *)rotations,                                            \
+            scale_modifier,                                                    \
+            viewmatrix,                                                        \
+            projmatrix,                                                        \
+            focal_x,                                                           \
+            focal_y,                                                           \
+            tan_fovx,                                                          \
+            tan_fovy,                                                          \
+            campos,                                                            \
+            dL_dtransMats,                                                     \
+            dL_dnormal3Ds,                                                     \
+            dL_dcolors,                                                        \
+            dL_dshs,                                                           \
+            dL_dmean2Ds,                                                       \
+            dL_dmean3Ds,                                                       \
+            dL_dscales,                                                        \
+            dL_drots);                                                         \
+        break;
+
     switch (num_color_feat_channels)
     {
-    case 1:
-        preprocessCUDA<1><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            (float3 *)means3D,
-            transMats,
-            radii,
-            shs,
-            clamped,
-            (glm::vec2 *)scales,
-            (glm::vec4 *)rotations,
-            scale_modifier,
-            viewmatrix,
-            projmatrix,
-            focal_x,
-            focal_y,
-            tan_fovx,
-            tan_fovy,
-            campos,
-            dL_dtransMats,
-            dL_dnormal3Ds,
-            dL_dcolors,
-            dL_dshs,
-            dL_dmean2Ds,
-            dL_dmean3Ds,
-            dL_dscales,
-            dL_drots);
-        break;
-    case 3:
-        preprocessCUDA<3><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            (float3 *)means3D,
-            transMats,
-            radii,
-            shs,
-            clamped,
-            (glm::vec2 *)scales,
-            (glm::vec4 *)rotations,
-            scale_modifier,
-            viewmatrix,
-            projmatrix,
-            focal_x,
-            focal_y,
-            tan_fovx,
-            tan_fovy,
-            campos,
-            dL_dtransMats,
-            dL_dnormal3Ds,
-            dL_dcolors,
-            dL_dshs,
-            dL_dmean2Ds,
-            dL_dmean3Ds,
-            dL_dscales,
-            dL_drots);
-        break;
-    case 4:
-        preprocessCUDA<4><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            (float3 *)means3D,
-            transMats,
-            radii,
-            shs,
-            clamped,
-            (glm::vec2 *)scales,
-            (glm::vec4 *)rotations,
-            scale_modifier,
-            viewmatrix,
-            projmatrix,
-            focal_x,
-            focal_y,
-            tan_fovx,
-            tan_fovy,
-            campos,
-            dL_dtransMats,
-            dL_dnormal3Ds,
-            dL_dcolors,
-            dL_dshs,
-            dL_dmean2Ds,
-            dL_dmean3Ds,
-            dL_dscales,
-            dL_drots);
-        break;
-    case 8:
-        preprocessCUDA<8><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            (float3 *)means3D,
-            transMats,
-            radii,
-            shs,
-            clamped,
-            (glm::vec2 *)scales,
-            (glm::vec4 *)rotations,
-            scale_modifier,
-            viewmatrix,
-            projmatrix,
-            focal_x,
-            focal_y,
-            tan_fovx,
-            tan_fovy,
-            campos,
-            dL_dtransMats,
-            dL_dnormal3Ds,
-            dL_dcolors,
-            dL_dshs,
-            dL_dmean2Ds,
-            dL_dmean3Ds,
-            dL_dscales,
-            dL_drots);
-        break;
-    case 16:
-        preprocessCUDA<16><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            (float3 *)means3D,
-            transMats,
-            radii,
-            shs,
-            clamped,
-            (glm::vec2 *)scales,
-            (glm::vec4 *)rotations,
-            scale_modifier,
-            viewmatrix,
-            projmatrix,
-            focal_x,
-            focal_y,
-            tan_fovx,
-            tan_fovy,
-            campos,
-            dL_dtransMats,
-            dL_dnormal3Ds,
-            dL_dcolors,
-            dL_dshs,
-            dL_dmean2Ds,
-            dL_dmean3Ds,
-            dL_dscales,
-            dL_drots);
-        break;
-    case 32:
-        preprocessCUDA<32><<<(P + 255) / 256, 256>>>(
-            P, D, M,
-            (float3 *)means3D,
-            transMats,
-            radii,
-            shs,
-            clamped,
-            (glm::vec2 *)scales,
-            (glm::vec4 *)rotations,
-            scale_modifier,
-            viewmatrix,
-            projmatrix,
-            focal_x,
-            focal_y,
-            tan_fovx,
-            tan_fovy,
-            campos,
-            dL_dtransMats,
-            dL_dnormal3Ds,
-            dL_dcolors,
-            dL_dshs,
-            dL_dmean2Ds,
-            dL_dmean3Ds,
-            dL_dscales,
-            dL_drots);
+        __PREPROCESS_CALL_(1)
+        __PREPROCESS_CALL_(3)
+        __PREPROCESS_CALL_(4)
+        __PREPROCESS_CALL_(8)
+        __PREPROCESS_CALL_(16)
+        __PREPROCESS_CALL_(32)
+        __PREPROCESS_CALL_(64)
+        __PREPROCESS_CALL_(128)
     default:
         break; // Should never reach here — Python pads to supported sizes
     }
+#undef __PREPROCESS_CALL_
 }
 
 void BACKWARD::render(
@@ -875,141 +756,42 @@ void BACKWARD::render(
     float *dL_dopacity,
     float *dL_dcolors)
 {
+#define __RENDER_CALL_(N)                                                      \
+    case N:                                                                    \
+        renderCUDA<N><<<grid, block>>>(                                        \
+            ranges,                                                            \
+            point_list,                                                        \
+            W, H,                                                              \
+            focal_x, focal_y,                                                  \
+            bg_color,                                                          \
+            means2D,                                                           \
+            normal_opacity,                                                    \
+            transMats,                                                         \
+            colors,                                                            \
+            depths,                                                            \
+            final_Ts,                                                          \
+            n_contrib,                                                         \
+            dL_dpixels,                                                        \
+            dL_depths,                                                         \
+            dL_dtransMat,                                                      \
+            dL_dmean2D,                                                        \
+            dL_dnormal3D,                                                      \
+            dL_dopacity,                                                       \
+            dL_dcolors);                                                       \
+        break;
+
     switch (num_color_feat_channels)
     {
-    case 1:
-        renderCUDA<1><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            bg_color,
-            means2D,
-            normal_opacity,
-            transMats,
-            colors,
-            depths,
-            final_Ts,
-            n_contrib,
-            dL_dpixels,
-            dL_depths,
-            dL_dtransMat,
-            dL_dmean2D,
-            dL_dnormal3D,
-            dL_dopacity,
-            dL_dcolors);
-        break;
-    case 3:
-        renderCUDA<3><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            bg_color,
-            means2D,
-            normal_opacity,
-            transMats,
-            colors,
-            depths,
-            final_Ts,
-            n_contrib,
-            dL_dpixels,
-            dL_depths,
-            dL_dtransMat,
-            dL_dmean2D,
-            dL_dnormal3D,
-            dL_dopacity,
-            dL_dcolors);
-        break;
-    case 4:
-        renderCUDA<4><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            bg_color,
-            means2D,
-            normal_opacity,
-            transMats,
-            colors,
-            depths,
-            final_Ts,
-            n_contrib,
-            dL_dpixels,
-            dL_depths,
-            dL_dtransMat,
-            dL_dmean2D,
-            dL_dnormal3D,
-            dL_dopacity,
-            dL_dcolors);
-        break;
-    case 8:
-        renderCUDA<8><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            bg_color,
-            means2D,
-            normal_opacity,
-            transMats,
-            colors,
-            depths,
-            final_Ts,
-            n_contrib,
-            dL_dpixels,
-            dL_depths,
-            dL_dtransMat,
-            dL_dmean2D,
-            dL_dnormal3D,
-            dL_dopacity,
-            dL_dcolors);
-        break;
-    case 16:
-        renderCUDA<16><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            bg_color,
-            means2D,
-            normal_opacity,
-            transMats,
-            colors,
-            depths,
-            final_Ts,
-            n_contrib,
-            dL_dpixels,
-            dL_depths,
-            dL_dtransMat,
-            dL_dmean2D,
-            dL_dnormal3D,
-            dL_dopacity,
-            dL_dcolors);
-        break;
-    case 32:
-        renderCUDA<32><<<grid, block>>>(
-            ranges,
-            point_list,
-            W, H,
-            focal_x, focal_y,
-            bg_color,
-            means2D,
-            normal_opacity,
-            transMats,
-            colors,
-            depths,
-            final_Ts,
-            n_contrib,
-            dL_dpixels,
-            dL_depths,
-            dL_dtransMat,
-            dL_dmean2D,
-            dL_dnormal3D,
-            dL_dopacity,
-            dL_dcolors);
-        break;
+        __RENDER_CALL_(1)
+        __RENDER_CALL_(3)
+        __RENDER_CALL_(4)
+        __RENDER_CALL_(8)
+        __RENDER_CALL_(16)
+        __RENDER_CALL_(32)
+        __RENDER_CALL_(64)
+        __RENDER_CALL_(128)
     default:
         break; // Should never reach here — Python pads to supported sizes
     }
+#undef __RENDER_CALL_
 }

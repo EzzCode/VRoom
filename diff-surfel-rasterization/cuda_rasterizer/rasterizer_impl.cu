@@ -66,7 +66,8 @@ __global__ void checkFrustum(int P,
 
 // Generates one key/value pair for all Gaussian / tile overlaps. 
 // Run once per Gaussian (1:N mapping).
-__global__ void duplicateWithKeys(
+template<int C>
+__global__ void duplicateWithKeysCUDA(
 	int P,
 	const float2* points_xy,
 	const float* depths,
@@ -87,7 +88,9 @@ __global__ void duplicateWithKeys(
 		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
 		uint2 rect_min, rect_max;
 
-		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+		constexpr int block_x = (C <= 32) ? 16 : 8;
+		constexpr int block_y = (C <= 32) ? 16 : 8;
+		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid, block_x, block_y);
 
 		// For each tile that the bounding rect overlaps, emit a 
 		// key/value pair. The key is |  tile ID  |      depth      |,
@@ -228,8 +231,10 @@ int CudaRasterizer::Rasterizer::forward(
 		radii = geomState.internal_radii;
 	}
 
-	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
-	dim3 block(BLOCK_X, BLOCK_Y, 1);
+	const int block_x = (num_color_feat_channels <= 32) ? 16 : 8;
+	const int block_y = (num_color_feat_channels <= 32) ? 16 : 8;
+	dim3 tile_grid((width + block_x - 1) / block_x, (height + block_y - 1) / block_y, 1);
+	dim3 block(block_x, block_y, 1);
 
 	// Dynamically resize image-based auxiliary buffers during training
 	size_t img_chunk_size = required<ImageState>(width * height);
@@ -290,15 +295,27 @@ int CudaRasterizer::Rasterizer::forward(
 	{
 		// For each instance to be rendered, produce adequate [ tile | depth ] key 
 		// and corresponding duplicated Gaussian indices to be sorted
-		duplicateWithKeys <<< (P + 255) / 256, 256 >>> (
-			P,
-			geomState.means2D,
-			geomState.depths,
-			geomState.point_offsets,
-			binning.keys_unsorted,
-			binning.values_unsorted,
-			radii,
-			tile_grid);
+#define __GS_DUPLICATE_CALL_(N)                                                   \
+		case N:                                                                   \
+			duplicateWithKeysCUDA<N> <<< (P + 255) / 256, 256 >>> (               \
+				P, geomState.means2D, geomState.depths, geomState.point_offsets,  \
+				binning.keys_unsorted, binning.values_unsorted, radii, tile_grid);\
+			break;
+
+		switch (num_color_feat_channels)
+		{
+		__GS_DUPLICATE_CALL_(1)
+		__GS_DUPLICATE_CALL_(3)
+		__GS_DUPLICATE_CALL_(4)
+		__GS_DUPLICATE_CALL_(8)
+		__GS_DUPLICATE_CALL_(16)
+		__GS_DUPLICATE_CALL_(32)
+		__GS_DUPLICATE_CALL_(64)
+		__GS_DUPLICATE_CALL_(128)
+		default:
+			throw std::runtime_error("Unsupported channel count!");
+		}
+#undef __GS_DUPLICATE_CALL_
 		CHECK_CUDA(, debug)
 
 		int bit = getHigherMsb(tile_grid.x * tile_grid.y);
@@ -407,8 +424,10 @@ void CudaRasterizer::Rasterizer::backward(
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
-	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
-	const dim3 block(BLOCK_X, BLOCK_Y, 1);
+	const int block_x = (num_color_feat_channels <= 32) ? 16 : 8;
+	const int block_y = (num_color_feat_channels <= 32) ? 16 : 8;
+	const dim3 tile_grid((width + block_x - 1) / block_x, (height + block_y - 1) / block_y, 1);
+	const dim3 block(block_x, block_y, 1);
 
 	// Compute loss gradients w.r.t. 2D mean position, conic matrix,
 	// opacity and RGB of Gaussians from per-pixel loss gradients.
