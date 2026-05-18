@@ -163,6 +163,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float tan_fovx, const float tan_fovy,
 	const float focal_x, const float focal_y,
 	int* radii,
+	uint32_t* asymmetric_radii,
 	float2* points_xy_image,
 	float* depths,
 	float* transMats,
@@ -179,6 +180,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// Initialize radius and touched tiles to 0. If this isn't changed,
 	// this Gaussian will not be processed further.
 	radii[idx] = 0;
+	asymmetric_radii[idx] = 0;
 	tiles_touched[idx] = 0;
 
 	// Perform near culling, quit if outside.
@@ -223,17 +225,21 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// Compute center and radius
 	float2 point_image;
 	float radius;
+	int radius_x = 0;
+	int radius_y = 0;
 	{
 		float2 extent;
 		bool ok = compute_aabb(T, cutoff, point_image, extent);
 		if (!ok) return;
-		radius = ceil(max(max(extent.x, extent.y), cutoff * FilterSize));
+		radius_x = min(2048, max(1, (int)ceil(max(extent.x, cutoff * FilterSize))));
+		radius_y = min(2048, max(1, (int)ceil(max(extent.y, cutoff * FilterSize))));
+		radius = max(radius_x, radius_y);
 	}
 
 	constexpr int block_x = 16;
 	constexpr int block_y = 16;
 	uint2 rect_min, rect_max;
-	getRect(point_image, (int)radius, rect_min, rect_max, grid, block_x, block_y);
+	getRect(point_image, radius_x, radius_y, rect_min, rect_max, grid, block_x, block_y);
 	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
 		return;
 
@@ -247,6 +253,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	depths[idx] = p_view.z;
 	radii[idx] = (int)radius;
+	asymmetric_radii[idx] = radius_x | (radius_y << 16);
 	points_xy_image[idx] = point_image;
 	normal_opacity[idx] = {normal.x, normal.y, normal.z, opacities[idx]};
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
@@ -351,6 +358,13 @@ renderCUDA(
 		// Iterate over current batch
 		for (int j = 0; j < min(block_size, toDo); j++)
 		{
+			// Cooperative block-level early exit check every 32 Gaussians
+			if (j % 32 == 0)
+			{
+				if (__syncthreads_count(done) == block_size)
+					break;
+			}
+
 			// Warp-level early exit: if all threads in this warp are done, skip
 			if (warp.all(done))
 				continue;
@@ -533,6 +547,7 @@ void FORWARD::preprocess(int P, int D, int M,
                          int num_color_feat_channels,
                          const float tan_fovx, const float tan_fovy,
                          int *radii,
+                         uint32_t *asymmetric_radii,
                          float2 *means2D,
                          float *depths,
                          float *transMats,
@@ -562,6 +577,7 @@ void FORWARD::preprocess(int P, int D, int M,
             tan_fovx, tan_fovy,                                                \
             focal_x, focal_y,                                                  \
             radii,                                                             \
+            asymmetric_radii,                                                  \
             means2D,                                                           \
             depths,                                                            \
             transMats,                                                         \

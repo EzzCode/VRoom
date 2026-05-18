@@ -74,7 +74,7 @@ __global__ void duplicateWithKeysCUDA(
 	const uint32_t* offsets,
 	uint64_t* gaussian_keys_unsorted,
 	uint32_t* gaussian_values_unsorted,
-	int* radii,
+	uint32_t* asymmetric_radii,
 	dim3 grid)
 {
 	auto idx = cg::this_grid().thread_rank();
@@ -82,7 +82,7 @@ __global__ void duplicateWithKeysCUDA(
 		return;
 
 	// Generate no key/value pair for invisible Gaussians
-	if (radii[idx] > 0)
+	if (asymmetric_radii[idx] > 0)
 	{
 		// Find this Gaussian's offset in buffer for writing keys/values.
 		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
@@ -90,7 +90,10 @@ __global__ void duplicateWithKeysCUDA(
 
 		constexpr int block_x = 16;
 		constexpr int block_y = 16;
-		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid, block_x, block_y);
+		uint32_t packed = asymmetric_radii[idx];
+		int radius_x = packed & 0xFFFF;
+		int radius_y = packed >> 16;
+		getRect(points_xy[idx], radius_x, radius_y, rect_min, rect_max, grid, block_x, block_y);
 
 		// For each tile that the bounding rect overlaps, emit a 
 		// key/value pair. The key is |  tile ID  |      depth      |,
@@ -176,6 +179,7 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
 	obtain(chunk, geom.scanning_space, geom.scan_size, 128);
 	obtain(chunk, geom.point_offsets, P, 128);
+	obtain(chunk, geom.asymmetric_radii, P, 128);
 	return geom;
 }
 
@@ -265,6 +269,7 @@ int CudaRasterizer::Rasterizer::forward(
 		num_color_feat_channels,
 		tan_fovx, tan_fovy,
 		radii,
+		geomState.asymmetric_radii,
 		geomState.means2D,
 		geomState.depths,
 		geomState.transMat,
@@ -299,7 +304,7 @@ int CudaRasterizer::Rasterizer::forward(
 		case N:                                                                   \
 			duplicateWithKeysCUDA<N> <<< (P + 255) / 256, 256 >>> (               \
 				P, geomState.means2D, geomState.depths, geomState.point_offsets,  \
-				binning.keys_unsorted, binning.values_unsorted, radii, tile_grid);\
+				binning.keys_unsorted, binning.values_unsorted, geomState.asymmetric_radii, tile_grid);\
 			break;
 
 		switch (num_color_feat_channels)

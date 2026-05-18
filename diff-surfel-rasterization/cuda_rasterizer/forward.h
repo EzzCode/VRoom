@@ -38,6 +38,7 @@ namespace FORWARD
 		int num_color_feat_channels,
 		const float tan_fovx, float tan_fovy,
 		int* radii,
+		uint32_t* asymmetric_radii,
 		float2* points_xy_image,
 		float* depths,
 		// float* isovals,
