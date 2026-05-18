@@ -236,7 +236,7 @@ import math
 import torch.nn.functional as F
 
 # Supported template sizes for feature chunking
-_SUPPORTED_CHANNELS = [1, 3, 4, 8, 16, 32, 64, 128]
+_SUPPORTED_CHANNELS = [1, 3, 4, 8, 16, 32]
 
 def _next_supported(n) -> int:
     """Find the smallest supported channel count >= n. 

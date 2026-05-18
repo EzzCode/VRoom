@@ -163,10 +163,11 @@ renderCUDA(
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors)
 {
-	constexpr int block_x = (C <= 32) ? 16 : 8;
-	constexpr int block_y = (C <= 32) ? 16 : 8;
+	constexpr int block_x = 16;
+	constexpr int block_y = 16;
 	constexpr int block_size = block_x * block_y;
-	constexpr int color_stride = (C > 32) ? (block_size + 1) : block_size;
+	constexpr int cache_size = (C <= 32) ? 256 : ((C <= 64) ? 128 : 64);
+	constexpr int color_stride = (C > 32) ? (cache_size + 1) : cache_size;
 
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -180,18 +181,18 @@ renderCUDA(
 	const bool inside = pix.x < W&& pix.y < H;
 	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 
-	const int rounds = ((range.y - range.x + block_size - 1) / block_size);
+	const int rounds = ((range.y - range.x + cache_size - 1) / cache_size);
 
 	bool done = !inside;
 	int toDo = range.y - range.x;
 
-	__shared__ int collected_id[block_size];
-	__shared__ float2 collected_xy[block_size];
-	__shared__ float4 collected_normal_opacity[block_size];
+	__shared__ int collected_id[cache_size];
+	__shared__ float2 collected_xy[cache_size];
+	__shared__ float4 collected_normal_opacity[cache_size];
 	__shared__ float collected_colors[C * color_stride];
-	__shared__ float3 collected_Tu[block_size];
-	__shared__ float3 collected_Tv[block_size];
-	__shared__ float3 collected_Tw[block_size];
+	__shared__ float3 collected_Tu[cache_size];
+	__shared__ float3 collected_Tv[cache_size];
+	__shared__ float3 collected_Tw[cache_size];
 	// __shared__ float collected_depths[block_size];
 
 	// In the forward, we stored the final value for T, the
@@ -258,29 +259,41 @@ renderCUDA(
 	const float ddely_dy = 0.5 * H;
 
 	// Traverse all Gaussians
-	for (int i = 0; i < rounds; i++, toDo -= block_size)
+	for (int i = 0; i < rounds; i++, toDo -= cache_size)
 	{
 		// Load auxiliary data into shared memory, start in the BACK
-		// and load them in revers order.
+		// and load them in reverse order.
 		block.sync();
-		const int progress = i * block_size + block.thread_rank();
-		if (range.x + progress < range.y)
+		const int progress = i * cache_size + block.thread_rank();
+		if (block.thread_rank() < cache_size)
 		{
-			const int coll_id = point_list[range.y - progress - 1];
-			collected_id[block.thread_rank()] = coll_id;
-			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
-			collected_normal_opacity[block.thread_rank()] = normal_opacity[coll_id];
-			collected_Tu[block.thread_rank()] = {transMats[9 * coll_id+0], transMats[9 * coll_id+1], transMats[9 * coll_id+2]};
-			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
-			collected_Tw[block.thread_rank()] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
-			for (int i = 0; i < C; i++)
-				collected_colors[i * color_stride + block.thread_rank()] = colors[coll_id * C + i];
-			// collected_depths[block.thread_rank()] = depths[coll_id];
+			if (range.x + progress < range.y)
+			{
+				const int coll_id = point_list[range.y - progress - 1];
+				collected_id[block.thread_rank()] = coll_id;
+				collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+				collected_normal_opacity[block.thread_rank()] = normal_opacity[coll_id];
+				collected_Tu[block.thread_rank()] = {transMats[9 * coll_id+0], transMats[9 * coll_id+1], transMats[9 * coll_id+2]};
+				collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
+				collected_Tw[block.thread_rank()] = {transMats[9 * coll_id+6], transMats[9 * coll_id+7], transMats[9 * coll_id+8]};
+			}
+		}
+
+		// Cooperatively load colors using all threads!
+		for (int load_idx = block.thread_rank(); load_idx < C * cache_size; load_idx += block_size)
+		{
+			int g_idx = load_idx % cache_size;
+			int ch_idx = load_idx / cache_size;
+			if (range.x + i * cache_size + g_idx < range.y)
+			{
+				const int coll_id = point_list[range.y - (i * cache_size + g_idx) - 1];
+				collected_colors[ch_idx * color_stride + g_idx] = colors[coll_id * C + ch_idx];
+			}
 		}
 		block.sync();
 
 		// Iterate over Gaussians
-		for (int j = 0; j < min(block_size, toDo); j++)
+		for (int j = 0; j < min(cache_size, toDo); j++)
 		{
 			// Keep track of current Gaussian ID. Skip, if this one
 			// is behind the last contributor for this pixel.

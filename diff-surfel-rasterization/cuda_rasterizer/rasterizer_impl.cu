@@ -88,8 +88,8 @@ __global__ void duplicateWithKeysCUDA(
 		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
 		uint2 rect_min, rect_max;
 
-		constexpr int block_x = (C <= 32) ? 16 : 8;
-		constexpr int block_y = (C <= 32) ? 16 : 8;
+		constexpr int block_x = 16;
+		constexpr int block_y = 16;
 		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid, block_x, block_y);
 
 		// For each tile that the bounding rect overlaps, emit a 
@@ -231,8 +231,8 @@ int CudaRasterizer::Rasterizer::forward(
 		radii = geomState.internal_radii;
 	}
 
-	const int block_x = (num_color_feat_channels <= 32) ? 16 : 8;
-	const int block_y = (num_color_feat_channels <= 32) ? 16 : 8;
+	const int block_x = 16;
+	const int block_y = 16;
 	dim3 tile_grid((width + block_x - 1) / block_x, (height + block_y - 1) / block_y, 1);
 	dim3 block(block_x, block_y, 1);
 
@@ -424,8 +424,8 @@ void CudaRasterizer::Rasterizer::backward(
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
 
-	const int block_x = (num_color_feat_channels <= 32) ? 16 : 8;
-	const int block_y = (num_color_feat_channels <= 32) ? 16 : 8;
+	const int block_x = 16;
+	const int block_y = 16;
 	const dim3 tile_grid((width + block_x - 1) / block_x, (height + block_y - 1) / block_y, 1);
 	const dim3 block(block_x, block_y, 1);
 

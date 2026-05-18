@@ -230,8 +230,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		radius = ceil(max(max(extent.x, extent.y), cutoff * FilterSize));
 	}
 
-	constexpr int block_x = (C <= 32) ? 16 : 8;
-	constexpr int block_y = (C <= 32) ? 16 : 8;
+	constexpr int block_x = 16;
+	constexpr int block_y = 16;
 	uint2 rect_min, rect_max;
 	getRect(point_image, (int)radius, rect_min, rect_max, grid, block_x, block_y);
 	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
@@ -273,8 +273,8 @@ renderCUDA(
 	float* __restrict__ out_color,
 	float* __restrict__ out_others)
 {
-	constexpr int block_x = (CHANNELS <= 32) ? 16 : 8;
-	constexpr int block_y = (CHANNELS <= 32) ? 16 : 8;
+	constexpr int block_x = 16;
+	constexpr int block_y = 16;
 	constexpr int block_size = block_x * block_y;
 
 	// Identify current tile and associated min/max pixel range.
