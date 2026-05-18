@@ -43,6 +43,56 @@ def rasterize_gaussians(
         raster_settings,
     )
 
+def rasterize_gaussians_first_pass(
+    means3D,
+    means2D,
+    sh,
+    colors_precomp,
+    opacities,
+    scales,
+    rotations,
+    cov3Ds_precomp,
+    raster_settings,
+):
+    return _RasterizeGaussiansFirstPass.apply(
+        means3D,
+        means2D,
+        sh,
+        colors_precomp,
+        opacities,
+        scales,
+        rotations,
+        cov3Ds_precomp,
+        raster_settings,
+    )
+
+def rasterize_gaussians_subsequent(
+    means3D,
+    colors_precomp,
+    opacities,
+    geomBuffer,
+    point_list,
+    imgBuffer,
+    radii,
+    scales,
+    rotations,
+    cov3Ds_precomp,
+    raster_settings,
+):
+    return _RasterizeGaussiansSubsequent.apply(
+        means3D,
+        colors_precomp,
+        opacities,
+        geomBuffer,
+        point_list,
+        imgBuffer,
+        radii,
+        scales,
+        rotations,
+        cov3Ds_precomp,
+        raster_settings,
+    )
+
 class _RasterizeGaussians(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -165,6 +215,209 @@ class _RasterizeGaussians(torch.autograd.Function):
 
         return grads
 
+class _RasterizeGaussiansFirstPass(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        means3D,
+        means2D,
+        sh,
+        colors_precomp,
+        opacities,
+        scales,
+        rotations,
+        cov3Ds_precomp,
+        raster_settings,
+    ):
+        # Restructure arguments the way that the C++ lib expects them
+        args = (
+            raster_settings.bg, 
+            means3D,
+            colors_precomp,
+            opacities,
+            scales,
+            rotations,
+            raster_settings.scale_modifier,
+            cov3Ds_precomp,
+            raster_settings.viewmatrix,
+            raster_settings.projmatrix,
+            raster_settings.tanfovx,
+            raster_settings.tanfovy,
+            raster_settings.image_height,
+            raster_settings.image_width,
+            sh,
+            raster_settings.sh_degree,
+            raster_settings.campos,
+            raster_settings.prefiltered,
+            raster_settings.debug
+        )
+
+        # Invoke C++/CUDA rasterizer
+        num_rendered, color, depth, radii, geomBuffer, point_list, imgBuffer = _C.rasterize_gaussians(*args)
+
+        # Keep relevant tensors for backward
+        ctx.raster_settings = raster_settings
+        ctx.num_rendered = num_rendered
+        ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, point_list, imgBuffer)
+        return color, radii, depth, geomBuffer, point_list, imgBuffer
+
+    @staticmethod
+    def backward(ctx, grad_out_color, grad_radii, grad_depth, grad_geom=None, grad_point_list=None, grad_img=None):
+        # Restore necessary values from context
+        num_rendered = ctx.num_rendered
+        raster_settings = ctx.raster_settings
+        colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, point_list, imgBuffer = ctx.saved_tensors
+
+        # Restructure args as C++ method expects them
+        args = (raster_settings.bg,
+                means3D, 
+                radii, 
+                colors_precomp, 
+                scales, 
+                rotations, 
+                raster_settings.scale_modifier, 
+                cov3Ds_precomp, 
+                raster_settings.viewmatrix, 
+                raster_settings.projmatrix, 
+                raster_settings.tanfovx, 
+                raster_settings.tanfovy, 
+                grad_out_color,
+                grad_depth,
+                sh, 
+                raster_settings.sh_degree, 
+                raster_settings.campos,
+                geomBuffer,
+                num_rendered,
+                point_list,
+                imgBuffer,
+                raster_settings.debug)
+
+        # Compute gradients for relevant tensors by invoking backward method
+        grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = \
+            _C.rasterize_gaussians_backward(*args)
+
+        # Pacify shape mismatch for empty P=0 outputs
+        if num_rendered == 0 and grad_colors_precomp is not None and colors_precomp is not None:
+            if grad_colors_precomp.shape[1] < colors_precomp.shape[1]:
+                padding = torch.zeros(grad_colors_precomp.shape[0], colors_precomp.shape[1] - grad_colors_precomp.shape[1], device=grad_colors_precomp.device)
+                grad_colors_precomp = torch.cat([grad_colors_precomp, padding], dim=1)
+
+        grads = (
+            grad_means3D,
+            grad_means2D,
+            grad_sh,
+            grad_colors_precomp,
+            grad_opacities,
+            grad_scales,
+            grad_rotations,
+            grad_cov3Ds_precomp,
+            None,
+        )
+
+        return grads
+
+class _RasterizeGaussiansSubsequent(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        means3D,
+        colors_precomp,
+        opacities,
+        geomBuffer,
+        point_list,
+        imgBuffer,
+        radii,
+        scales,
+        rotations,
+        cov3Ds_precomp,
+        raster_settings,
+    ):
+        # Restructure arguments for subsequent forward
+        args = (
+            raster_settings.bg,
+            means3D,
+            colors_precomp,
+            geomBuffer,
+            point_list,
+            imgBuffer,
+            raster_settings.image_height,
+            raster_settings.image_width,
+            raster_settings.tanfovx,
+            raster_settings.tanfovy,
+            raster_settings.debug
+        )
+
+        # Invoke C++/CUDA subsequent rasterizer
+        color, depth = _C.rasterize_gaussians_subsequent(*args)
+
+        # Keep relevant tensors for backward
+        ctx.raster_settings = raster_settings
+        ctx.save_for_backward(colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, geomBuffer, point_list, imgBuffer)
+        return color, depth
+
+    @staticmethod
+    def backward(ctx, grad_out_color, grad_depth):
+        # Restore necessary values from context
+        raster_settings = ctx.raster_settings
+        colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, geomBuffer, point_list, imgBuffer = ctx.saved_tensors
+
+        # Mock sh and degree since subsequent runs don't use spherical harmonics
+        sh = torch.Tensor([]).cuda()
+        degree = 0
+        num_rendered = point_list.shape[0]
+
+        # Restructure args as C++ method expects them
+        args = (
+            raster_settings.bg,
+            means3D, 
+            radii, 
+            colors_precomp, 
+            scales, 
+            rotations, 
+            raster_settings.scale_modifier, 
+            cov3Ds_precomp, 
+            raster_settings.viewmatrix, 
+            raster_settings.projmatrix, 
+            raster_settings.tanfovx, 
+            raster_settings.tanfovy, 
+            grad_out_color,
+            grad_depth,
+            sh, 
+            degree, 
+            raster_settings.campos,
+            geomBuffer,
+            num_rendered,
+            point_list,
+            imgBuffer,
+            raster_settings.debug
+        )
+
+        # Compute gradients by invoking subsequent backward method
+        grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_scales, grad_rotations = \
+            _C.rasterize_gaussians_subsequent_backward(*args)
+
+        # Pacify autograd shape mismatch for empty P=0 outputs
+        if num_rendered == 0 and grad_colors_precomp is not None and colors_precomp is not None:
+            if grad_colors_precomp.shape[1] < colors_precomp.shape[1]:
+                padding = torch.zeros(grad_colors_precomp.shape[0], colors_precomp.shape[1] - grad_colors_precomp.shape[1], device=grad_colors_precomp.device)
+                grad_colors_precomp = torch.cat([grad_colors_precomp, padding], dim=1)
+
+        grads = (
+            None,  # grad_means3D
+            grad_colors_precomp,
+            None,  # grad_opacities
+            None,
+            None,
+            None,
+            None,
+            None,  # grad_scales
+            None,  # grad_rotations
+            None,  # grad_cov3Ds_precomp
+            None,
+        )
+
+        return grads
+
 class GaussianRasterizationSettings(NamedTuple):
     image_height: int
     image_width: int 
@@ -229,6 +482,66 @@ class GaussianRasterizer(nn.Module):
             rotations,
             cov3D_precomp,
             raster_settings, 
+        )
+
+    def forward_first_pass(self, means3D, means2D, opacities, shs = None, colors_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+        raster_settings = self.raster_settings
+
+        if (shs is None and colors_precomp is None) or (shs is not None and colors_precomp is not None):
+            raise Exception('Please provide excatly one of either SHs or precomputed colors!')
+        
+        if ((scales is None or rotations is None) and cov3D_precomp is None) or ((scales is not None or rotations is not None) and cov3D_precomp is not None):
+            raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
+        
+        if shs is None:
+            shs = torch.Tensor([]).cuda()
+        if colors_precomp is None:
+            colors_precomp = torch.Tensor([]).cuda()
+
+        if scales is None:
+            scales = torch.Tensor([]).cuda()
+        if rotations is None:
+            rotations = torch.Tensor([]).cuda()
+        if cov3D_precomp is None:
+            cov3D_precomp = torch.Tensor([]).cuda()
+
+        return rasterize_gaussians_first_pass(
+            means3D,
+            means2D,
+            shs,
+            colors_precomp,
+            opacities,
+            scales, 
+            rotations,
+            cov3D_precomp,
+            raster_settings, 
+        )
+
+    def forward_subsequent(self, means3D, colors_precomp, opacities, geomBuffer, point_list, imgBuffer, radii, scales = None, rotations = None, cov3D_precomp = None, raster_settings = None):
+        if raster_settings is None:
+            raster_settings = self.raster_settings
+
+        if colors_precomp is None:
+            colors_precomp = torch.Tensor([]).cuda()
+        if scales is None:
+            scales = torch.Tensor([]).cuda()
+        if rotations is None:
+            rotations = torch.Tensor([]).cuda()
+        if cov3D_precomp is None:
+            cov3D_precomp = torch.Tensor([]).cuda()
+
+        return rasterize_gaussians_subsequent(
+            means3D,
+            colors_precomp,
+            opacities,
+            geomBuffer,
+            point_list,
+            imgBuffer,
+            radii,
+            scales,
+            rotations,
+            cov3D_precomp,
+            raster_settings,
         )
 
 
@@ -452,13 +765,15 @@ def rasterization_2dgs_inria_wrapper(
         allmap = None
 
         # Create the rasterizer
-        stride = _next_supported(channels)
+        first_stride = _next_supported(channels)
         if backgrounds is not None:
             bg = backgrounds[cid]
-            if bg.shape[0] < stride:
-                bg = torch.cat([bg, torch.zeros(stride - bg.shape[0], device=device)])
+            if bg.shape[0] < first_stride:
+                bg = torch.cat([bg, torch.zeros(first_stride - bg.shape[0], device=device)])
+            else:
+                bg = bg[:first_stride]
         else:
-            bg = torch.zeros(stride, device=device)
+            bg = torch.zeros(first_stride, device=device)
 
         raster_settings = GaussianRasterizationSettings(
             image_height=height,
@@ -478,8 +793,14 @@ def rasterization_2dgs_inria_wrapper(
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
         color_idx = 0
+        geomBuffer = None
+        point_list = None
+        imgBuffer = None
+
         while color_idx < channels:
-            # stride = _next_supported(channels - color_idx)
+            remaining = channels - color_idx
+            stride = _next_supported(remaining)
+
             _colors = colors[..., color_idx : color_idx + stride]
             shape_before = _colors.shape
             if _colors.shape[-1] < stride:
@@ -490,29 +811,40 @@ def rasterization_2dgs_inria_wrapper(
 
             # Call the rasterizer
             if color_idx == 0:
-                # This is the first time we call the rasterizer, so we need to get the radii and allmap
-                _render_colors_, radii, allmap = rasterizer(
+                # Pass 1: Full projection + sorting + render of 1st chunk
+                _render_colors_, radii, allmap, geomBuffer, point_list, imgBuffer = rasterizer.forward_first_pass(
                     means3D=means,
                     means2D=means2D,
-                    shs=_colors if colors.dim() == 3 else None,
-                    colors_precomp=_colors if colors.dim() == 2 else None,
+                    shs=None,
+                    colors_precomp=_colors,
                     opacities=opacities[:, None].contiguous(),
                     scales=scales,
                     rotations=quats,
                     cov3D_precomp=None,
                 )
             else:
-                # We don't need the radii and allmap for the subsequent calls
-                # torch.cuda.empty_cache() # Drop fragmentations
-                _render_colors_, _, _ = rasterizer(
+                # Subsequent Pass: Lightweight rendering ONLY using saved buffers
+                if backgrounds is not None:
+                    subsequent_bg = backgrounds[cid][color_idx : color_idx + stride]
+                    if subsequent_bg.shape[0] < stride:
+                        subsequent_bg = torch.cat([subsequent_bg, torch.zeros(stride - subsequent_bg.shape[0], device=device)])
+                else:
+                    subsequent_bg = torch.zeros(stride, device=device)
+                
+                subsequent_settings = raster_settings._replace(bg=subsequent_bg)
+
+                _render_colors_, _ = rasterizer.forward_subsequent(
                     means3D=means,
-                    means2D=means2D,
-                    shs=_colors if colors.dim() == 3 else None,
-                    colors_precomp=_colors if colors.dim() == 2 else None,
+                    colors_precomp=_colors,
                     opacities=opacities[:, None].contiguous(),
+                    geomBuffer=geomBuffer,
+                    point_list=point_list,
+                    imgBuffer=imgBuffer,
+                    radii=radii,
                     scales=scales,
                     rotations=quats,
                     cov3D_precomp=None,
+                    raster_settings=subsequent_settings,
                 )
             if shape_before[-1] < stride:
                 _render_colors_ = _render_colors_[:shape_before[-1], :, :]

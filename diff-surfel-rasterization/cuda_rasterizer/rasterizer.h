@@ -97,7 +97,8 @@ namespace CudaRasterizer
 			float* dL_dscale,
 			float* dL_drot,
 			bool debug, 
-			int num_color_feat_channels = 3);
+			int num_color_feat_channels = 3,
+			bool skip_geometry_gradients = false);
 	};
 };
 

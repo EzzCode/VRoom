@@ -409,7 +409,8 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dscale,
 	float* dL_drot,
 	bool debug,
-	int num_color_feat_channels)
+	int num_color_feat_channels,
+	bool skip_geometry_gradients)
 {
 	const bool need_sh = (colors_precomp == nullptr);
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P, num_color_feat_channels, need_sh);
@@ -462,27 +463,30 @@ void CudaRasterizer::Rasterizer::backward(
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
 	// use the one we computed ourselves.
-	CHECK_CUDA(BACKWARD::preprocess(P, D, M,
-		(float3*)means3D,
-		radii,
-		shs,
-		geomState.clamped,
-		(glm::vec2*)scales,
-		(glm::vec4*)rotations,
-		scale_modifier,
-		transMat_ptr,
-		viewmatrix,
-		projmatrix,
-		focal_x, focal_y,
-		num_color_feat_channels,
-		tan_fovx, tan_fovy,
-		(glm::vec3*)campos,
-		(float3*)dL_dmean2D, // gradient inputs
-		dL_dnormal,		     // gradient inputs
-		dL_dtransMat,
-		dL_dcolor,
-		dL_dsh,
-		(glm::vec3*)dL_dmean3D,
-		(glm::vec2*)dL_dscale,
-		(glm::vec4*)dL_drot), debug)
+	if (!skip_geometry_gradients)
+	{
+		CHECK_CUDA(BACKWARD::preprocess(P, D, M,
+			(float3*)means3D,
+			radii,
+			shs,
+			geomState.clamped,
+			(glm::vec2*)scales,
+			(glm::vec4*)rotations,
+			scale_modifier,
+			transMat_ptr,
+			viewmatrix,
+			projmatrix,
+			focal_x, focal_y,
+			num_color_feat_channels,
+			tan_fovx, tan_fovy,
+			(glm::vec3*)campos,
+			(float3*)dL_dmean2D, // gradient inputs
+			dL_dnormal,		     // gradient inputs
+			dL_dtransMat,
+			dL_dcolor,
+			dL_dsh,
+			(glm::vec3*)dL_dmean3D,
+			(glm::vec2*)dL_dscale,
+			(glm::vec4*)dL_drot), debug)
+	}
 }

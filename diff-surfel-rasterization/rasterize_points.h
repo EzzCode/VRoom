@@ -60,8 +60,48 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& point_list,  // sorted Gaussian IDs tensor (was binningBuffer)
 	const torch::Tensor& imageBuffer,
 	const bool debug);
+
+std::tuple<torch::Tensor, torch::Tensor>
+RasterizeGaussiansSubsequentCUDA(
+	const torch::Tensor& background,
+	const torch::Tensor& means3D,
+	const torch::Tensor& colors,
+	const torch::Tensor& geomBuffer,
+	const torch::Tensor& point_list,
+	const torch::Tensor& imageBuffer,
+	const int image_height,
+	const int image_width,
+	const float tan_fovx, 
+	const float tan_fovy,
+	const bool debug);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+RasterizeGaussiansSubsequentBackwardCUDA(
+	const torch::Tensor& background,
+	const torch::Tensor& means3D,
+	const torch::Tensor& radii,
+	const torch::Tensor& colors,
+	const torch::Tensor& scales,
+	const torch::Tensor& rotations,
+	const float scale_modifier,
+	const torch::Tensor& transMat_precomp,
+	const torch::Tensor& viewmatrix,
+	const torch::Tensor& projmatrix,
+	const float tan_fovx, 
+	const float tan_fovy,
+	const torch::Tensor& dL_dout_color,
+	const torch::Tensor& dL_dout_others,
+	const torch::Tensor& sh,
+	const int degree,
+	const torch::Tensor& campos,
+	const torch::Tensor& geomBuffer,
+	const int R,
+	const torch::Tensor& point_list,
+	const torch::Tensor& imageBuffer,
+	const bool debug);
 		
 torch::Tensor markVisible(
 		torch::Tensor& means3D,
 		torch::Tensor& viewmatrix,
 		torch::Tensor& projmatrix);
+
