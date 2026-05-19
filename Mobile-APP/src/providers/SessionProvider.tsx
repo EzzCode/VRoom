@@ -4,7 +4,7 @@
 import React, { createContext, useContext, useRef, useState, useCallback, useMemo } from 'react';
 import { Keyframe, CameraPose, SessionMetadata } from '../shared/core/types';
 import { KeyframeExtractor } from '../features/capture/KeyframeExtractor';
-import { AngleGate } from '../features/capture/gates/AngleGate';
+import { TimeGate } from '../features/capture/gates/TimeGate';
 
 // ── Context value type ──────────────────────────────────────
 export interface SessionContextValue {
@@ -44,7 +44,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // Create the extractor once and register gates
   const extractor = useMemo(() => {
     const ext = new KeyframeExtractor();
-    ext.addGate(new AngleGate());
+    ext.addGate(new TimeGate(1000));
     // BlurGate runs inside the worklet, not in the extractor pipeline.
     // CoverageGate will be added in Build 3.
     return ext;

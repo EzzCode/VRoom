@@ -127,7 +127,7 @@ export default function CaptureScreen({ navigation }: Props) {
 
     const intervalId = setInterval(() => {
       void handleCapture();
-    }, 1200);
+    }, 1000);
 
     return () => {
       clearInterval(intervalId);
