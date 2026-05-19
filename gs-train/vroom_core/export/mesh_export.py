@@ -156,6 +156,8 @@ class ObjectMeshExporter:
         if not valid_depths:
             return 3.0
         merged = torch.cat(valid_depths)
+        if merged.numel() > 1_000_000:
+            merged = merged[torch.randperm(merged.numel())[:1_000_000]]
         return float(torch.quantile(merged, 0.99).item() * 1.1)
 
     def _require_open3d(self):

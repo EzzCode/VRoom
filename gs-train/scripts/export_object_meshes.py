@@ -13,7 +13,8 @@ from argparse import ArgumentParser
 import torch
 import yaml
 
-from vroom_core.models.facade import GaussianModel
+from vroom_core.models.gaussian_model import GaussianModel
+from vroom_core.data.scene_pipeline import TrainingScene
 from vroom_core.export.mesh_export import MeshFusionOptions, ObjectMeshExporter
 from typing import Optional, List, Dict, Tuple
 
@@ -124,7 +125,7 @@ def main():
         tile_size_2dgs=model_kwargs.get("tile_size_2dgs", 8),
     )
     dataset_args = _build_dataset_args(model_params, source_path, str(model_path))
-    scene = TrainingScene(dataset_args, gaussians, load_iteration=iteration, shuffle=False, explicit=False)
+    scene = TrainingScene(dataset_args, gaussians, load_iteration=iteration, shuffle=False)
 
     background = torch.ones(3, dtype=torch.float32, device=gaussians.device) if args.white_background else scene.background
     exporter = ObjectMeshExporter(gaussians, background, add_prefilter=not args.no_prefilter)

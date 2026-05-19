@@ -14,7 +14,7 @@ import torch
 
 from gaussian_renderer.render import prefilter_voxel, render
 from vroom_core.utils.checkpoints import CheckpointManager
-from vroom_core.models.facade import GaussianModel
+from vroom_core.models.gaussian_model import GaussianModel
 from vroom_core import viewer_protocol as network_gui
 
 

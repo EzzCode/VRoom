@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from vroom_core.models.anchor_field import AnchorCloud, AnchorCloudData
 from vroom_core.utils.checkpoints import CheckpointManager
 from vroom_core.models.decoder import GaussianDecoder
-from vroom_core.models.density import DensificationController
+from vroom_core.models.density import DensifcationController
 from vroom_core.models.semantics import SemanticCodec
 from vroom_core.utils.runtime import exponential_lr_schedule
 
@@ -54,7 +54,7 @@ class GaussianModel(nn.Module):
 
         self.field = AnchorCloud(gaussians_per_anchor=n_offsets, feature_dim=feat_dim, voxel_size=float(voxel_size), device=device)
         self.decoder = GaussianDecoder(feat_dim, view_dim, appearance_dim, n_offsets, device=device)
-        self.density = DensificationController(n_offsets, device=device)
+        self.density: Optional[DensifcationController] = None
         self.checkpoints = CheckpointManager(self)
 
     @property
@@ -226,7 +226,14 @@ class GaussianModel(nn.Module):
         self._training_args = training_args
         self._grad_clip_norm = grad_clip_norm
         self.rebuild_optimizer()
-        self.density.reset(self.field.anchors_positions.shape[0])
+        # Density controller is created here so it receives the live optimizer.
+        self.density = DensifcationController(
+            voxel_size=self.field.voxel_size,
+            anchor_cloud=self.field,
+            optimizer=self.optimizer,
+            num_gaussians_per_anchor=self.n_offsets,
+        )
+        self.density.reset_state()
 
     training_setup = setup_training
 
@@ -337,10 +344,22 @@ class GaussianModel(nn.Module):
             torch.nn.utils.clip_grad_norm_(self.parameters(), self._grad_clip_norm)
 
     def training_statis(self, opt, render_pkg: dict, width: int, height: int):
-        self.density.accumulate(render_pkg, opt, width, height)
+        if self.density is None:
+            return
+        self.density.update_densification_state(
+            visibility_mask=render_pkg["visible_mask"],
+            selection_mask=render_pkg["selection_mask"],
+            opacity=render_pkg["opacity"],
+            rendered_2d_points=render_pkg["viewspace_points"],
+            width=width,
+            height=height,
+        )
 
     def run_densify(self, opt, iteration: int):
-        self.density.densify(self, opt, iteration)
+        if self.density is None:
+            return
+        self.density.growing_operation()
+        self.density.pruning_operation(opacity_threshold=opt.min_opacity)
 
     def prune_anchor(self, mask: torch.Tensor):
         keep = ~mask
@@ -401,7 +420,8 @@ class GaussianModel(nn.Module):
     train_mode = set_train
 
     def clean(self):
-        self.density.cleanup()
+        if self.density is not None:
+            self.density.reset_state()
         torch.cuda.empty_cache()
 
     # ---------- training state snapshot (capture / restore) ----------

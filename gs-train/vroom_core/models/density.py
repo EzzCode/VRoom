@@ -1,450 +1,403 @@
-"""Densification policy and training-state bookkeeping.
-
-Supports both 'mean' and 'max' strategies for gradient accumulation
-and opacity-based pruning.  Uses multi-scale hierarchical growing with
-stochastic candidate selection.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from functools import reduce
-from typing import Optional
-
 import torch
+import torch.nn as nn
+
+# Maps optimizer group name to AnchorCloud attribute name.
+# density.py owns this mapping; gaussian_model.py must use the same group names.
+_GROUP_TO_FIELD = {
+    "anchor":   "anchors_positions",
+    "offset":   "gaussians_offsets",
+    "feature":  "anchor_features",
+    "scaling":  "anchors_log_scales",
+    "rotation": "anchors_rotations",
+}
+_FIELD_GROUPS = set(_GROUP_TO_FIELD)
 
 
-@dataclass
-class DensityState:
-    anchor_opacity: torch.Tensor
-    anchor_visits: torch.Tensor
-    offset_gradients: torch.Tensor
-    offset_visits: torch.Tensor
-    offset_opacity: torch.Tensor
-    max_radii: torch.Tensor
+class DensifcationController:
+    def __init__(self, voxel_size, anchor_cloud, optimizer, num_gaussians_per_anchor=5):
+        self.gaussian_gradients_acc = None
+        self.gaussian_visits = None
+        self.anchor_opacity_acc = None
+        self.anchor_visits = None
+        self.voxel_size = voxel_size
+        self.anchor_cloud = anchor_cloud
+        self.optimizer = optimizer
+        self.num_gaussians_per_anchor = num_gaussians_per_anchor
 
-    @classmethod
-    def allocate(cls, n_anchors: int, n_offsets: int, device) -> "DensityState":
-        return cls(
-            anchor_opacity=torch.zeros((n_anchors, 1), device=device),
-            anchor_visits=torch.zeros((n_anchors, 1), device=device),
-            offset_gradients=torch.zeros((n_anchors * n_offsets, 1), device=device),
-            offset_visits=torch.zeros((n_anchors * n_offsets, 1), device=device),
-            offset_opacity=torch.zeros((n_anchors * n_offsets, 1), device=device),
-            max_radii=torch.zeros((n_anchors * n_offsets,), device=device),
-        )
+    def reset_state(self):
+        """Allocate zero accumulators sized to the current cloud."""
+        device = self.anchor_cloud.anchors_positions.device
+        n_anchors = self.anchor_cloud.anchors_positions.shape[0]
+        n_gaussians = n_anchors * self.num_gaussians_per_anchor
 
+        self.gaussian_gradients_acc = torch.zeros(n_gaussians, device=device)
+        self.gaussian_visits = torch.zeros(n_gaussians, device=device)
+        self.anchor_opacity_acc = torch.zeros(n_anchors, device=device)
+        self.anchor_visits = torch.zeros(n_anchors, device=device)
 
-class DensificationController:
-    def __init__(self, n_offsets: int, device: str = "cuda") -> None:
-        self.n_offsets = n_offsets
-        self.device = torch.device(device)
-        self.state = DensityState.allocate(0, n_offsets, self.device)
+    def _pad_state(self, n_new):
+        """Pad accumulators with zeros for n_new newly added anchors (preserves existing stats)."""
+        device = self.anchor_cloud.anchors_positions.device
 
-    def reset(self, n_anchors: int) -> None:
-        self.state = DensityState.allocate(n_anchors, self.n_offsets, self.device)
+        zeros_gaussians = torch.zeros(n_new * self.num_gaussians_per_anchor, device=device)
+        zeros_anchors = torch.zeros(n_new, device=device)
 
-    # ------------------------------------------------------------------
-    # Gradient / opacity accumulation
-    # ------------------------------------------------------------------
+        self.gaussian_gradients_acc = torch.cat([self.gaussian_gradients_acc, zeros_gaussians])
+        self.gaussian_visits = torch.cat([self.gaussian_visits, zeros_gaussians])
+        self.anchor_opacity_acc = torch.cat([self.anchor_opacity_acc, zeros_anchors])
+        self.anchor_visits = torch.cat([self.anchor_visits, zeros_anchors])
 
-    def accumulate(self, render_pkg: dict, opt, width: int, height: int) -> None:
-        """Aggregate per-step statistics for the densification decision.
+    def _mask_state(self, keep_mask):
+        """Trim accumulators to surviving anchors (preserves stats for kept anchors)."""
+        keep_mask_for_gaussians = keep_mask.repeat_interleave(self.num_gaussians_per_anchor)
 
-        Supports both ``pruning_type in {'mean', 'max'}`` and
-        ``growing_type in {'mean', 'max'}``.
+        self.gaussian_gradients_acc = self.gaussian_gradients_acc[keep_mask_for_gaussians]
+        self.gaussian_visits = self.gaussian_visits[keep_mask_for_gaussians]
+        self.anchor_opacity_acc = self.anchor_opacity_acc[keep_mask]
+        self.anchor_visits = self.anchor_visits[keep_mask]
+
+    def update_densification_state(
+        self,
+        visibility_mask,
+        selection_mask,
+        opacity,
+        rendered_2d_points,
+        width,
+        height,
+    ):
         """
-        selection = render_pkg["selection_mask"] # a boolean mask indicating which child gaussian_model were selected for rendering. having opacity higher than a certain threshold. check decoder.py
-        visible = render_pkg["visible_mask"] # a boolean mask indicating which anchors were visible in the current frame.
-        opacity = render_pkg["opacity"] # children that survived the selection mask opacities
-        grad_points = render_pkg["viewspace_points"]  # 2D (x,y) tensor representin the center of where the 3D gaussian landed on the 2D screen. these have the .grad attribute attached tgat will be populated to tell us how to fix its physical position.
-        pixel_hits = render_pkg["visibility_filter"] # a boolean mask for children that survived after painting. after painting is completed some gaussian may end up not visible. or if its radii is small it doesn't cover a single pixel
-        radii = render_pkg["radii"] 
+        This will run every iteration in the loop and will update the state which include:
+        1. Gaussain grads
+        2. Gaussain visits
+        3. anchor visits
+        4. anchor opacity
 
-        if visible.numel() == 0:
-            return
-        n_visible = int(visible.sum().item())
-
-        # --- anchor-level opacity statistics ---
-        per_offset_opacity = torch.zeros(
-            (n_visible * self.n_offsets,), device=self.device
-        )
-        per_offset_opacity[selection] = opacity.detach().view(-1)
-        opacity_matrix = per_offset_opacity.view(n_visible, self.n_offsets)
-
-        pruning_mode = getattr(opt, "pruning_type", "mean")
-        if pruning_mode == "max":
-            batch_score = torch.abs(opacity_matrix.sum(dim=1, keepdim=True))
-            self.state.anchor_opacity[visible] = torch.maximum(
-                self.state.anchor_opacity[visible], batch_score
-            )
-        else:
-            active_counts = (
-                selection.view(n_visible, self.n_offsets)
-                .float()
-                .sum(dim=1, keepdim=True)
-                .clamp(min=1.0)
-            )
-            anchor_scores = opacity_matrix.sum(dim=1, keepdim=True) / active_counts
-            self.state.anchor_opacity[visible] += anchor_scores
-
-        self.state.anchor_visits[visible] += 1
-
-        # --- offset-level gradient statistics ---
-        per_offset_visible = (
-            visible.unsqueeze(1).expand(-1, self.n_offsets).reshape(-1)
-        )
-        offset_flags = torch.zeros_like(
-            self.state.offset_gradients, dtype=torch.bool
-        ).squeeze(1)
-        offset_flags[per_offset_visible] = selection
-        temp = offset_flags.clone()
-        offset_flags[temp] = pixel_hits
-
-        gradients = grad_points.grad
-        if gradients.dim() == 3:
-            gradients = gradients.squeeze(0)
-        gradients = gradients.clone()
-        gradients[:, 0] *= width * 0.5
-        gradients[:, 1] *= height * 0.5
-        grad_norm = torch.norm(gradients[pixel_hits, :2], dim=-1, keepdim=True)
-
-        growing_mode = getattr(opt, "growing_type", "mean")
-        if growing_mode == "max":
-            self.state.offset_gradients[offset_flags] = torch.maximum(
-                self.state.offset_gradients[offset_flags], torch.abs(grad_norm)
-            )
-            self.state.max_radii[offset_flags] = torch.maximum(
-                self.state.max_radii[offset_flags], radii[pixel_hits]
-            )
-            self.state.offset_opacity[offset_flags] += opacity.detach()[pixel_hits]
-        else:
-            self.state.offset_gradients[offset_flags] += grad_norm
-
-        self.state.offset_visits[offset_flags] += 1
-
-    # ------------------------------------------------------------------
-    # Densification entry point
-    # ------------------------------------------------------------------
-
-    def densify(self, model, opt, iteration: int) -> None:
-        if self.state.offset_visits.numel() == 0:
-            return
-
-        growing_mode = getattr(opt, "growing_type", "mean")
-        if growing_mode == "max":
-            raw_grads = self.state.offset_gradients.nan_to_num(0.0).view(-1)
-            off_opacity = (
-                self.state.offset_opacity / self.state.offset_visits.clamp(min=1.0)
-            ).nan_to_num(0.0).view(-1)
-            scores = raw_grads * self.state.max_radii * torch.pow(off_opacity, 0.2)
-            ready = (
-                self.state.offset_visits.view(-1) > opt.update_interval * opt.success_threshold * 0.5
-            )
-            ready = torch.logical_and(ready, off_opacity > 0.15)
-        else:
-            scores = (
-                self.state.offset_gradients / self.state.offset_visits.clamp(min=1.0)
-            ).nan_to_num(0.0).view(-1)
-            ready = (
-                self.state.offset_visits.view(-1) > opt.update_interval * opt.success_threshold * 0.5
-            )
-
-        # --- grow new anchors across multiple scales ---
-        added = self._hierarchical_grow(model, opt, scores, ready, iteration)
-
-        # --- pad density state buffers after growing ---
-        self._pad_offset_buffers(model, opt, ready)
-
-        # --- prune low-contribution anchors ---
-        # Note: _hierarchical_grow already extended anchor_opacity/visits for new
-        # anchors, so _compute_prune_mask already returns the correct total size.
-        prune_mask = self._compute_prune_mask(opt)
-        if prune_mask.any():
-            model.prune_anchor(prune_mask)
-            self._shrink_offset_buffers(prune_mask)
-
-        # --- reset accumulation counters ---
-        visited_anchors = (
-            self.state.anchor_visits.view(-1) > opt.update_interval * opt.success_threshold
-        )
-        if visited_anchors.any():
-            self.state.anchor_opacity[visited_anchors] = 0.0
-            self.state.anchor_visits[visited_anchors] = 0.0
-
-        remaining = ~prune_mask if prune_mask.any() else torch.ones(
-            self.state.anchor_opacity.shape[0], dtype=torch.bool, device=self.device
-        )
-        self.state.anchor_opacity = self.state.anchor_opacity[remaining]
-        self.state.anchor_visits = self.state.anchor_visits[remaining]
-        self.state.max_radii = torch.zeros(
-            model.field.anchors_positions.shape[0] * self.n_offsets,
-            dtype=torch.float,
-            device=self.device,
-        )
-
-    def cleanup(self) -> None:
-        self.reset(0)
-
-    # ------------------------------------------------------------------
-    # Multi-scale hierarchical growing
-    # ------------------------------------------------------------------
-
-    def _hierarchical_grow(
-        self, model, opt, scores: torch.Tensor, ready: torch.Tensor, iteration: int
-    ) -> int:
-        """Grow anchors at ``update_depth`` progressively coarser scales.
-
-        Each scale level uses a higher gradient threshold and a stochastic
-        mask that lets through fewer candidates — promoting diversity at fine
-        scales and stability at coarse scales.
+        Note: opacity and rendered_2d_points cover only SELECTED gaussians
+        (N_selected = N_vis * K filtered by selection_mask). selection_mask
+        has shape [N_vis * K] and maps them back to the full visible set.
         """
-        field = model.field
-        total_added = 0
-        baseline_n = field.anchors_positions.shape[0] * self.n_offsets
+        if self.gaussian_gradients_acc is None:
+            self.reset_state()
 
-        depth_levels = getattr(opt, "update_depth", 3)
-        hierarchy_factor = max(getattr(opt, "update_hierachy_factor", 4), 1)
-        init_factor = getattr(opt, "update_init_factor", 16)
-        base_threshold = opt.densify_grad_threshold
+        K = self.num_gaussians_per_anchor
+        device = visibility_mask.device
 
-        for level in range(depth_levels):
-            # --- recompute anchor_extent every level (field may have grown) ---
-            anchor_extent = torch.exp(field.anchors_log_scales)[:, :3]
+        # accumulate the gradients every iteration and acc gaussian visits
+        # global indices of all visible gaussians in the full [N_all * K] accumulator
+        visibility_mask_for_gaussians = visibility_mask.repeat_interleave(K)
+        vis_gaussian_global_indices = visibility_mask_for_gaussians.nonzero(as_tuple=True)[0]  # [N_vis * K]
 
-            # --- threshold grows exponentially per level ---
-            level_threshold = base_threshold * ((hierarchy_factor // 2) ** level)
-            above_threshold = (scores >= level_threshold) & ready
+        # narrow to selected gaussians (decoder selection_mask filters N_vis*K → N_selected)
+        selected_global_indices = vis_gaussian_global_indices[selection_mask]  # [N_selected]
 
-            # --- pad candidate mask to match current (possibly larger) field ---
-            current_n_offsets = field.anchors_positions.shape[0] * self.n_offsets
-            growth_delta = current_n_offsets - above_threshold.shape[0]
-            if growth_delta > 0:
-                above_threshold = torch.cat(
-                    [above_threshold, torch.zeros(growth_delta, dtype=torch.bool, device=self.device)],
+        opacity_mask = opacity.view(-1) > 0.5  # [N_selected]
+        active_global_indices = selected_global_indices[opacity_mask]
+
+        gaussians_gradients = rendered_2d_points.grad
+        if gaussians_gradients is None:
+            return
+        gaussians_gradients = gaussians_gradients.reshape(-1, 2).clone()  # [N_selected, 2]
+        scaler = torch.tensor(
+            [width * 0.5, height * 0.5], device=gaussians_gradients.device
+        )
+        gaussians_gradients *= scaler
+        grad_magnitude = torch.norm(gaussians_gradients, dim=-1)  # [N_selected]
+
+        self.gaussian_gradients_acc[active_global_indices] += grad_magnitude[opacity_mask]
+        self.gaussian_visits[active_global_indices] += 1  # increment visits for gaussians
+
+        # accumlate anchor opacity
+        # scatter selected gaussian opacities back to their parent visible anchors
+        n_vis_anchors = int(visibility_mask.sum().item())
+        vis_anchor_local_idx = torch.arange(n_vis_anchors, device=device).repeat_interleave(K)  # [N_vis * K]
+        selected_anchor_local_idx = vis_anchor_local_idx[selection_mask]  # [N_selected]
+
+        opacity_flat = opacity.view(-1).detach().clamp(min=0)  # [N_selected]
+        opacity_sum = torch.zeros(n_vis_anchors, device=device)
+        opacity_count = torch.zeros(n_vis_anchors, device=device)
+        opacity_sum.scatter_add_(0, selected_anchor_local_idx, opacity_flat)
+        opacity_count.scatter_add_(0, selected_anchor_local_idx, torch.ones_like(opacity_flat))
+        anchors_opacity_avg = opacity_sum / opacity_count.clamp(min=1)
+
+        self.anchor_opacity_acc[visibility_mask] += anchors_opacity_avg
+        self.anchor_visits[visibility_mask] += 1  # increment visits for anchors
+
+    def growing_operation(self):
+        """
+        Quantize the space and calculate the gradients of the gaussians in that space,
+        if it is higher than a certain threshold we will add a new anchor in the center of that voxel
+        """
+        if self.gaussian_gradients_acc is None:
+            return
+
+        gradient_threshold = 0.0005
+        # we are going to do growing for different quantization levels depending on gradient value
+        level_2_threshold = gradient_threshold * 2  # level 2 resolution threshold
+        level_3_threshold = gradient_threshold * 4  # level 3 resolution threshold
+        quantization_size_L1 = self.voxel_size
+        quantization_size_L2 = self.voxel_size / 4
+        quantization_size_L3 = self.voxel_size / 16
+
+        device = self.anchor_cloud.anchors_positions.device
+        feat_dim = self.anchor_cloud.anchor_features.shape[1]
+
+        # we do this process for each quantization level
+        for level, quantization_size in enumerate(
+            [quantization_size_L1, quantization_size_L2, quantization_size_L3]
+        ):
+            current_gaussian_gradients_acc = self.gaussian_gradients_acc / self.gaussian_visits.clamp(min=1)
+
+            (
+                unique_quantized_gaussians,
+                gaussian_positions,
+                average_gradient_per_voxel,
+                inverse_gaussian_voxel_indices,
+            ) = self._quantize(quantization_size, current_gaussian_gradients_acc)
+
+            # apply per-level threshold
+            if level == 0:
+                current_threshold = gradient_threshold
+            elif level == 1:
+                current_threshold = level_2_threshold
+            elif level == 2:
+                current_threshold = level_3_threshold
+
+            above_threshold_mask = average_gradient_per_voxel > current_threshold
+
+            # apply random elimination to avoid too many anchors spawining
+            if level == 1:  # 50% survive
+                ratio_of_voxels_to_keep = 0.5
+                random_mask = (
+                    torch.rand_like(average_gradient_per_voxel)
+                    < ratio_of_voxels_to_keep
+                ).bool()
+                above_threshold_mask = above_threshold_mask & random_mask
+            elif level == 2:  # 70%
+                ratio_of_voxels_to_keep = 0.7
+                random_mask = (
+                    torch.rand_like(average_gradient_per_voxel)
+                    < ratio_of_voxels_to_keep
+                ).bool()
+                above_threshold_mask = above_threshold_mask & random_mask
+
+            if not above_threshold_mask.any():
+                continue
+
+            # indices into unique_quantized_gaussians for above-threshold voxels
+            above_threshold_indices = above_threshold_mask.nonzero(as_tuple=True)[0]
+            voxel_above_threshold = unique_quantized_gaussians[above_threshold_indices]
+
+            anchor_voxelized_grid = (
+                self.anchor_cloud.anchors_positions.detach() / quantization_size
+            ).to(torch.int64)
+
+            # check for overlap so that we don't add new anchors in the same location
+            # exact row-wise comparison via broadcasting (no hashing)
+            overlap_mask = (
+                voxel_above_threshold.unsqueeze(1) == anchor_voxelized_grid.unsqueeze(0)
+            ).all(dim=-1).any(dim=-1)
+
+            anchors_to_add = voxel_above_threshold[~overlap_mask]  # (M_new, 3) voxel coords
+            anchors_to_add_indices = above_threshold_indices[~overlap_mask]  # into unique_quantized_gaussians
+
+            if anchors_to_add.shape[0] == 0:
+                continue
+
+            n_new = anchors_to_add.shape[0]
+
+            # set the anchors to added features to be the average for features of the contributing gaussians
+            # and will be placed at the center of the voxel
+            parent_to_gaussian_features = torch.repeat_interleave(
+                self.anchor_cloud.anchor_features.detach(),
+                self.num_gaussians_per_anchor,
+                dim=0,
+            )  # (N_all * K, F)
+
+            parent_to_gaussian_labels = (
+                torch.repeat_interleave(
+                    self.anchor_cloud.semantic_labels,
+                    self.num_gaussians_per_anchor,
                     dim=0,
                 )
+                if self.anchor_cloud.semantic_labels is not None
+                else None
+            )  # (N_all * K,) or None
 
-            # --- stochastic thinning: survival rate *increases* with depth ---
-            # rand > 0.5**(level+1)
-            # level 0 -> 50% survive, level 1 -> 75%, level 2 -> 87.5% …
-            # Deeper levels compensate for their stricter gradient threshold by
-            # keeping more of the candidates that did pass it.
-            stochastic_filter = torch.rand_like(above_threshold.float()) > (0.5 ** (level + 1))
-            candidates = above_threshold & stochastic_filter.to(self.device)
-
-            if not candidates.any():
-                continue
-
-            child_xyz = (
-                field.anchors_positions.unsqueeze(1) + field.gaussians_offsets * anchor_extent.unsqueeze(1)
-            )
-            scale_divisor = max(hierarchy_factor ** level, 1)
-            cell_size = field.voxel_size * (init_factor // scale_divisor)
-
-            selected_xyz = child_xyz.reshape(-1, 3)[candidates] # mismatch might have happened here, if it werent for padding
-            novel_anchors, novel_features, novel_labels = self._filter_novel_voxels(
-                field, model, candidates, selected_xyz, cell_size, opt
+            anchor_positions = anchors_to_add.float() * quantization_size  # (M_new, 3)
+            anchor_feature = torch.zeros(n_new, feat_dim, device=device)
+            anchor_label = (
+                torch.zeros(n_new, dtype=torch.long, device=device)
+                if parent_to_gaussian_labels is not None
+                else None
             )
 
-            if novel_anchors.shape[0] == 0:
-                continue
+            for i, voxel_idx in enumerate(anchors_to_add_indices):
+                member_mask = inverse_gaussian_voxel_indices == voxel_idx
+                if member_mask.any():
+                    anchor_feature[i] = parent_to_gaussian_features[member_mask].mean(dim=0)
+                    if parent_to_gaussian_labels is not None:
+                        anchor_label[i] = parent_to_gaussian_labels[member_mask].mode()[0]
 
-            new_scaling = torch.log(
-                torch.full((novel_anchors.shape[0], 6), float(cell_size), device=self.device).clamp(min=1e-6)
-            )
-            new_rotation = torch.zeros(
-                (novel_anchors.shape[0], 4), device=self.device
-            )
-            new_rotation[:, 0] = 1.0
-            new_offsets = torch.zeros(
-                (novel_anchors.shape[0], model.n_offsets, 3), device=self.device
+            anchor_scale = quantization_size
+            log_scale_val = float(torch.tensor(anchor_scale).log().item())
+            anchor_log_scales = torch.full(
+                (n_new, 6), log_scale_val, dtype=torch.float32, device=device
             )
 
-            # --- extend field with optimizer state preservation ---
-            extension = {
-                "anchor": novel_anchors,
-                "offset": new_offsets,
-                "feature": novel_features,
-                "scaling": new_scaling,
-                "rotation": new_rotation,
+            anchor_rotation = torch.zeros(n_new, 4, dtype=torch.float32, device=device)
+            anchor_rotation[:, 0] = 1.0  # identity quaternion
+
+            anchor_offsets = torch.zeros(
+                n_new, self.num_gaussians_per_anchor, 3, dtype=torch.float32, device=device
+            )
+
+            extension_dict = {
+                "anchor":   anchor_positions,
+                "offset":   anchor_offsets,
+                "feature":  anchor_feature,
+                "scaling":  anchor_log_scales,
+                "rotation": anchor_rotation,
             }
-            if model.optimizer is not None:
-                updated = model.extend_optimizer_state(extension)
-                field.anchors_positions = updated["anchor"]
-                field.gaussians_offsets = updated["offset"]
-                field.anchor_features = updated["feature"]
-                field.anchors_log_scales = updated["scaling"]
-                field.anchors_rotations = updated["rotation"]
-            else:
-                field.append(
-                    novel_anchors, new_offsets, novel_features,
-                    new_scaling, new_rotation, novel_labels,
+
+            # update optimizer and the anchor cloud data
+            self._extend_optimizer(extension_dict)
+
+            # update non-parameter data
+            if parent_to_gaussian_labels is not None:
+                existing_labels = self.anchor_cloud.semantic_labels
+                self.anchor_cloud.semantic_labels = (
+                    anchor_label if existing_labels is None
+                    else torch.cat([existing_labels.view(-1), anchor_label.view(-1)])
                 )
-
-            # --- update labels separately (not an optimizer group) ---
-            if novel_labels is not None and field.semantic_labels is not None:
-                field.semantic_labels = torch.cat([field.semantic_labels, novel_labels], dim=0)
-            elif novel_labels is not None:
-                field.semantic_labels = novel_labels
-          
-            if field.semantic_labels is not None and field.codec is not None:
-                field.codec.fit(field.semantic_labels.view(-1))
-
-            # --- extend density accumulators ---
-            n_new = novel_anchors.shape[0]
-            self.state.anchor_opacity = torch.cat([
-                self.state.anchor_opacity,
-                torch.zeros((n_new, 1), device=self.device),
-            ], dim=0)
-            self.state.anchor_visits = torch.cat([
-                self.state.anchor_visits,
-                torch.zeros((n_new, 1), device=self.device),
-            ], dim=0)
-            field.visibility_mask = torch.ones(
-                field.anchors_positions.shape[0], dtype=torch.bool, device=self.device
+            self.anchor_cloud.visibility_mask = torch.ones(
+                self.anchor_cloud.anchors_positions.shape[0],
+                dtype=torch.bool, device=device,
             )
 
-            total_added += n_new
-            torch.cuda.empty_cache()
+            # pad accumulators with zeros for new anchors (preserve existing stats)
+            self._pad_state(n_new)
 
-        return total_added
-
-    def _filter_novel_voxels(
-        self,
-        field,
-        model,
-        candidates: torch.Tensor,
-        selected_xyz: torch.Tensor,
-        cell_size: float,
-        opt,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """Deduplicate candidates and discard those overlapping existing anchors."""
-        occupied_grid = torch.round(field.anchors_positions / cell_size).to(torch.int64)
-        candidate_grid = torch.round(selected_xyz / cell_size).to(torch.int64)
-        unique_grid, inverse = torch.unique(candidate_grid, return_inverse=True, dim=0)
-
-        if unique_grid.numel() == 0:
-            return (
-                torch.zeros((0, 3), device=self.device),
-                torch.zeros((0, field.anchor_features.shape[1]), device=self.device),
-                None,
-            )
-
-        if getattr(opt, "overlap", False): # false is default
-            novel_cell_mask = torch.ones(unique_grid.shape[0], dtype=torch.bool, device=self.device)
-        elif unique_grid.shape[0] > 0 and occupied_grid.shape[0] > 0: # if there are candidates and existing anchors
-            novel_cell_mask = ~self._check_voxel_overlap(occupied_grid, unique_grid)
-        else:
-            novel_cell_mask = torch.ones(unique_grid.shape[0], dtype=torch.bool, device=self.device)
-
-        if not novel_cell_mask.any():
-            return (
-                torch.zeros((0, 3), device=self.device),
-                torch.zeros((0, field.anchor_features.shape[1]), device=self.device),
-                None,
-            )
-
-        novel_positions = unique_grid[novel_cell_mask].float() * cell_size
-
-        # Pool features from contributing offsets
-        repeated_feat = field.anchor_features.repeat_interleave(
-            model.n_offsets, dim=0
-        )[candidates]
-        pooled = torch.zeros(
-            (unique_grid.shape[0], field.anchor_features.shape[1]), device=self.device
-        )
-        counts = torch.zeros((unique_grid.shape[0], 1), device=self.device)
-        pooled.index_add_(0, inverse, repeated_feat)
-        counts.index_add_(
-            0, inverse, torch.ones((inverse.shape[0], 1), device=self.device)
-        )
-        pooled = pooled / counts.clamp(min=1.0)
-        novel_features = pooled[novel_cell_mask] # mask by the novel cell mask to ensure we only take unoccupied voxels into account
-
-        # Pool labels from contributing offsets
-        novel_labels = None
-        if field.semantic_labels is not None:
-            repeated_labels = field.semantic_labels.repeat_interleave(
-                model.n_offsets, dim=0
-            ).view(-1)[candidates]
-            pooled_labels = torch.zeros(
-                unique_grid.shape[0], dtype=repeated_labels.dtype, device=self.device
-            )
-            for idx in range(unique_grid.shape[0]):
-                members = repeated_labels[inverse == idx]
-                if members.numel() > 0:
-                    pooled_labels[idx] = torch.bincount(members).argmax()
-            novel_labels = pooled_labels[novel_cell_mask].view(-1, 1)
-
-        return novel_positions, novel_features, novel_labels
-
-    @staticmethod
-    def _check_voxel_overlap(
-        occupied: torch.Tensor, candidates: torch.Tensor, chunk_size: int = 4096
-    ) -> torch.Tensor:
-        """Check which *candidates* coincide with any *occupied* voxel.
-
-        Uses a chunked comparison to avoid materializing a huge broadcast tensor.
+    def pruning_operation(self, opacity_threshold=0.01):
         """
-        n_chunks = (occupied.shape[0] + chunk_size - 1) // chunk_size
-        overlap_parts = []
-        for i in range(n_chunks):
-            chunk = occupied[i * chunk_size : (i + 1) * chunk_size]
-            matches = (candidates.unsqueeze(1) == chunk).all(-1).any(-1)
-            overlap_parts.append(matches)
-        return reduce(torch.logical_or, overlap_parts)
+        prune anchors with opacity less than a threshold
+        """
+        if self.anchor_visits is None:
+            return
 
-    # ------------------------------------------------------------------
-    # Post-densification state management
-    # ------------------------------------------------------------------
-
-    def _pad_offset_buffers(self, model, opt, ready: torch.Tensor) -> None:
-        """Zero-out visited offset slots and pad buffers for newly grown anchors."""
-        total_offsets = model.field.anchors_positions.shape[0] * self.n_offsets
-
-        ready = ready[: self.state.offset_visits.shape[0]]
-        self.state.offset_visits[ready] = 0
-        self.state.offset_gradients[ready] = 0
-        self.state.offset_opacity[ready] = 0
-
-        deficit = total_offsets - self.state.offset_visits.shape[0]
-        if deficit > 0:
-            z1 = torch.zeros((deficit, 1), device=self.device)
-            self.state.offset_visits = torch.cat(
-                [self.state.offset_visits, z1], dim=0
-            )
-            self.state.offset_gradients = torch.cat(
-                [self.state.offset_gradients, z1.clone()], dim=0
-            )
-            self.state.offset_opacity = torch.cat(
-                [self.state.offset_opacity, z1.clone()], dim=0
-            )
-
-    def _shrink_offset_buffers(self, prune_mask: torch.Tensor) -> None:
-        """Discard offset-level accumulators matching pruned anchors."""
-        keep = ~prune_mask
-
-        def _slice_offsets(buf: torch.Tensor) -> torch.Tensor:
-            reshaped = buf.view(-1, self.n_offsets)[: keep.shape[0]][keep]
-            return reshaped.reshape(-1, 1)
-
-        self.state.offset_visits = _slice_offsets(self.state.offset_visits)
-        self.state.offset_gradients = _slice_offsets(self.state.offset_gradients)
-        self.state.offset_opacity = _slice_offsets(self.state.offset_opacity)
-
-    def _compute_prune_mask(self, opt) -> torch.Tensor:
-        """Identify anchors with insufficient contribution for removal."""
-        if self.state.anchor_visits.numel() == 0:
-            return torch.zeros((0,), dtype=torch.bool, device=self.device)
-        pruning_mode = getattr(opt, "pruning_type", "mean")
-        if pruning_mode == "max":
-            low_opacity = (self.state.anchor_opacity < opt.min_opacity).view(-1)
-        else:
-            low_opacity = (
-                self.state.anchor_opacity < opt.min_opacity * self.state.anchor_visits
-            ).view(-1)
-        visited = (
-            self.state.anchor_visits.view(-1) > opt.update_interval * opt.success_threshold
+        prune_them_anchors_mask = (
+            self.anchor_opacity_acc / self.anchor_visits.clamp(min=1) < opacity_threshold
         )
-        return low_opacity & visited
+
+        if not prune_them_anchors_mask.any():
+            return
+
+        keep_mask = ~prune_them_anchors_mask
+
+        # update optimizer and the anchor cloud data
+        self._prune_optimizer(keep_mask)
+
+        # update non-parameter data
+        if self.anchor_cloud.semantic_labels is not None:
+            self.anchor_cloud.semantic_labels = self.anchor_cloud.semantic_labels[keep_mask]
+
+        self.anchor_cloud.visibility_mask = torch.ones(
+            self.anchor_cloud.anchors_positions.shape[0],
+            dtype=torch.bool,
+            device=self.anchor_cloud.anchors_positions.device,
+        )
+
+        # mask accumulators to surviving anchors (preserve existing stats)
+        self._mask_state(keep_mask)
+
+    def _extend_optimizer(self, extension_dict):
+        """
+        For each anchor-cloud optimizer group:
+          1. Extend Adam state buffers (exp_avg, exp_avg_sq) with zeros for new entries.
+          2. Concatenate old param with extension to form a new Parameter.
+          3. Replace group["params"][0] with the new Parameter.
+          4. Mirror the new Parameter onto the AnchorCloud attribute.
+        Called BEFORE any field attributes are changed externally.
+        """
+        for group in self.optimizer.param_groups:
+            name = group.get("name")
+            if name not in extension_dict:
+                continue
+            ext = extension_dict[name].to(dtype=group["params"][0].dtype)
+            old_param = group["params"][0]
+            state = self.optimizer.state.pop(old_param, {})
+
+            for key in ("exp_avg", "exp_avg_sq"):
+                if key in state:
+                    state[key] = torch.cat([state[key], torch.zeros_like(ext)], dim=0)
+
+            new_param = nn.Parameter(
+                torch.cat([old_param.detach(), ext], dim=0),
+                requires_grad=(name != "rotation"),
+            )
+            group["params"][0] = new_param
+            if state:
+                self.optimizer.state[new_param] = state
+
+            setattr(self.anchor_cloud, _GROUP_TO_FIELD[name], new_param)
+
+    def _prune_optimizer(self, keep_mask):
+        """
+        For each anchor-cloud optimizer group:
+          1. Slice Adam state buffers to surviving rows.
+          2. Create new Parameter from surviving rows.
+          3. Replace group["params"][0] and the AnchorCloud attribute.
+        Called BEFORE any field attributes are changed externally.
+        """
+        for group in self.optimizer.param_groups:
+            name = group.get("name")
+            if name not in _FIELD_GROUPS:
+                continue
+            old_param = group["params"][0]
+            state = self.optimizer.state.pop(old_param, {})
+
+            for key in ("exp_avg", "exp_avg_sq"):
+                if key in state:
+                    state[key] = state[key][keep_mask]
+
+            new_param = nn.Parameter(
+                old_param[keep_mask].detach().clone(),
+                requires_grad=(name != "rotation"),
+            )
+            group["params"][0] = new_param
+            if state:
+                self.optimizer.state[new_param] = state
+
+            setattr(self.anchor_cloud, _GROUP_TO_FIELD[name], new_param)
+
+    def _quantize(self, quantization_size, gaussian_gradients):
+        """
+        Quantize the space based on a voxel size and return the average gradient per voxel, gaussians position and the grid
+        """
+        gaussian_positions = self.anchor_cloud.anchors_positions.unsqueeze(
+            1
+        ) + self.anchor_cloud.gaussians_offsets * torch.exp(
+            self.anchor_cloud.anchors_log_scales
+        )[:, :3].unsqueeze(1)  # (num_anchors, num_gaussians_per_anchor, 3)
+
+        quantized_gaussians = (gaussian_positions.detach().view(-1, 3) / quantization_size).to(torch.int64)
+        unique_quantized_gaussians, inverse_gaussian_voxel_indices = torch.unique(
+            quantized_gaussians, dim=0, return_inverse=True
+        )
+
+        # average gradient per voxel via scatter_add (avoids Python loop)
+        n_voxels = unique_quantized_gaussians.shape[0]
+        average_gradient_per_voxel = torch.zeros(
+            n_voxels, dtype=gaussian_gradients.dtype, device=gaussian_gradients.device
+        )
+        voxel_counts = torch.zeros(n_voxels, dtype=torch.float32, device=gaussian_gradients.device)
+
+        average_gradient_per_voxel.scatter_add_(0, inverse_gaussian_voxel_indices, gaussian_gradients)
+        voxel_counts.scatter_add_(0, inverse_gaussian_voxel_indices, torch.ones_like(gaussian_gradients))
+        average_gradient_per_voxel = average_gradient_per_voxel / voxel_counts.clamp(min=1)
+
+        return (
+            unique_quantized_gaussians,
+            gaussian_positions,
+            average_gradient_per_voxel,
+            inverse_gaussian_voxel_indices,
+        )

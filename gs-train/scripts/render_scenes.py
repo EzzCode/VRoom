@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 from gaussian_renderer.render import prefilter_voxel, render
 from vroom_core.utils.checkpoints import CheckpointManager
-from vroom_core.models.facade import GaussianModel
+from vroom_core.models.gaussian_model import GaussianModel
 from typing import Optional, List, Dict, Tuple
 
 def _load_model(model_path: Path, cfg: dict, iteration: int, source_path: Optional[str], scene_name: Optional[str]):

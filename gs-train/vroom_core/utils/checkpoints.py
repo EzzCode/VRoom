@@ -20,12 +20,12 @@ class CheckpointManager:
     def save_anchor_field(self, path: str) -> None:
         field = self.model.field
         ensure_directory(os.path.dirname(path))
-        anchor = field.anchor.detach().cpu().numpy()
-        offsets = field.offset.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        features = field.feature.detach().cpu().numpy()
-        scales = field.log_scaling.detach().cpu().numpy()
-        rotations = field.raw_rotation.detach().cpu().numpy()
-        labels = field.label_ids.detach().cpu().numpy() if field.label_ids is not None else np.zeros((anchor.shape[0], 1), dtype=np.uint8)
+        anchor = field.anchors_positions.detach().cpu().numpy()
+        offsets = field.gaussians_offsets.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        features = field.anchor_features.detach().cpu().numpy()
+        scales = field.anchors_log_scales.detach().cpu().numpy()
+        rotations = field.anchors_rotations.detach().cpu().numpy()
+        labels = field.semantic_labels.detach().cpu().numpy().reshape(-1, 1) if field.semantic_labels is not None else np.zeros((anchor.shape[0], 1), dtype=np.uint8)
 
         names = ["x", "y", "z"]
         names += [f"f_offset_{idx}" for idx in range(offsets.shape[1])]

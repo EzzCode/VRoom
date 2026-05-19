@@ -265,9 +265,9 @@ class AnchorCloud(nn.Module):
         # if labels are
         if labels is not None:
             self.semantic_labels = (
-                labels
+                labels.view(-1)
                 if self.semantic_labels is None
-                else torch.cat([self.semantic_labels, labels], dim=0)
+                else torch.cat([self.semantic_labels.view(-1), labels.view(-1)], dim=0)
             )
             if self.codec is None:
                 self.codec = SemanticCodec.from_labels(self.semantic_labels.view(-1))

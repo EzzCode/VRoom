@@ -26,7 +26,7 @@ import yaml
 from tqdm import tqdm
 
 from gaussian_renderer.render import prefilter_voxel, render
-from vroom_core.models.facade import GaussianModel
+from vroom_core.models.gaussian_model import GaussianModel
 from vroom_core.data.scene_pipeline import TrainingScene
 
 

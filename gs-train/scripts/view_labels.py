@@ -11,7 +11,7 @@ if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
 try:
-    from vroom_core.models.facade import GaussianModel
+    from vroom_core.models.gaussian_model import GaussianModel
 except ImportError:
     print("Error: Could not import vroom_core. Make sure you are running this from gs-train directory.")
     sys.exit(1)
