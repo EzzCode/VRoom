@@ -233,19 +233,13 @@ class DensificationController:
             if not candidates.any():
                 continue
 
-            # Compute selected child positions without materializing the full
-            # [N_anchors, n_offsets, 3] tensor — avoids OOM on large scenes
-            candidate_indices = candidates.nonzero(as_tuple=True)[0]
-            anchor_idx = candidate_indices // model.n_offsets
-            offset_idx = candidate_indices % model.n_offsets
-            selected_xyz = (
-                field.anchor[anchor_idx]
-                + field.offset[anchor_idx, offset_idx]
-                  * anchor_extent[anchor_idx]
+            child_xyz = (
+                field.anchor.unsqueeze(1) + field.offset * anchor_extent.unsqueeze(1)
             )
             scale_divisor = max(hierarchy_factor ** level, 1)
             cell_size = field.voxel_size * (init_factor // scale_divisor)
 
+            selected_xyz = child_xyz.reshape(-1, 3)[candidates]
             novel_anchors, novel_features, novel_labels = self._filter_novel_voxels(
                 field, model, candidates, selected_xyz, cell_size, opt
             )
@@ -350,17 +344,14 @@ class DensificationController:
         novel_positions = unique_grid[novel].float() * cell_size
 
         # Pool features from contributing offsets
-        # Avoid repeat_interleave which creates [N_anchors * n_offsets, feat_dim] —
-        # instead compute which anchor each candidate belongs to and index directly.
-        candidate_indices = candidates.nonzero(as_tuple=True)[0]
-        anchor_indices = candidate_indices // model.n_offsets
-        candidate_features = field.feature[anchor_indices]  # [n_candidates, feat_dim]
-
+        repeated_feat = field.feature.repeat_interleave(
+            model.n_offsets, dim=0
+        )[candidates]
         pooled = torch.zeros(
             (unique_grid.shape[0], field.feature.shape[1]), device=self.device
         )
         counts = torch.zeros((unique_grid.shape[0], 1), device=self.device)
-        pooled.index_add_(0, inverse, candidate_features)
+        pooled.index_add_(0, inverse, repeated_feat)
         counts.index_add_(
             0, inverse, torch.ones((inverse.shape[0], 1), device=self.device)
         )
@@ -370,15 +361,16 @@ class DensificationController:
         # Pool labels from contributing offsets
         novel_labels = None
         if field.label_ids is not None:
-            candidate_labels = field.label_ids.view(-1)[anchor_indices]
-            # Vectorized majority vote per unique voxel
-            n_unique = unique_grid.shape[0]
-            n_classes = int(candidate_labels.max().item()) + 1 if candidate_labels.numel() > 0 else 1
-            one_hot = torch.zeros((candidate_labels.shape[0], n_classes), dtype=torch.long, device=self.device)
-            one_hot.scatter_(1, candidate_labels.view(-1, 1).long(), 1)
-            votes = torch.zeros((n_unique, n_classes), dtype=torch.long, device=self.device)
-            votes.scatter_add_(0, inverse.unsqueeze(1).expand(-1, n_classes), one_hot)
-            pooled_labels = votes.argmax(dim=1)
+            repeated_labels = field.label_ids.repeat_interleave(
+                model.n_offsets, dim=0
+            ).view(-1)[candidates]
+            pooled_labels = torch.zeros(
+                unique_grid.shape[0], dtype=repeated_labels.dtype, device=self.device
+            )
+            for idx in range(unique_grid.shape[0]):
+                members = repeated_labels[inverse == idx]
+                if members.numel() > 0:
+                    pooled_labels[idx] = torch.bincount(members).argmax()
             novel_labels = pooled_labels[novel].view(-1, 1)
 
         return novel_positions, novel_features, novel_labels
@@ -389,26 +381,15 @@ class DensificationController:
     ) -> torch.Tensor:
         """Check which *candidates* coincide with any *occupied* voxel.
 
-        Uses a hash-set approach: encode each (x,y,z) integer triple into a
-        single int64 scalar, build a set from occupied voxels, then check
-        candidates with isin(). O(N+M) instead of O(N*M).
+        Uses a chunked comparison to avoid materializing a huge broadcast tensor.
         """
-        # Encode 3D integer coordinates as a single int64 using cantor-style packing.
-        # Shift to non-negative first (coordinates can be negative).
-        def encode(t: torch.Tensor) -> torch.Tensor:
-            # t: [N, 3] int64
-            # Shift so all values are >= 0 (add a large offset)
-            shift = 100_000
-            x = t[:, 0].to(torch.int64) + shift
-            y = t[:, 1].to(torch.int64) + shift
-            z = t[:, 2].to(torch.int64) + shift
-            # Pack into single int64: x * M^2 + y * M + z
-            M = torch.tensor(200_001, dtype=torch.int64, device=t.device)
-            return x * M * M + y * M + z
-
-        occupied_keys = encode(occupied)    # [N_occupied]
-        candidate_keys = encode(candidates) # [N_candidates]
-        return torch.isin(candidate_keys, occupied_keys)
+        n_chunks = (occupied.shape[0] + chunk_size - 1) // chunk_size
+        overlap_parts = []
+        for i in range(n_chunks):
+            chunk = occupied[i * chunk_size : (i + 1) * chunk_size]
+            matches = (candidates.unsqueeze(1) == chunk).all(-1).any(-1)
+            overlap_parts.append(matches)
+        return reduce(torch.logical_or, overlap_parts)
 
     # ------------------------------------------------------------------
     # Post-densification state management
