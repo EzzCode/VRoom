@@ -1,6 +1,7 @@
 import gsplat
 import torch
 from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_2dgs
+from diff_surfel_rasterization import rasterization_2dgs_inria_wrapper
 
 
 def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=True, object_mask=None):
@@ -43,40 +44,44 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
             render_mode=pc.render_mode,
             features=semantics.detach(),
         )
-    elif pc.gs_attr == "2D":
-        (
-            render_colors,
-            render_alphas,
-            render_normals,
-            render_normals_from_depth,
-            render_distort,
-            render_median,
-            render_semantics,
-            info,
-        ) = gsplat.rasterization_2dgs(
+    elif pc.gs_attr == "2D": 
+        # gsplat's Inria wrapper processes N channels by looping in chunks of 3.
+        # Format: [R, G, B, S1, ..., SF, D]
+        combined_colors = torch.cat([color, semantics.detach()], dim=-1)
+        
+        (rendered, render_alphas), info = rasterization_2dgs_inria_wrapper(
             means=xyz,
             quats=rot,
             scales=scaling,
             opacities=opacity.squeeze(-1),
-            colors=color,
+            colors=combined_colors,
             viewmats=viewmat[None],
             Ks=K[None],
             width=int(viewpoint_camera.image_width),
             height=int(viewpoint_camera.image_height),
-            backgrounds=bg_color[None]
-            if pc.render_mode not in ["RGB+D", "RGB+ED"]
-            else torch.cat((bg_color[None], torch.zeros((1, 1), device=render_device)), dim=-1),
-            packed=False,
-            tile_size=pc.tile_size_2dgs,
-            render_mode=pc.render_mode,
-            features=semantics.detach(),
+            backgrounds=bg_color[None],
+            near_plane=pc.near_plane if hasattr(pc, "near_plane") else 0.01,
+            far_plane=pc.far_plane if hasattr(pc, "far_plane") else 100.0,
         )
+        
+        # Unify output: Pack RGB + Depth into the standard 4-channel slot
+        # and isolate semantics.
+        render_colors = torch.cat([rendered[..., :3], rendered[..., -1:]], dim=-1)
+        render_semantics = rendered[..., 3:-1]
+        
+        # Extract 2DGS specific maps from meta
+        render_normals = info["normals_rend"]
+        render_normals_from_depth = info["normals_surf"]
+        render_distort = info["render_distloss"]
+        render_median = torch.zeros_like(render_alphas)
     else:
         raise ValueError(f"Unknown gs_attr: {pc.gs_attr}")
 
+    # --- Unified Output Processing ---
+    # Extract depth if the rasterizer returned a 4-channel RGB+D image
     if render_colors.shape[-1] == 4:
         colors, depths = render_colors[..., 0:3], render_colors[..., 3:4]
-        depth = depths[0].permute(2, 0, 1)
+        depth = depths[0].permute(2, 0, 1) # [1, H, W]
     else:
         colors = render_colors
         depth = None
