@@ -10,6 +10,7 @@ For each object label found in the semantic maps:
 Output: objects/ folder with one OBJ per object label.
 """
 
+import argparse
 import numpy as np
 import json
 import os
@@ -20,6 +21,31 @@ from generate_sdf import fuse_tsdf
 from marching_cubes import run_marching_cubes
 from export_ply import export_ply_binary
 from utils import remove_small_components, compute_depth_trunc, unproject_to_3d
+
+# ============================================================================
+# Parameters (all tunable via command-line arguments)
+# ============================================================================
+parser = argparse.ArgumentParser(description="Extract per-object meshes from GS renders.")
+parser.add_argument("--min_pixels",   type=int,   default=50000, help="Min total label pixels across all views to process an object (default: 50000)")
+parser.add_argument("--padding",      type=float, default=0.5,  help="Bounding box padding in world units (default: 0.05). Larger = more surrounding geometry included.")
+parser.add_argument("--resolution",   type=int,   default=128,   help="TSDF grid resolution N (N^3 voxels, default: 128). Higher = finer mesh but slower.")
+parser.add_argument("--trunc_factor", type=float, default=5.0,   help="TSDF truncation margin = voxel_size * trunc_factor (default: 5.0)")
+parser.add_argument("--min_obs",      type=int,   default=3,     help="Min cameras that must observe a voxel to keep it (default: 3). Lower = more geometry but more noise.")
+parser.add_argument("--min_component",type=float, default=0.05,  help="Remove mesh fragments smaller than this fraction of the largest component (default: 0.05)")
+parser.add_argument("--label",        type=int,   default=None,  help="Process only this label ID (default: all labels)")
+args = parser.parse_args()
+
+MIN_PIXELS    = args.min_pixels
+PADDING       = args.padding
+N             = args.resolution
+TRUNC_FACTOR  = args.trunc_factor
+MIN_OBS       = args.min_obs
+MIN_COMPONENT = args.min_component
+LABEL_FILTER  = args.label
+
+print(f"Parameters: min_pixels={MIN_PIXELS}, padding={PADDING}, resolution={N}, "
+      f"trunc_factor={TRUNC_FACTOR}, min_obs={MIN_OBS}, min_component={MIN_COMPONENT}"
+      + (f", label={LABEL_FILTER}" if LABEL_FILTER is not None else ""))
 
 total_start_time = time.time()
 
@@ -124,6 +150,9 @@ print(f"{'='*60}")
 for label_id in sorted_labels:
     torch.cuda.empty_cache() # clear GPU cache to avoid fragmentation issues
 
+    if LABEL_FILTER is not None and label_id != LABEL_FILTER:
+        continue
+
     if label_counts[label_id] < MIN_PIXELS:
         print(f"\n--- Skipping label {label_id} ({label_counts[label_id]:,} pixels < {MIN_PIXELS:,} min) ---")
         continue
@@ -187,15 +216,13 @@ for label_id in sorted_labels:
     print(f"  3D size: {obj_size.round(3)} units")
 
     # Step C: Set grid parameters
-    padding = 0.05  # 0.05 units padding instead of 0.1 for a tighter resolution mesh
-    grid_min = obj_min - padding
-    grid_max = obj_max + padding
+    grid_min = obj_min - PADDING
+    grid_max = obj_max + PADDING
     grid_size = grid_max - grid_min # width, height, and depth of the bounding box
 
-    N = 128  # resolution per object (enough for single objects) - 128 corners (encloses 127 voxels)
     # grid_size.max() to make sure the grid is big enough to contain the object (extracts largest dimension of grid)
-    voxel_size = grid_size.max() / N 
-    trunc_margin = voxel_size * 5 # truncate the sdf values to 5 times the voxel size
+    voxel_size = grid_size.max() / N
+    trunc_margin = voxel_size * TRUNC_FACTOR # truncate the sdf values to trunc_factor times the voxel size
     depth_trunc = BBOX_DEPTH_TRUNC
 
     print(f"  Grid: {N}^3, voxel={voxel_size:.4f} units, trunc={trunc_margin:.4f} units")
@@ -217,15 +244,14 @@ for label_id in sorted_labels:
     print(f"  TSDF fusion: {t1 - t0:.2f}s")
 
     # Step D2: Filter low-confidence voxels corners (removes flying pixels)
-    # Voxel corners seen by fewer than min_obs cameras are unreliable, set to +1 (outside)
+    # Voxel corners seen by fewer than MIN_OBS cameras are unreliable, set to +1 (outside)
     # so Marching Cubes won't generate surfaces there.
-    min_obs = 2
-    low_conf_mask = obs_count < min_obs
+    low_conf_mask = obs_count < MIN_OBS
     n_removed = np.sum((fused_grid < 0) & low_conf_mask) # negative values are inside the object
     fused_grid[low_conf_mask] = 1.0
     if fused_colors is not None:
         fused_colors[low_conf_mask] = 0.0
-    print(f"  Confidence filter: removed {n_removed} low-confidence surface voxel corners (min_obs={min_obs})")
+    print(f"  Confidence filter: removed {n_removed} low-confidence surface voxel corners (min_obs={MIN_OBS})")
 
     # Step E: Run Marching Cubes
     print(f"  Marching Cubes...")
@@ -242,7 +268,7 @@ for label_id in sorted_labels:
 
     # Step E2: Remove flying fragments
     vertices, triangles, vertex_colors = remove_small_components(
-        vertices, triangles, vertex_colors, min_ratio=0.05
+        vertices, triangles, vertex_colors, min_ratio=MIN_COMPONENT
     )
     print(f"  After cleanup: {len(vertices)} vertices, {len(triangles)} triangles")
 
