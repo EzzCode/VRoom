@@ -9,5 +9,11 @@ git submodule update --init --recursive
 To build the CUDA rasterizer, run:
 
 ```bash
-CC=gcc-11 CXX=g++-11 pip install -e .
+make clean build
+```
+
+To run training on 3dovs:
+
+```bash
+make run_train_3dovs
 ```

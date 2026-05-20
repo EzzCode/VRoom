@@ -6,5 +6,5 @@ clean:
 build:
 	cd ./diff-surfel-rasterization && CC=gcc-11 CXX=g++-11 pip install -e .
 
-run_train:
-	python gs-train/trainer.py --config gs-train/config/vroom/2d/3dovs/config.yaml --scene_name bed --gpu 0
+run_train_3dovs:
+	python -m gstrain.trainer  --config gstrain/config/vroom/2d/3dovs/config.yaml --scene_name bed --gpu 0
