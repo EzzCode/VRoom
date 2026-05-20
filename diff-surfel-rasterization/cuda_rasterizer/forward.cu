@@ -187,6 +187,10 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float3 p_view;
 	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
 		return;
+
+	// Perform opacity culling, quit if transparent
+	if (opacities[idx] < 0.005f)
+		return;
 	
 	// Compute transformation matrix
 	glm::mat3 T;
@@ -444,7 +448,7 @@ renderCUDA(
 
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
-				C[ch] += features[collected_id[j] * CHANNELS + ch] * w;
+				C[ch] += __ldg(&features[collected_id[j] * CHANNELS + ch]) * w;
 			T = test_T;
 
 			// Keep track of last range entry to update this
