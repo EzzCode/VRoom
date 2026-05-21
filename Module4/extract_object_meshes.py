@@ -27,7 +27,7 @@ from utils import remove_small_components, compute_depth_trunc, unproject_to_3d
 # ============================================================================
 parser = argparse.ArgumentParser(description="Extract per-object meshes from GS renders.")
 parser.add_argument("--min_pixels",   type=int,   default=50000, help="Min total label pixels across all views to process an object (default: 50000)")
-parser.add_argument("--padding",      type=float, default=0.5,  help="Bounding box padding in world units (default: 0.05). Larger = more surrounding geometry included.")
+parser.add_argument("--padding",      type=float, default=0.22, help="Bounding box padding as a fraction of object size (default: 0.22 = 22%%). Larger = more surrounding geometry included.")
 parser.add_argument("--resolution",   type=int,   default=128,   help="TSDF grid resolution N (N^3 voxels, default: 128). Higher = finer mesh but slower.")
 parser.add_argument("--trunc_factor", type=float, default=5.0,   help="TSDF truncation margin = voxel_size * trunc_factor (default: 5.0)")
 parser.add_argument("--min_obs",      type=int,   default=3,     help="Min cameras that must observe a voxel to keep it (default: 3). Lower = more geometry but more noise.")
@@ -216,8 +216,9 @@ for label_id in sorted_labels:
     print(f"  3D size: {obj_size.round(3)} units")
 
     # Step C: Set grid parameters
-    grid_min = obj_min - PADDING
-    grid_max = obj_max + PADDING
+    padding_world = obj_size.max() * PADDING  # scale padding with object size so it's scene-independent
+    grid_min = obj_min - padding_world
+    grid_max = obj_max + padding_world
     grid_size = grid_max - grid_min # width, height, and depth of the bounding box
 
     # grid_size.max() to make sure the grid is big enough to contain the object (extracts largest dimension of grid)
