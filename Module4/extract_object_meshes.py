@@ -11,15 +11,18 @@ Output: objects/ folder with one OBJ per object label.
 """
 
 import argparse
-import numpy as np
 import json
 import os
 import time
-import torch
+
+import numpy as np
 from PIL import Image
+from scipy.ndimage import gaussian_filter
+import torch
+
+from export_ply import export_ply_binary
 from generate_sdf import fuse_tsdf
 from marching_cubes import run_marching_cubes
-from export_ply import export_ply_binary
 from utils import remove_small_components, compute_depth_trunc, unproject_to_3d
 
 # ============================================================================
@@ -32,6 +35,7 @@ parser.add_argument("--resolution",   type=int,   default=128,   help="TSDF grid
 parser.add_argument("--trunc_factor", type=float, default=5.0,   help="TSDF truncation margin = voxel_size * trunc_factor (default: 5.0)")
 parser.add_argument("--min_obs",      type=int,   default=3,     help="Min cameras that must observe a voxel to keep it (default: 3). Lower = more geometry but more noise.")
 parser.add_argument("--min_component",type=float, default=0.05,  help="Remove mesh fragments smaller than this fraction of the largest component (default: 0.05)")
+parser.add_argument("--smooth_sigma", type=float, default=0.8,  help="Gaussian smoothing sigma applied to TSDF grid before marching cubes (default: 0 = off). Try 0.5-2.0 in voxel units.")
 parser.add_argument("--label",        type=int,   default=None,  help="Process only this label ID (default: all labels)")
 args = parser.parse_args()
 
@@ -41,6 +45,7 @@ N             = args.resolution
 TRUNC_FACTOR  = args.trunc_factor
 MIN_OBS       = args.min_obs
 MIN_COMPONENT = args.min_component
+SMOOTH_SIGMA  = args.smooth_sigma
 LABEL_FILTER  = args.label
 
 print(f"Parameters: min_pixels={MIN_PIXELS}, padding={PADDING}, resolution={N}, "
@@ -254,6 +259,12 @@ for label_id in sorted_labels:
         fused_colors[low_conf_mask] = 0.0
     print(f"  Confidence filter: removed {n_removed} low-confidence surface voxel corners (min_obs={MIN_OBS})")
 
+    # Step D3: Optional Gaussian smoothing of TSDF grid (smooths surface bumps before marching cubes)
+    if SMOOTH_SIGMA > 0:
+        print(f"  Gaussian smoothing TSDF grid (sigma={SMOOTH_SIGMA} voxels)...")
+        fused_grid = gaussian_filter(fused_grid.astype(np.float32), sigma=SMOOTH_SIGMA)
+        print(f"  Smoothing done.")
+
     # Step E: Run Marching Cubes
     print(f"  Marching Cubes...")
     t2 = time.time()
@@ -276,6 +287,7 @@ for label_id in sorted_labels:
     # Scale to world coordinates (vectorized)
     # (Grid Coordinate * Size of one grid block) + Where the grid started in the room
     verts_arr = np.array(vertices) * voxel_size + grid_min
+
     scaled_vertices = [tuple(v) for v in verts_arr] # turns the array of vertices into a list of tuples to be used in export
 
     # Step F: Export
