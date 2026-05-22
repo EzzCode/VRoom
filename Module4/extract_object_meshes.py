@@ -7,7 +7,7 @@ For each object label found in the semantic maps:
 3. Run TSDF fusion with a tight grid around just that object
 4. Export individual colored mesh
 
-Output: objects/ folder with one OBJ per object label.
+Output: objects/ folder with one PLY per object label.
 """
 
 import argparse
@@ -36,6 +36,8 @@ parser.add_argument("--trunc_factor", type=float, default=5.0,   help="TSDF trun
 parser.add_argument("--min_obs",      type=int,   default=3,     help="Min cameras that must observe a voxel to keep it (default: 3). Lower = more geometry but more noise.")
 parser.add_argument("--min_component",type=float, default=0.05,  help="Remove mesh fragments smaller than this fraction of the largest component (default: 0.05)")
 parser.add_argument("--smooth_sigma", type=float, default=0.8,  help="Gaussian smoothing sigma applied to TSDF grid before marching cubes (default: 0 = off). Try 0.5-2.0 in voxel units.")
+parser.add_argument("--depth_margin", type=float, default=1.1,  help="Depth truncation margin multiplier: cutoff = 99th-pct-depth * depth_margin (default: 1.1). Increase if far object geometry is being clipped.")
+parser.add_argument("--bbox_clip",    type=float, default=2.0,  help="Clip outer N%% of 3D points on each side when computing bounding box (default: 2.0). Lower = tighter bbox, higher = more outlier tolerance.")
 parser.add_argument("--label",        type=int,   default=None,  help="Process only this label ID (default: all labels)")
 args = parser.parse_args()
 
@@ -46,6 +48,8 @@ TRUNC_FACTOR  = args.trunc_factor
 MIN_OBS       = args.min_obs
 MIN_COMPONENT = args.min_component
 SMOOTH_SIGMA  = args.smooth_sigma
+DEPTH_MARGIN  = args.depth_margin
+BBOX_CLIP     = args.bbox_clip
 LABEL_FILTER  = args.label
 
 print(f"Parameters: min_pixels={MIN_PIXELS}, padding={PADDING}, resolution={N}, "
@@ -169,7 +173,7 @@ for label_id in sorted_labels:
     # Auto-compute depth_trunc for this object
     # BBOX_DEPTH_TRUNC is the maximum depth distance to process.
     # Any pixels further away than this cutoff are ignored to remove background noise.
-    BBOX_DEPTH_TRUNC = compute_depth_trunc(depth_maps_raw, semantic_maps, label_id)
+    BBOX_DEPTH_TRUNC = compute_depth_trunc(depth_maps_raw, semantic_maps, label_id, margin=DEPTH_MARGIN)
     print(f"  Auto depth_trunc: {BBOX_DEPTH_TRUNC:.2f} units")
 
     # Step A & B: Create masked depth maps and find object's 3D bounding box
@@ -213,8 +217,8 @@ for label_id in sorted_labels:
     # This way, if there are outliers in the depth values of an object, we ignore them
     # and get a tighter bounding box. If the object extends beyond the percentiles, padding
     # will keep it included.
-    obj_min = np.percentile(all_world_pts, 2, axis=0) # 2nd percentile
-    obj_max = np.percentile(all_world_pts, 98, axis=0) # 98th percentile
+    obj_min = np.percentile(all_world_pts, BBOX_CLIP, axis=0)
+    obj_max = np.percentile(all_world_pts, 100 - BBOX_CLIP, axis=0)
     obj_size = obj_max - obj_min
 
     print(f"  3D bbox: min={obj_min.round(3)}, max={obj_max.round(3)}")
