@@ -186,6 +186,10 @@ diff-gaussian-rasterization/*
 # vscode
 .vscode/
 
+# CUDA Profiling
+*.ncu-rep
+*.nsys-rep
+
 # Reading repos
 diff-gaussian-rasterization/
 gsplat-object/
