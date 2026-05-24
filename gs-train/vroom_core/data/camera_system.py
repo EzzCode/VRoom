@@ -66,8 +66,8 @@ class RenderCamera(nn.Module):
         self.alpha_mask = self._resolve_alpha_mask(record, resolution, rgba)
         self.image_width = int(self.original_image.shape[2])
         self.image_height = int(self.original_image.shape[1])
-        self.invdepthmap = self._prepare_invdepth(record.depth, record.depth_params, resolution, data_format)
-        self.depth_mask = self.alpha_mask.clone() if self.alpha_mask is not None else None
+        self.invdepthmap = None
+        self.depth_mask = None
 
         translation = np.zeros(3, dtype=np.float32) if scene_translation is None else np.asarray(scene_translation, dtype=np.float32)
         world_view = world_to_view_matrix(self.R, self.T, translation, float(scene_scale))
@@ -89,17 +89,6 @@ class RenderCamera(nn.Module):
         if rgba.shape[0] == 4:
             return rgba[3:4]
         return torch.ones_like(rgba[:1])
-
-    def _prepare_invdepth(self, depth, depth_params, resolution, data_format):
-        if depth is None or depth_params is None or data_format not in {"colmap", "city"}:
-            return None
-        scaled = depth * depth_params["scale"] + depth_params["offset"]
-        scaled = cv2.resize(scaled, resolution)
-        scaled = np.where(scaled < 0.0, 0.0, scaled)
-        if scaled.ndim != 2:
-            scaled = scaled[..., 0]
-        scaled = np.array(scaled, copy=True)
-        return torch.from_numpy(scaled[None]).to(self.data_device)
 
     def _load_object_mask(self, resolution):
         source = Path(self.image_path)

@@ -4,36 +4,30 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 from argparse import ArgumentParser
-from dataclasses import fields
 from datetime import datetime
 
+from types import SimpleNamespace
 import torch
-import yaml
-
-from vroom_core.models.gaussian_model import GaussianModel
-from vroom_core.training.orchestration import PipeConfig, PipelineConfig, TrainingConfig, TrainingOrchestrator as Trainer
+from vroom_core.models.anchor_field import AnchorCloud
+from vroom_core.models.decoder import GaussianDecoder
+from vroom_core.training.orchestration import TrainingOrchestrator
 from vroom_core.utils.runtime import seed_everything
 from vroom_core.data.scene_pipeline import TrainingScene
+from vroom_core.utils.config import load_vroom_config
+from vroom_core.utils.checkpoints import CheckpointManager
 
 
-def _apply_overrides(config_object, values: dict) -> None:
-    valid = {field.name for field in fields(config_object)}
-    for key, value in values.items():
-        if key in valid:
-            setattr(config_object, key, value)
-
-
-def _build_dataset_args(model_params: dict, source_path: str, model_path: str, pipeline_params: dict):
+def _build_dataset_args(model_params: dict, source_path: str, model_path: str):
     class DatasetArgs:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
-    resolution = model_params.get("resolution", pipeline_params.get("resolution", -1))
     return DatasetArgs(
         source_path=source_path,
         model_path=model_path,
-        resolution=resolution,
+        resolution=model_params.get("resolution", -1),
         resolution_scales=model_params.get("resolution_scales", [1.0]),
         images=model_params.get("images", "images"),
         depths=model_params.get("depths", "depths"),
@@ -71,16 +65,11 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Training config file path")
     parser.add_argument("--scene_name", type=str, default=None, help="Override scene name in config")
     parser.add_argument("--gpu", type=str, default="-1")
-    parser.add_argument("--no_vis", action="store_true", default=False, help="Disable side-by-side visualization saving")
+    parser.add_argument("--no_vis", action="store_true", default=False, help="Disable visualization saving")
     parser.add_argument("--start_checkpoint", type=str, default=None)
     args = parser.parse_args()
 
-    with open(args.config, "r", encoding="utf-8") as handle:
-        cfg = yaml.load(handle, Loader=yaml.FullLoader)
-
-    model_params = cfg.get("model_params", {})
-    optim_params = cfg.get("optim_params", {})
-    pipeline_params = cfg.get("pipeline_params", {})
+    cfg, model_params, optim_params, pipeline_params = load_vroom_config(args.config)
 
     if args.scene_name is not None:
         model_params["exp_name"] = os.path.join(model_params.get("exp_name", "run"), args.scene_name)
@@ -102,36 +91,66 @@ def main():
     seed_everything(quiet=False)
 
     dataset_name = model_params.get("dataset_name", "")
-    exp_name = model_params.get("exp_name", os.path.basename(args.config).replace(".yaml", ""))
-    model_path = os.path.join("output", dataset_name, exp_name, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    exp_name = model_params.get("exp_name", os.path.basename(args.config).replace(".json", ""))
+    model_path = os.path.join(
+        "output", dataset_name, exp_name, datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    )
     os.makedirs(model_path, exist_ok=True)
-    with open(os.path.join(model_path, "config.yaml"), "w", encoding="utf-8") as handle:
-        yaml.safe_dump(cfg, handle, sort_keys=False)
-
-    train_config = TrainingConfig()
-    pipeline_config = PipelineConfig()
-    _apply_overrides(train_config, optim_params)
-    _apply_overrides(pipeline_config, pipeline_params)
-    pipeline_config.save_vis = not args.no_vis
+    with open(os.path.join(model_path, "config.json"), "w", encoding="utf-8") as handle:
+        json.dump(cfg, handle, indent=4)
 
     model_kwargs = model_params.get("model_config", {}).get("kwargs", {})
-    gaussian_model = GaussianModel(
-        n_offsets=model_kwargs.get("n_offsets", 5),
-        feat_dim=model_kwargs.get("feat_dim", 32),
-        view_dim=model_kwargs.get("view_dim", 3),
-        appearance_dim=model_kwargs.get("appearance_dim", 0),
+    anchor_cloud = AnchorCloud(
         voxel_size=model_kwargs.get("voxel_size", -1.0),
-        gs_attr=model_kwargs.get("gs_attr", "3D"),
-        render_mode=model_kwargs.get("render_mode", "RGB+ED"),
-        tile_size_2dgs=model_kwargs.get("tile_size_2dgs", 8),
+        gaussians_per_anchor=model_kwargs.get("gaussians_per_anchor", model_kwargs.get("n_offsets", 5)),
+        feature_dim=model_kwargs.get("feat_dim", 32),
     )
+    decoder = GaussianDecoder(
+        feature_dim=model_kwargs.get("feat_dim", 32),
+        anchor_cloud=anchor_cloud,
+    ).to(anchor_cloud.device)
+    decoder.gs_attr = model_kwargs.get("gs_attr", "3D")
+    decoder.render_mode = model_kwargs.get("render_mode", "RGB+ED")
+    decoder.tile_size_2dgs = model_kwargs.get("tile_size_2dgs", 8)
 
-    dataset_args = _build_dataset_args(model_params, source_path, model_path, pipeline_params)
     logger = _configure_logging()
     logger.info("Optimizing " + model_path)
-    scene = TrainingScene(dataset_args, gaussian_model, shuffle=pipeline_config.shuffle, logger=logger, weed_ratio=pipeline_config.weed_ratio)
-    trainer = Trainer(train_config, pipeline_config, gaussian_model, scene, output_dir=model_path, logger=logger)
-    trainer.run()
+
+    dataset_args = _build_dataset_args(model_params, source_path, model_path)
+    scene = TrainingScene(
+        dataset_args,
+        anchor_cloud,
+        decoder,
+        shuffle=pipeline_params.get("shuffle", True),
+        logger=logger,
+        weed_ratio=pipeline_params.get("weed_ratio", 0.0),
+    )
+
+    if args.no_vis:
+        pipeline_params["save_vis"] = False
+
+    configs = {
+        "optimization": {
+            **optim_params,
+            "args": SimpleNamespace(**optim_params),
+            "spatial_lr_scale": scene.cameras_extent,
+            "anchor_cloud": anchor_cloud,
+            "decoder": decoder,
+        },
+        "pipeline": {
+            **pipeline_params,
+            "output_dir": model_path,
+            "bg_color": scene.background,
+        },
+        "densifier": cfg.get("densifier", {}),
+    }
+
+    orchestrator = TrainingOrchestrator(configs, scene=scene, logger=logger)
+
+    os.makedirs(os.path.join(model_path, "visualization"), exist_ok=True)
+    os.makedirs(os.path.join(model_path, "checkpoints"), exist_ok=True)
+
+    orchestrator.train(scene.getTrainCameras())
     logger.info("\nTraining complete.")
 
 

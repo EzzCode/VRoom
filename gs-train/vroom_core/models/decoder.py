@@ -1,127 +1,87 @@
-"""Neural decoding of anchor fields into renderable Gaussians."""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Optional
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
-from vroom_core.models.semantics import SemanticCodec
-
-
-class AppearanceTable(nn.Module):
-    def __init__(self, num_embeddings: int, embedding_dim: int, init_std: float | None = None) -> None:
-        super().__init__()
-        self.table = nn.Embedding(num_embeddings, embedding_dim)
-        self._table = self.table
-        if init_std is not None:
-            nn.init.normal_(self.table.weight, mean=0.0, std=init_std)
-
-    def mean(self, dim: int = 0) -> torch.Tensor:
-        return self.table.weight.mean(dim)
-
-    def forward(self, indices: torch.Tensor) -> torch.Tensor:
-        return self.table(indices)
-
-
-@dataclass
-class DecodedGaussians:
-    xyz: torch.Tensor
-    offsets: torch.Tensor
-    color: torch.Tensor
-    opacity: torch.Tensor
-    scaling: torch.Tensor
-    rotation: torch.Tensor
-    selection_mask: torch.Tensor
-    semantics: torch.Tensor
 
 
 class GaussianDecoder(nn.Module):
-    def __init__(self, feat_dim: int, view_dim: int, appearance_dim: int, n_offsets: int, device: str = "cuda") -> None:
+    def __init__(self, feature_dim, anchor_cloud):
         super().__init__()
-        self.feat_dim = feat_dim
-        self.view_dim = view_dim
-        self.appearance_dim = appearance_dim
-        self.n_offsets = n_offsets
-        self.device = torch.device(device)
+        hidden_dim = 64
+        input_dim = feature_dim + 3 # where 3 is the dim of the direction vector
 
-        local_dim = feat_dim + view_dim
-        self.opacity_head = nn.Sequential(
-            nn.Linear(local_dim, feat_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, n_offsets),
+        self.number_gaussians_per_anchor = anchor_cloud.gaussians_per_anchor
+        self.feature_dim = feature_dim
+        number_gaussians_per_anchor = self.number_gaussians_per_anchor
+
+        self.color_network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, number_gaussians_per_anchor * 3),
+            nn.Sigmoid(),
+        )
+        self.covariance_network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, number_gaussians_per_anchor * 7), # 3 for scale and 4 for rotation
+        )
+        self.opacity_network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, number_gaussians_per_anchor),
             nn.Tanh(),
-        ).to(self.device)
-        self.covariance_head = nn.Sequential(
-            nn.Linear(local_dim, feat_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, 7 * n_offsets),
-        ).to(self.device)
-        self.color_head = nn.Sequential(
-            nn.Linear(local_dim + appearance_dim, feat_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, 3 * n_offsets),
-        ).to(self.device)
-        self.appearance: Optional[AppearanceTable] = None
-
-    def configure_appearance(self, num_cameras: int) -> None:
-        if self.appearance_dim > 0:
-            self.appearance = AppearanceTable(max(num_cameras, 1), self.appearance_dim).to(self.device)
-        else:
-            self.appearance = None
-
-    def decode(self, field, viewpoint_camera, visible_mask: torch.Tensor, training: bool) -> DecodedGaussians:
-        anchors = field.anchors_positions[visible_mask]
-        features = field.anchor_features[visible_mask]
-        offsets = field.gaussians_offsets[visible_mask]
-        scaling = torch.exp(field.anchors_log_scales[visible_mask])
-        semantics = self._semantic_vectors(field.codec, field.semantic_labels, visible_mask, anchors.shape[0], anchors.device)
-
-        observer = viewpoint_camera.camera_center.to(anchors.device)
-        if self.view_dim > 0:
-            view_direction = F.normalize(observer - anchors, dim=-1)
-            local_code = torch.cat([features, view_direction], dim=-1)
-        else:
-            local_code = features
-
-        if self.appearance is not None:
-            camera_id = int(viewpoint_camera.uid if training else 0)
-            camera_ids = torch.full((anchors.shape[0],), camera_id, dtype=torch.long, device=anchors.device)
-            appearance = self.appearance(camera_ids)
-            color_input = torch.cat([local_code, appearance], dim=-1)
-        else:
-            color_input = local_code
-
-        opacity_logits = self.opacity_head(local_code).reshape(-1, 1)
-        color = self.color_head(color_input).reshape(anchors.shape[0] * self.n_offsets, 3)
-        covariance = self.covariance_head(local_code).reshape(anchors.shape[0] * self.n_offsets, 7)
-
-        selection_mask = opacity_logits.squeeze(-1) > 0.0
-        repeated_anchor = anchors.repeat_interleave(self.n_offsets, dim=0)
-        repeated_scale = scaling.repeat_interleave(self.n_offsets, dim=0)
-        repeated_semantics = semantics.repeat_interleave(self.n_offsets, dim=0)
-
-        offset_xyz = offsets.reshape(-1, 3)
-        scaled_offsets = offset_xyz[selection_mask] * repeated_scale[selection_mask, :3]
-        xyz = repeated_anchor[selection_mask] + scaled_offsets
-        final_scaling = repeated_scale[selection_mask, 3:] * torch.sigmoid(covariance[selection_mask, :3])
-        final_rotation = F.normalize(covariance[selection_mask, 3:7], dim=-1)
-
-        return DecodedGaussians(
-            xyz=xyz,
-            offsets=scaled_offsets,
-            color=color[selection_mask],
-            opacity=opacity_logits[selection_mask],
-            scaling=final_scaling,
-            rotation=final_rotation,
-            selection_mask=selection_mask,
-            semantics=repeated_semantics[selection_mask],
         )
 
-    def _semantic_vectors(self, codec: Optional[SemanticCodec], labels: Optional[torch.Tensor], visible_mask: torch.Tensor, count: int, device) -> torch.Tensor:
-        if codec is None or labels is None:
-            return torch.zeros((count, 1), dtype=torch.float32, device=device)
-        return codec.transform(labels.view(-1)[visible_mask])
+    def forward_pass(self, anchor_cloud, visible_anchors_mask, camera):
+        visible_anchors = anchor_cloud.anchors_positions[visible_anchors_mask]
+        num_visible = visible_anchors.shape[0]
+
+        # create the feature vector
+        anchor_to_camera_distance = visible_anchors -  camera.camera_center.to(visible_anchors.device) # distance matrix between each anchor and the camera
+        viewing_vector = torch.nn.functional.normalize(anchor_to_camera_distance, dim=-1) # direction vector from camera to anchor
+
+        # concatenate features and viewing vector along last dimension
+        features = anchor_cloud.anchor_features[visible_anchors_mask]
+        latent = torch.cat([features, viewing_vector], dim=-1)
+
+        # predictions
+        color_pred = self.color_network(latent).view(num_visible, self.number_gaussians_per_anchor, 3)
+        opacity_pred = self.opacity_network(latent).view(num_visible, self.number_gaussians_per_anchor, 1)
+        covariance_pred = self.covariance_network(latent).view(num_visible, self.number_gaussians_per_anchor, 7)
+
+        # valid opacity mask
+        negative_opacity_filter = (opacity_pred.squeeze(-1) > 0) # we cant have negative opacties
+
+        color_pred = color_pred[negative_opacity_filter]
+        opacity_pred = opacity_pred[negative_opacity_filter]
+        covariance_pred = covariance_pred[negative_opacity_filter]
+
+        anchor_positions = anchor_cloud.anchors_positions[visible_anchors_mask]
+        gaussian_offsets = anchor_cloud.gaussians_offsets[visible_anchors_mask]
+        anchor_scales = torch.exp(anchor_cloud.anchors_log_scales[visible_anchors_mask])
+
+        # used to calculate the gaussians position
+        valid_scales = anchor_scales.unsqueeze(1).expand(-1, self.number_gaussians_per_anchor, -1)[negative_opacity_filter][:, :3] # uses broadcasting to create a matrix where we copy scale of each anchor to its gaussians
+        valid_offsets = gaussian_offsets.view(num_visible, self.number_gaussians_per_anchor, 3)[negative_opacity_filter]
+        valid_anchors = anchor_positions.unsqueeze(1).expand(-1, self.number_gaussians_per_anchor, -1)[negative_opacity_filter]
+        gaussian_positions = valid_anchors + (valid_offsets * valid_scales)
+
+        normalized_rotations = torch.nn.functional.normalize(covariance_pred[:, 3:7], dim=-1)
+
+        semantics_pred = None
+        if anchor_cloud.semantic_labels is not None and anchor_cloud.semantic_manager is not None:
+            visible_labels = anchor_cloud.semantic_labels[visible_anchors_mask]
+            if visible_labels.dim() > 1:
+                visible_labels = visible_labels.squeeze(-1)
+            visible_label_indices = anchor_cloud.semantic_manager.build_lookup_table(visible_labels)
+            visible_one_hot = anchor_cloud.semantic_manager.one_hot_encode(visible_label_indices).float()
+            expanded_one_hot = visible_one_hot.unsqueeze(1).expand(-1, self.number_gaussians_per_anchor, -1)
+            semantics_pred = expanded_one_hot[negative_opacity_filter]
+
+        return {
+            "gaussian_possitions": gaussian_positions,
+            "normalized_rotations": normalized_rotations,
+            "color": color_pred,
+            "opacity": opacity_pred,
+            "scaling": torch.exp(covariance_pred[:, :3]),
+            "negative_opacity_filter": negative_opacity_filter,
+            "semantics": semantics_pred
+        }

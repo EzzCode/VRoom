@@ -27,7 +27,8 @@ from tqdm import tqdm
 
 from gaussian_renderer.render import prefilter_voxel, render
 from vroom_core.utils.checkpoints import CheckpointManager
-from vroom_core.models.gaussian_model import GaussianModel
+from vroom_core.models.anchor_field import AnchorCloud
+from vroom_core.models.decoder import GaussianDecoder
 from typing import Optional, List, Dict, Tuple
 
 def _load_model(model_path: Path, cfg: dict, iteration: int, source_path: Optional[str], scene_name: Optional[str]):
@@ -45,16 +46,14 @@ def _load_model(model_path: Path, cfg: dict, iteration: int, source_path: Option
     if not os.path.isabs(resolved_source):
         resolved_source = os.path.abspath(os.path.join(Path(__file__).resolve().parent, resolved_source))
 
-    gaussians = GaussianModel(
-        n_offsets=model_kwargs.get("n_offsets", 5),
-        feat_dim=model_kwargs.get("feat_dim", 32),
-        view_dim=model_kwargs.get("view_dim", 3),
-        appearance_dim=model_kwargs.get("appearance_dim", 0),
-        voxel_size=model_kwargs.get("voxel_size", -1.0),
-        gs_attr=model_kwargs.get("gs_attr", "3D"),
-        render_mode=model_kwargs.get("render_mode", "RGB+ED"),
-        tile_size_2dgs=model_kwargs.get("tile_size_2dgs", 8),
+    anchor_cloud = AnchorCloud()
+    decoder = GaussianDecoder(
+        feature_dim=model_kwargs.get("feat_dim", 32),
+        anchor_cloud=anchor_cloud,
     )
+    decoder.gs_attr = model_kwargs.get("gs_attr", "3D")
+    decoder.render_mode = model_kwargs.get("render_mode", "RGB+ED")
+    decoder.tile_size_2dgs = model_kwargs.get("tile_size_2dgs", 8)
 
     class DatasetArgs:
         def __init__(self, **kwargs):
@@ -85,9 +84,9 @@ def _load_model(model_path: Path, cfg: dict, iteration: int, source_path: Option
         exp_name=model_params.get("exp_name", ""),
     )
 
-    scene = TrainingScene(dataset_args, gaussians, load_iteration=iteration, shuffle=False)
-    gaussians.set_eval()
-    return gaussians, scene
+    scene = TrainingScene(dataset_args, anchor_cloud, decoder, load_iteration=iteration, shuffle=False)
+    decoder.eval()
+    return anchor_cloud, decoder, scene
 
 
 def _resolve_iteration(model_path: Path, requested: int) -> int:
@@ -127,7 +126,8 @@ def render_set(
     split_name: str,
     iteration: int,
     views,
-    gaussians: GaussianModel,
+    anchor_cloud: AnchorCloud,
+    decoder: GaussianDecoder,
     pipe: _RenderPipe,
     background: torch.Tensor,
 ):
@@ -140,8 +140,8 @@ def render_set(
     os.makedirs(semantic_dir, exist_ok=True)
     os.makedirs(semantic_gt_dir, exist_ok=True)
 
-    vis_depth = gaussians.gs_attr == "2D"
-    vis_normal = gaussians.gs_attr == "2D"
+    vis_depth = decoder.gs_attr == "2D"
+    vis_normal = decoder.gs_attr == "2D"
     if vis_depth:
         depth_dir = os.path.join(model_path, split_name, f"ours_{iteration}", "depth")
         os.makedirs(depth_dir, exist_ok=True)
@@ -153,16 +153,28 @@ def render_set(
     per_view_dict = {}
 
     for idx, view in enumerate(tqdm(views, desc=f"Rendering {split_name}")):
-        gaussians.set_anchor_mask(view.camera_center, view.resolution_scale)
         visible_mask = (
-            prefilter_voxel(view, gaussians).squeeze()
+            prefilter_voxel(view, anchor_cloud, decoder).squeeze()
             if pipe.add_prefilter
-            else gaussians._anchor_mask
+            else anchor_cloud.visibility_mask
         )
 
         torch.cuda.synchronize()
         t_start = time.time()
-        render_pkg = render(view, gaussians, pipe, background, visible_mask=visible_mask, training=False)
+        decoded_output = decoder.forward_pass(
+            anchor_cloud=anchor_cloud,
+            visible_anchors_mask=visible_mask,
+            camera=view,
+        )
+        render_pkg = render(
+            viewpoint_camera=view,
+            decoded_output=decoded_output,
+            bg_color=background,
+            gs_attr=decoder.gs_attr,
+            render_mode=decoder.render_mode,
+            tile_size_2dgs=decoder.tile_size_2dgs,
+            semantics=None,
+        )
         torch.cuda.synchronize()
         t_end = time.time()
 
@@ -179,8 +191,8 @@ def render_set(
 
         # --- Semantic segmentation ---
         semantic_map = render_pkg["render_semantics"]
-        if gaussians.id_encoder is not None:
-            object_ids = gaussians.id_encoder.inverse_transform(semantic_map)
+        if anchor_cloud.semantic_manager is not None:
+            object_ids = anchor_cloud.semantic_manager.one_hot_decode(semantic_map.unsqueeze(0), semantic_map.shape[0])
             imageio.imwrite(
                 os.path.join(semantic_dir, f"{idx:05d}.png"),
                 object_ids.squeeze().cpu().numpy().astype(np.uint8),
@@ -240,12 +252,26 @@ def main():
     args = parser.parse_args()
 
     model_path = Path(args.model_path).resolve()
-    config_path = model_path / "config.yaml"
+    config_path = model_path / "config.json"
     if not config_path.exists():
-        raise FileNotFoundError(f"No config.yaml found at {config_path}")
+        config_path = model_path / "config.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"No config.json or config.yaml found at {model_path}")
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.load(f, Loader=yaml.FullLoader)
+    if config_path.suffix == ".json":
+        import json
+        from vroom_core.utils.config import parse_vroom_config
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw_cfg = json.load(f)
+        model_params, optim_params, pipeline_params = parse_vroom_config(raw_cfg)
+        cfg = {
+            "model_params": model_params,
+            "optim_params": optim_params,
+            "pipeline_params": pipeline_params
+        }
+    else:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.load(f, Loader=yaml.FullLoader)
 
     if args.gpu != "-1":
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -254,16 +280,16 @@ def main():
     iteration = _resolve_iteration(model_path, args.iteration)
     print(f"Rendering {model_path} — iteration {iteration}")
 
-    gaussians, scene = _load_model(model_path, cfg, iteration, args.source_path, args.scene_name)
+    anchor_cloud, decoder, scene = _load_model(model_path, cfg, iteration, args.source_path, args.scene_name)
     pipe = _RenderPipe(add_prefilter=not args.no_prefilter)
 
     if not args.skip_train:
         print("Rendering train set...")
-        render_set(str(model_path), "train", iteration, scene.getTrainCameras(), gaussians, pipe, scene.background)
+        render_set(str(model_path), "train", iteration, scene.getTrainCameras(), anchor_cloud, decoder, pipe, scene.background)
 
     if not args.skip_test:
         print("Rendering test set...")
-        render_set(str(model_path), "test", iteration, scene.getTestCameras(), gaussians, pipe, scene.background)
+        render_set(str(model_path), "test", iteration, scene.getTestCameras(), anchor_cloud, decoder, pipe, scene.background)
 
     print("Rendering complete.")
 

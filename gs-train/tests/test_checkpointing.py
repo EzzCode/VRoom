@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vroom_core.models.decoder import AppearanceTable as Embedding
-from vroom_core.models.facade import GaussianModel
+from vroom_core.models.gaussian_model import GaussianModel
 
 def test_checkpointing():
     # Setup model

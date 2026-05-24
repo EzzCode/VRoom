@@ -8,7 +8,7 @@ import torch.nn as nn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from trainer import TrainingConfig
-from vroom_core.models.facade import GaussianModel
+from vroom_core.models.gaussian_model import GaussianModel
 from vroom_core.models.semantics import SemanticCodec
 
 

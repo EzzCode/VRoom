@@ -14,11 +14,13 @@ from vroom_core.utils.runtime import ensure_directory
 
 
 class CheckpointManager:
-    def __init__(self, model) -> None:
-        self.model = model
+    def __init__(self, anchor_cloud, decoder) -> None:
+        self.anchor_cloud = anchor_cloud
+        self.decoder = decoder
+        self.device = anchor_cloud.device
 
-    def save_anchor_field(self, path: str) -> None:
-        field = self.model.field
+    def save_anchor_cloud(self, path: str) -> None:
+        field = self.anchor_cloud
         ensure_directory(os.path.dirname(path))
         anchor = field.anchors_positions.detach().cpu().numpy()
         offsets = field.gaussians_offsets.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
@@ -48,89 +50,56 @@ class CheckpointManager:
         rotations = self._stack_prefixed(ply, "rot_")
         labels = np.asarray(ply["label"])[..., None].astype(np.int64) if "label" in [prop.name for prop in ply.properties] else None
         return {
-            "anchor": torch.tensor(anchor, dtype=torch.float32, device=self.model.device),
-            "offset": torch.tensor(offset_flat.reshape(anchor.shape[0], 3, -1), dtype=torch.float32, device=self.model.device).transpose(1, 2).contiguous(),
-            "feature": torch.tensor(features, dtype=torch.float32, device=self.model.device),
-            "log_scaling": torch.tensor(scales, dtype=torch.float32, device=self.model.device),
-            "rotation": torch.tensor(rotations, dtype=torch.float32, device=self.model.device),
-            "labels": None if labels is None else torch.tensor(labels, dtype=torch.long, device=self.model.device),
-        }
-
-    def save_explicit(self, path: str) -> None:
-        ensure_directory(os.path.dirname(path))
-        explicit = self.model.materialize_explicit()
-        dtype = [("x", "f4"), ("y", "f4"), ("z", "f4")]
-        dtype += [(f"f_dc_{idx}", "f4") for idx in range(3)]
-        dtype += [("opacity", "f4")]
-        dtype += [(f"scale_{idx}", "f4") for idx in range(3)]
-        dtype += [(f"rot_{idx}", "f4") for idx in range(4)]
-        packed = np.concatenate(
-            [
-                explicit["xyz"],
-                explicit["rgb"],
-                explicit["opacity"],
-                explicit["scaling"],
-                explicit["rotation"],
-            ],
-            axis=1,
-        )
-        elements = np.empty(explicit["xyz"].shape[0], dtype=dtype)
-        elements[:] = list(map(tuple, packed))
-        PlyData([PlyElement.describe(elements, "vertex")]).write(path)
-
-    def load_explicit(self, path: str) -> dict:
-        ply = PlyData.read(path).elements[0]
-        xyz = np.stack([np.asarray(ply["x"]), np.asarray(ply["y"]), np.asarray(ply["z"])], axis=1).astype(np.float32)
-        rgb = np.stack([np.asarray(ply["f_dc_0"]), np.asarray(ply["f_dc_1"]), np.asarray(ply["f_dc_2"])], axis=1).astype(np.float32)
-        opacity = np.asarray(ply["opacity"])[..., None].astype(np.float32)
-        scaling = self._stack_prefixed(ply, "scale_").astype(np.float32)
-        rotation = self._stack_prefixed(ply, "rot_").astype(np.float32)
-        return {
-            "xyz": torch.tensor(xyz, dtype=torch.float32, device=self.model.device),
-            "rgb": torch.tensor(rgb, dtype=torch.float32, device=self.model.device),
-            "opacity": torch.tensor(opacity, dtype=torch.float32, device=self.model.device),
-            "scaling": torch.tensor(scaling, dtype=torch.float32, device=self.model.device),
-            "rotation": torch.tensor(rotation, dtype=torch.float32, device=self.model.device),
+            "anchor": torch.tensor(anchor, dtype=torch.float32, device=self.device),
+            "offset": torch.tensor(offset_flat.reshape(anchor.shape[0], 3, -1), dtype=torch.float32, device=self.device).transpose(1, 2).contiguous(),
+            "feature": torch.tensor(features, dtype=torch.float32, device=self.device),
+            "log_scaling": torch.tensor(scales, dtype=torch.float32, device=self.device),
+            "rotation": torch.tensor(rotations, dtype=torch.float32, device=self.device),
+            "labels": None if labels is None else torch.tensor(labels, dtype=torch.long, device=self.device),
         }
 
     def save_decoder(self, path: str) -> None:
         ensure_directory(path)
-        self.model.set_eval()
-        torch.jit.trace(self.model.decoder.opacity_head, torch.rand(1, self.model.feat_dim + self.model.view_dim, device=self.model.device)).save(
+        self.decoder.eval()
+        feat_dim = self.decoder.feature_dim
+        view_dim = 3
+        appearance_dim = 0
+
+        opacity_mlp = self.decoder.opacity_network
+        covariance_mlp = self.decoder.covariance_network
+        color_mlp = self.decoder.color_network
+
+        input_dim = feat_dim + view_dim
+
+        torch.jit.trace(opacity_mlp, torch.rand(1, input_dim, device=self.device)).save(
             os.path.join(path, "opacity_mlp.pt")
         )
-        torch.jit.trace(self.model.decoder.covariance_head, torch.rand(1, self.model.feat_dim + self.model.view_dim, device=self.model.device)).save(
+        torch.jit.trace(covariance_mlp, torch.rand(1, input_dim, device=self.device)).save(
             os.path.join(path, "cov_mlp.pt")
         )
         torch.jit.trace(
-            self.model.decoder.color_head,
-            torch.rand(1, self.model.feat_dim + self.model.view_dim + self.model.appearance_dim, device=self.model.device),
+            color_mlp,
+            torch.rand(1, input_dim + appearance_dim, device=self.device),
         ).save(os.path.join(path, "color_mlp.pt"))
-        if self.model.decoder.appearance is not None:
-            torch.jit.trace(self.model.decoder.appearance, torch.zeros((1,), dtype=torch.long, device=self.model.device)).save(
-                os.path.join(path, "embedding_appearance.pt")
-            )
+
         torch.save(
             {
-                "n_offsets": self.model.n_offsets,
-                "feat_dim": self.model.feat_dim,
-                "view_dim": self.model.view_dim,
-                "appearance_dim": self.model.appearance_dim,
-                "gs_attr": self.model.gs_attr,
-                "render_mode": self.model.render_mode,
-                "tile_size_2dgs": self.model.tile_size_2dgs,
+                "n_offsets": self.decoder.number_gaussians_per_anchor,
+                "feat_dim": feat_dim,
+                "view_dim": view_dim,
+                "appearance_dim": appearance_dim,
+                "gs_attr": self.decoder.gs_attr,
+                "render_mode": self.decoder.render_mode,
+                "tile_size_2dgs": self.decoder.tile_size_2dgs,
             },
             os.path.join(path, "vroom_bundle.pt"),
         )
-        self.model.set_train()
+        self.decoder.train()
 
     def load_decoder(self, path: str) -> None:
-        self.model.decoder.opacity_head = torch.jit.load(os.path.join(path, "opacity_mlp.pt")).to(self.model.device)
-        self.model.decoder.covariance_head = torch.jit.load(os.path.join(path, "cov_mlp.pt")).to(self.model.device)
-        self.model.decoder.color_head = torch.jit.load(os.path.join(path, "color_mlp.pt")).to(self.model.device)
-        appearance_path = os.path.join(path, "embedding_appearance.pt")
-        if self.model.appearance_dim > 0 and os.path.exists(appearance_path):
-            self.model.decoder.appearance = torch.jit.load(appearance_path).to(self.model.device)
+        self.decoder.opacity_network = torch.jit.load(os.path.join(path, "opacity_mlp.pt")).to(self.device)
+        self.decoder.covariance_network = torch.jit.load(os.path.join(path, "cov_mlp.pt")).to(self.device)
+        self.decoder.color_network = torch.jit.load(os.path.join(path, "color_mlp.pt")).to(self.device)
 
     def infer_bundle_kwargs(self, iteration_dir: Path) -> dict:
         bundle_path = iteration_dir / "vroom_bundle.pt"
@@ -163,4 +132,3 @@ class CheckpointManager:
         if not names:
             return np.zeros((len(element["x"]), 0), dtype=np.float32)
         return np.stack([np.asarray(element[name]) for name in names], axis=1).astype(np.float32)
-

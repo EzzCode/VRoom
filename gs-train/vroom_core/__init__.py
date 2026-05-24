@@ -10,13 +10,14 @@ from .data.colmap_io import (
 )
 from .data.scene_pipeline import SceneBundle, TrainingScene, camera_to_json, compute_nerf_normalization, load_colmap_bundle
 
-from .models.gaussian_model import GaussianModel
-from .models.semantics import SemanticCodec
+from .models.anchor_field import AnchorCloud
+from .models.decoder import GaussianDecoder
+from .models.semantics import SemanticsManager
 
 from .utils.geometry import PointCloudSample, focal_to_fov, fov_to_focal, pil_image_to_tensor, projection_matrix, world_to_view_matrix
 from .utils.runtime import ensure_directory, exponential_lr_schedule, seed_everything
 
-from .training.loss_engine import compute_losses
+from .training.loss_engine import LossEngine
 
 from .export.mesh_export import MeshExportResult, MeshFusionOptions, ObjectMeshExporter
 
@@ -24,17 +25,18 @@ from .viewer import viewer_protocol
 
 __all__ = [
     "FrameRecord",
-    "GaussianModel",
+    "AnchorCloud",
+    "GaussianDecoder",
     "PointCloudSample",
     "RenderCamera",
     "SceneBundle",
-    "SemanticCodec",
+    "SemanticsManager",
     "MeshExportResult",
     "MeshFusionOptions",
     "ObjectMeshExporter",
     "TrainingScene",
     "camera_to_json",
-    "compute_losses",
+    "LossEngine",
     "compute_nerf_normalization",
     "ensure_directory",
     "exponential_lr_schedule",

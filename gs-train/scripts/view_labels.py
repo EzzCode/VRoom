@@ -11,7 +11,8 @@ if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
 try:
-    from vroom_core.models.gaussian_model import GaussianModel
+    from vroom_core.models.anchor_field import AnchorCloud
+    from vroom_core.utils.checkpoints import CheckpointManager
 except ImportError:
     print("Error: Could not import vroom_core. Make sure you are running this from gs-train directory.")
     sys.exit(1)
@@ -28,29 +29,20 @@ def main():
 
     print(f"Loading checkpoint: {ply_path.name}...")
     
-    # Initialize a dummy model to use its PLY loading logic
-    # We use n_offsets=10 as a default, but it doesn't affect label counting
-    model = GaussianModel(
-        n_offsets=10, 
-        feat_dim=32, 
-        view_dim=3, 
-        appearance_dim=0, 
-        voxel_size=0.001, 
-        gs_attr="3D", 
-        render_mode="RGB+ED"
-    )
+    anchor_cloud = AnchorCloud()
+    manager = CheckpointManager(anchor_cloud, None)
 
     try:
-        model.load_ply(str(ply_path))
+        payload = manager.load_anchor_field(str(ply_path))
     except Exception as e:
         print(f"Error loading PLY: {e}")
         sys.exit(1)
 
     print("-" * 40)
-    print(f"Total Anchors: {model.field.anchor.shape[0]:,}")
+    print(f"Total Anchors: {payload['anchor'].shape[0]:,}")
     
-    if model.field.label_ids is not None:
-        label_ids = model.field.label_ids.view(-1)
+    if payload.get("labels") is not None:
+        label_ids = payload["labels"].view(-1)
         unique_labels = torch.unique(label_ids).tolist()
         
         print(f"Unique Labels Found ({len(unique_labels)}):")
@@ -67,10 +59,6 @@ def main():
             print(f"{label:<10} | {count:<15,}")
             
         print("-" * 40)
-        
-        # Check if codec exists
-        if model.field.codec:
-            print("Codec Info: Detected existing label mapping.")
     else:
         print("No labels found in this PLY.")
 

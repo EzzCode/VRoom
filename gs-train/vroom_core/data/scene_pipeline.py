@@ -45,7 +45,7 @@ def discover_colmap_scene(root: str, images: str, depths: str, masks: str, add_m
     base = Path(root)
     image_dir = base / images
     mask_dir = (base / masks) if add_mask else None
-    depth_dir = (base / depths) if add_depth else None
+    depth_dir = None
     metadata_candidates = [
         (base / "sparse/0/images.bin", base / "sparse/0/cameras.bin", True),
         (base / "sparse/0/images.txt", base / "sparse/0/cameras.txt", False),
@@ -69,7 +69,7 @@ def discover_colmap_scene(root: str, images: str, depths: str, masks: str, add_m
     point_cloud_file = next((candidate for candidate in point_cloud_candidates if candidate.exists()), None)
     if point_cloud_file is None:
         raise FileNotFoundError(f"No supported point cloud file found under {root}")
-    depth_param_file = base / "sparse/0/depth_params.json"
+    depth_param_file = None
     return SceneLayout(
         root=base,
         image_dir=image_dir,
@@ -79,7 +79,7 @@ def discover_colmap_scene(root: str, images: str, depths: str, masks: str, add_m
         camera_file=camera_file,
         binary=binary,
         point_cloud_file=point_cloud_file,
-        depth_param_file=depth_param_file if depth_param_file.exists() else None,
+        depth_param_file=depth_param_file,
     )
 
 
@@ -265,11 +265,12 @@ def camera_to_json(index, record: FrameRecord):
 
 
 class TrainingScene:
-    def __init__(self, args, gaussian_model, load_iteration=None, shuffle=True, logger=None, weed_ratio=0.0):
+    def __init__(self, args, anchor_cloud, decoder, load_iteration=None, shuffle=True, logger=None, weed_ratio=0.0):
         self.model_path = args.model_path # path to save the model
-        self.resolution_scales = args.resolution_scales # resulotions we want to train on
-        self.gaussian_model = gaussian_model
-        self.gaussian_model.weed_ratio = weed_ratio
+        self.resolution_scales = args.resolution_scales # resolutions we want to train on
+        self.anchor_cloud = anchor_cloud
+        self.decoder = decoder
+        self.weed_ratio = weed_ratio
         self.background = self._background_from_args(args)
 
         if args.data_format != "colmap":
@@ -282,20 +283,36 @@ class TrainingScene:
             rng.shuffle(bundle.test_records)
 
         self.cameras_extent = bundle.normalization["radius"]
-        self.gaussian_model.set_appearance(len(bundle.train_records))
+        # self.decoder.configure_appearance(len(bundle.train_records))
         self.train_cameras = {}
         self.test_cameras = {}
 
         if load_iteration:
+            from vroom_core.utils.checkpoints import CheckpointManager
+            checkpoints = CheckpointManager(self.anchor_cloud, self.decoder)
             iteration_dir = os.path.join(self.model_path, "point_cloud", f"iteration_{load_iteration}")
-            self.gaussian_model.load_ply(os.path.join(iteration_dir, "point_cloud.ply"))
-            self.gaussian_model.load_mlp_checkpoints(iteration_dir)
+            payload = checkpoints.load_anchor_field(os.path.join(iteration_dir, "point_cloud.ply"))
+            
+            from vroom_core.models.anchor_field import AnchorCloudData
+            from vroom_core.models.semantics import SemanticsManager
+            seeds = AnchorCloudData(
+                anchors_positions=payload["anchor"],
+                gaussians_offsets=payload["offset"],
+                anchor_features=payload["feature"],
+                anchors_log_scales=payload["log_scaling"],
+                anchors_rotations=payload["rotation"],
+                labels=payload["labels"],
+                semantic_manager=None if payload["labels"] is None else SemanticsManager(torch.unique(payload["labels"].view(-1))),
+                voxel_size=float(torch.exp(payload["log_scaling"][:, :3]).mean().item()) if payload["log_scaling"].numel() > 0 else 1.0,
+            )
+            self.anchor_cloud.set_anchors_cloud(seeds)
+            checkpoints.load_decoder(Path(iteration_dir))
         else:
             sampled = self.save_input_point_cloud(bundle.point_cloud, args.ratio, os.path.join(self.model_path, "input.ply"))
             with open(os.path.join(self.model_path, "cameras.json"), "w", encoding="utf-8") as handle:
                 json.dump([camera_to_json(index, record) for index, record in enumerate(bundle.test_records + bundle.train_records)], handle)
             
-            self.gaussian_model.initialize_anchors(sampled, self.cameras_extent, args.global_appearance, logger)
+            self.anchor_cloud.initialize_anchors(sampled, self.cameras_extent, args.global_appearance, logger)
 
         for scale in self.resolution_scales:
             self.train_cameras[scale] = build_camera_list(bundle.train_records, scale, args)
@@ -303,10 +320,10 @@ class TrainingScene:
 
     def _background_from_args(self, args):
         if args.random_background:
-            return torch.rand(3, dtype=torch.float32, device=self.gaussian_model.device)
+            return torch.rand(3, dtype=torch.float32, device=self.anchor_cloud.device)
         if args.white_background:
-            return torch.ones(3, dtype=torch.float32, device=self.gaussian_model.device)
-        return torch.zeros(3, dtype=torch.float32, device=self.gaussian_model.device)
+            return torch.ones(3, dtype=torch.float32, device=self.anchor_cloud.device)
+        return torch.zeros(3, dtype=torch.float32, device=self.anchor_cloud.device)
 
     def save_input_point_cloud(self, point_cloud: PointCloudSample, ratio: int, path: str) -> PointCloudSample:
         stride = max(int(ratio), 1)

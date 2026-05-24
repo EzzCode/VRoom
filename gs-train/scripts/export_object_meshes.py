@@ -13,19 +13,35 @@ from argparse import ArgumentParser
 import torch
 import yaml
 
-from vroom_core.models.gaussian_model import GaussianModel
+from vroom_core.models.anchor_field import AnchorCloud
+from vroom_core.models.decoder import GaussianDecoder
 from vroom_core.data.scene_pipeline import TrainingScene
 from vroom_core.export.mesh_export import MeshFusionOptions, ObjectMeshExporter
 from typing import Optional, List, Dict, Tuple
 
 def _load_config(model_path: Path, config_path: Optional[str]) -> Tuple[Dict, Path]:
-    candidate = Path(config_path).resolve() if config_path is not None else model_path / "config.yaml"
+    candidate = Path(config_path).resolve() if config_path is not None else model_path / "config.json"
+    if not candidate.exists() and config_path is None:
+        candidate = model_path / "config.yaml"
     if not candidate.exists():
         raise FileNotFoundError(
-            f"Could not find a config file at {candidate}. Pass --config or export from a run that contains config.yaml."
+            f"Could not find a config file at {candidate}. Pass --config or export from a run."
         )
-    with open(candidate, "r", encoding="utf-8") as handle:
-        return yaml.load(handle, Loader=yaml.FullLoader), candidate
+    if candidate.suffix == ".json":
+        import json
+        from vroom_core.utils.config import parse_vroom_config
+        with open(candidate, "r", encoding="utf-8") as handle:
+            raw_cfg = json.load(handle)
+        model_params, optim_params, pipeline_params = parse_vroom_config(raw_cfg)
+        cfg = {
+            "model_params": model_params,
+            "optim_params": optim_params,
+            "pipeline_params": pipeline_params
+        }
+    else:
+        with open(candidate, "r", encoding="utf-8") as handle:
+            cfg = yaml.load(handle, Loader=yaml.FullLoader)
+    return cfg, candidate
 
 
 def _resolve_source_path(model_params: dict, config_file: Path, source_override: Optional[str], scene_name: Optional[str]) -> str:
@@ -114,21 +130,19 @@ def main():
         torch.cuda.set_device(int(args.gpu))
 
     iteration = _resolve_iteration(model_path, args.iteration)
-    gaussians = GaussianModel(
-        n_offsets=model_kwargs.get("n_offsets", 5),
-        feat_dim=model_kwargs.get("feat_dim", 32),
-        view_dim=model_kwargs.get("view_dim", 3),
-        appearance_dim=model_kwargs.get("appearance_dim", 0),
-        voxel_size=model_kwargs.get("voxel_size", -1.0),
-        gs_attr=model_kwargs.get("gs_attr", "3D"),
-        render_mode=model_kwargs.get("render_mode", "RGB+ED"),
-        tile_size_2dgs=model_kwargs.get("tile_size_2dgs", 8),
+    anchor_cloud = AnchorCloud()
+    decoder = GaussianDecoder(
+        feature_dim=model_kwargs.get("feat_dim", 32),
+        anchor_cloud=anchor_cloud,
     )
+    decoder.gs_attr = model_kwargs.get("gs_attr", "3D")
+    decoder.render_mode = model_kwargs.get("render_mode", "RGB+ED")
+    decoder.tile_size_2dgs = model_kwargs.get("tile_size_2dgs", 8)
     dataset_args = _build_dataset_args(model_params, source_path, str(model_path))
-    scene = TrainingScene(dataset_args, gaussians, load_iteration=iteration, shuffle=False)
+    scene = TrainingScene(dataset_args, anchor_cloud, decoder, load_iteration=iteration, shuffle=False)
 
-    background = torch.ones(3, dtype=torch.float32, device=gaussians.device) if args.white_background else scene.background
-    exporter = ObjectMeshExporter(gaussians, background, add_prefilter=not args.no_prefilter)
+    background = torch.ones(3, dtype=torch.float32, device=anchor_cloud.device) if args.white_background else scene.background
+    exporter = ObjectMeshExporter(anchor_cloud, decoder, background, add_prefilter=not args.no_prefilter)
     all_labels = exporter.available_labels(skip_zero=False)
     labels = [label for label in all_labels if label != 0]
     if args.label_id:

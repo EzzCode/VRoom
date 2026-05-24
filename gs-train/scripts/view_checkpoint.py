@@ -14,7 +14,9 @@ import torch
 
 from gaussian_renderer.render import prefilter_voxel, render
 from vroom_core.utils.checkpoints import CheckpointManager
-from vroom_core.models.gaussian_model import GaussianModel
+from vroom_core.models.anchor_field import AnchorCloud, AnchorCloudData
+from vroom_core.models.decoder import GaussianDecoder
+from vroom_core.models.semantics import SemanticsManager
 from vroom_core import viewer_protocol as network_gui
 
 
@@ -23,22 +25,47 @@ class ViewerPipe:
     add_prefilter: bool = True
 
 
-def load_checkpoint(iteration_dir: Path) -> GaussianModel:
-    probe = GaussianModel()
-    manager = CheckpointManager(probe)
+def load_checkpoint(iteration_dir: Path) -> tuple[AnchorCloud, GaussianDecoder]:
+    dummy_cloud = AnchorCloud()
+    dummy_decoder = GaussianDecoder(
+        feature_dim=1,
+        anchor_cloud=dummy_cloud,
+    )
+    manager = CheckpointManager(dummy_cloud, dummy_decoder)
     kwargs = manager.infer_bundle_kwargs(iteration_dir)
-    gaussians = GaussianModel(**kwargs)
-    gaussians.load_ply(str(iteration_dir / "point_cloud.ply"))
-    gaussians.load_mlp_checkpoints(str(iteration_dir))
-    gaussians.set_eval()
-    gaussians._anchor_mask = torch.ones(gaussians.get_anchor.shape[0], dtype=torch.bool, device=gaussians.device)
-    return gaussians
+    
+    anchor_cloud = AnchorCloud()
+    decoder = GaussianDecoder(
+        feature_dim=kwargs.get("feat_dim", 32),
+        anchor_cloud=anchor_cloud,
+    )
+    decoder.gs_attr = kwargs.get("gs_attr", "3D")
+    decoder.render_mode = kwargs.get("render_mode", "RGB+ED")
+    decoder.tile_size_2dgs = kwargs.get("tile_size_2dgs", 8)
+    
+    manager = CheckpointManager(anchor_cloud, decoder)
+    payload = manager.load_anchor_field(str(iteration_dir / "point_cloud.ply"))
+    
+    seeds = AnchorCloudData(
+        anchors_positions=payload["anchor"],
+        gaussians_offsets=payload["offset"],
+        anchor_features=payload["feature"],
+        anchors_log_scales=payload["log_scaling"],
+        anchors_rotations=payload["rotation"],
+        labels=payload["labels"],
+        semantic_manager=None if payload["labels"] is None else SemanticsManager(torch.unique(payload["labels"].view(-1))),
+        voxel_size=float(torch.exp(payload["log_scaling"][:, :3]).mean().item()) if payload["log_scaling"].numel() > 0 else 1.0,
+    )
+    anchor_cloud.set_anchors_cloud(seeds)
+    manager.load_decoder(str(iteration_dir))
+    decoder.eval()
+    return anchor_cloud, decoder
 
 
 def serve_checkpoint(iteration_dir: Path, source_path: Path, host: str, port: int, white_background: bool):
     background = torch.ones(3, dtype=torch.float32, device="cuda") if white_background else torch.zeros(3, dtype=torch.float32, device="cuda")
     pipe = ViewerPipe()
-    gaussians = load_checkpoint(iteration_dir)
+    anchor_cloud, decoder = load_checkpoint(iteration_dir)
 
     network_gui.init(host, port)
     print(f"Listening for GUI on {host}:{port}")
@@ -53,9 +80,21 @@ def serve_checkpoint(iteration_dir: Path, source_path: Path, host: str, port: in
             payload = None
             custom_cam, _, pipe.add_prefilter, _ = network_gui.receive()
             if custom_cam is not None:
-                gaussians.set_anchor_mask(custom_cam.camera_center, 1.0)
-                visible = prefilter_voxel(custom_cam, gaussians).squeeze() if pipe.add_prefilter else gaussians._anchor_mask
-                image = render(custom_cam, gaussians, pipe, background, visible, training=False)["render"]
+                visible = prefilter_voxel(custom_cam, anchor_cloud, decoder).squeeze() if pipe.add_prefilter else anchor_cloud.visibility_mask
+                decoded_output = decoder.forward_pass(
+                    anchor_cloud=anchor_cloud,
+                    visible_anchors_mask=visible,
+                    camera=custom_cam,
+                )
+                image = render(
+                    viewpoint_camera=custom_cam,
+                    decoded_output=decoded_output,
+                    bg_color=background,
+                    gs_attr=decoder.gs_attr,
+                    render_mode=decoder.render_mode,
+                    tile_size_2dgs=decoder.tile_size_2dgs,
+                    semantics=None,
+                )["render"]
                 payload = memoryview(
                     (torch.clamp(image, min=0.0, max=1.0) * 255)
                     .byte()

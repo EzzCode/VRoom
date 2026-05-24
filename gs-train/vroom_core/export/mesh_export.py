@@ -49,15 +49,16 @@ class _RenderPipe:
 
 
 class ObjectMeshExporter:
-    def __init__(self, gaussians, background: torch.Tensor, add_prefilter: bool = True) -> None:
-        self.gaussians = gaussians
-        self.background = background.to(gaussians.device)
+    def __init__(self, anchor_cloud, decoder, background: torch.Tensor, add_prefilter: bool = True) -> None:
+        self.anchor_cloud = anchor_cloud
+        self.decoder = decoder
+        self.background = background.to(anchor_cloud.device)
         self.pipe = _RenderPipe(add_prefilter=add_prefilter)
 
     def available_labels(self, skip_zero: bool = True) -> list[int]:
-        if self.gaussians.label_ids is None:
+        if self.anchor_cloud.semantic_labels is None:
             return []
-        labels = torch.unique(self.gaussians.label_ids.view(-1)).detach().cpu().tolist()
+        labels = torch.unique(self.anchor_cloud.semantic_labels.view(-1)).detach().cpu().tolist()
         labels = [int(label) for label in labels]
         if skip_zero:
             labels = [label for label in labels if label != 0]
@@ -116,21 +117,32 @@ class ObjectMeshExporter:
         )
 
     def _label_mask(self, label_id: int) -> torch.Tensor:
-        if self.gaussians.label_ids is None:
+        if self.anchor_cloud.semantic_labels is None:
             raise RuntimeError("This checkpoint has no semantic labels, so per-object mesh export is unavailable.")
-        return (self.gaussians.label_ids.view(-1) == int(label_id)).to(self.gaussians.device)
+        return (self.anchor_cloud.semantic_labels.view(-1) == int(label_id)).to(self.anchor_cloud.device)
 
     @torch.no_grad()
     def _capture_views(self, cameras: Iterable, label_mask: torch.Tensor) -> list[_RenderCapture]:
         captures: list[_RenderCapture] = []
-        self.gaussians.set_eval()
         for camera in tqdm(list(cameras), desc="Render object views", dynamic_ncols=True):
-            self.gaussians.set_anchor_mask(camera.camera_center, getattr(camera, "resolution_scale", 1.0))
-            visible = prefilter_voxel(camera, self.gaussians).squeeze() if self.pipe.add_prefilter else self.gaussians._anchor_mask
+            visible = prefilter_voxel(camera, self.anchor_cloud, self.decoder).squeeze() if self.pipe.add_prefilter else self.anchor_cloud.visibility_mask
             visible = visible & label_mask
             if visible.numel() == 0 or not bool(visible.any().item()):
                 continue
-            render_pkg = render(camera, self.gaussians, self.pipe, self.background, visible_mask=visible, training=False)
+            decoded_output = self.decoder.forward_pass(
+                anchor_cloud=self.anchor_cloud,
+                visible_anchors_mask=visible,
+                camera=camera,
+            )
+            render_pkg = render(
+                viewpoint_camera=camera,
+                decoded_output=decoded_output,
+                bg_color=self.background,
+                gs_attr=self.decoder.gs_attr,
+                render_mode=self.decoder.render_mode,
+                tile_size_2dgs=self.decoder.tile_size_2dgs,
+                semantics=None,
+            )
             depth = render_pkg.get("render_depth")
             if depth is None:
                 raise RuntimeError("The active render mode does not produce depth. Use a render mode such as 'RGB+ED' or 'RGB+D'.")

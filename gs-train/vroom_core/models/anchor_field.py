@@ -11,7 +11,7 @@ import torch.nn as nn
 from sklearn.neighbors import NearestNeighbors
 
 from vroom_core.utils.geometry import PointCloudSample
-from vroom_core.models.semantics import SemanticCodec
+from vroom_core.models.semantics import SemanticsManager
 
 
 @dataclass
@@ -21,7 +21,7 @@ class AnchorCloudData:
     anchors_log_scales: torch.Tensor
     anchors_rotations: torch.Tensor
     labels: Optional[torch.Tensor]
-    codec: Optional[SemanticCodec]
+    semantic_manager: Optional[SemanticsManager]
     gaussians_offsets: torch.Tensor
     voxel_size: float
 
@@ -38,7 +38,7 @@ class AnchorCloud(nn.Module):
         density_mode=False,
         gaussians_per_anchor=5,
         feature_dim=32,
-        codec=None,
+        semantic_manager=None,
         device="cuda",
     ):
         super().__init__()
@@ -47,7 +47,7 @@ class AnchorCloud(nn.Module):
         self.voxel_size = voxel_size
         self.density_mode = density_mode
         self.visibility_mask = torch.empty((0,), dtype=torch.bool, device=self.device)
-        self.codec = codec
+        self.semantic_manager = semantic_manager
         self.feature_dim = feature_dim
 
         self.anchors_positions = nn.Parameter(
@@ -76,6 +76,21 @@ class AnchorCloud(nn.Module):
                 (0, gaussians_per_anchor, 3), dtype=torch.float32, device=self.device
             )
         )
+
+    @property
+    def num_anchors(self) -> int:
+        return self.anchors_positions.shape[0]
+
+    def initialize_anchors(self, source, cameras_extent=1.0, global_appearance=False, logger=None):
+        if hasattr(source, "points"):
+            points = torch.from_numpy(source.points).float().to(self.device)
+            labels = torch.from_numpy(source.label_ids).long().to(self.device) if getattr(source, "label_ids", None) is not None else None
+        else:
+            points = source.to(self.device)
+            labels = None
+
+        seeds = self._generate_anchors(points, labels)
+        self.set_anchors_cloud(seeds)
 
     def _generate_anchors(self, point_cloud, point_labels):
         """
@@ -114,7 +129,7 @@ class AnchorCloud(nn.Module):
             )
         )
 
-        self.codec = SemanticCodec.from_labels(self.anchor_labels)
+        self.semantic_manager = SemanticsManager(torch.unique(self.anchor_labels)) if self.anchor_labels is not None else None
 
         self.gaussians_offsets = nn.Parameter(
             torch.zeros(
@@ -132,7 +147,7 @@ class AnchorCloud(nn.Module):
             anchors_log_scales=self.anchors_log_scales,
             anchors_rotations=self.anchors_rotations,
             labels=self.anchor_labels,
-            codec=self.codec,
+            semantic_manager=self.semantic_manager,
             gaussians_offsets=self.gaussians_offsets,
             voxel_size=self.voxel_size,
         )
@@ -219,7 +234,7 @@ class AnchorCloud(nn.Module):
             if data.labels is None
             else data.labels.clone().detach().to(self.device)
         )
-        self.codec = data.codec
+        self.semantic_manager = data.semantic_manager
         self.visibility_mask = torch.ones(
             self.anchors_positions.shape[0], dtype=torch.bool, device=self.device
         )
@@ -269,10 +284,11 @@ class AnchorCloud(nn.Module):
                 if self.semantic_labels is None
                 else torch.cat([self.semantic_labels.view(-1), labels.view(-1)], dim=0)
             )
-            if self.codec is None:
-                self.codec = SemanticCodec.from_labels(self.semantic_labels.view(-1))
+            if self.semantic_manager is None:
+                self.semantic_manager = SemanticsManager(torch.unique(self.semantic_labels.view(-1)))
             else:
-                self.codec.fit(self.semantic_labels.view(-1))
+                self.semantic_manager.update_current_num_classes(self.semantic_labels.view(-1))
+                self.semantic_manager.label_ids, _ = torch.sort(torch.unique(self.semantic_labels.view(-1)))
 
     def prune(self, prune_mask: torch.Tensor) -> None:
         """Prunes the anchor cloud after pruning process"""
@@ -297,5 +313,6 @@ class AnchorCloud(nn.Module):
         )
         if self.semantic_labels is not None:
             self.semantic_labels = self.semantic_labels[keep]
-            if self.codec is not None:
-                self.codec.fit(self.semantic_labels.view(-1))
+            if self.semantic_manager is not None:
+                self.semantic_manager.update_current_num_classes(self.semantic_labels.view(-1))
+                self.semantic_manager.label_ids, _ = torch.sort(torch.unique(self.semantic_labels.view(-1)))

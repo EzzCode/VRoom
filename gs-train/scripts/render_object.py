@@ -26,7 +26,8 @@ import yaml
 from tqdm import tqdm
 
 from gaussian_renderer.render import prefilter_voxel, render
-from vroom_core.models.gaussian_model import GaussianModel
+from vroom_core.models.anchor_field import AnchorCloud
+from vroom_core.models.decoder import GaussianDecoder
 from vroom_core.data.scene_pipeline import TrainingScene
 
 
@@ -47,16 +48,14 @@ def _load_model(model_path: Path, cfg: dict, iteration: int, source_path: Option
     if not os.path.isabs(resolved_source):
         resolved_source = os.path.abspath(os.path.join(Path(__file__).resolve().parent, resolved_source))
 
-    gaussians = GaussianModel(
-        n_offsets=model_kwargs.get("n_offsets", 5),
-        feat_dim=model_kwargs.get("feat_dim", 32),
-        view_dim=model_kwargs.get("view_dim", 3),
-        appearance_dim=model_kwargs.get("appearance_dim", 0),
-        voxel_size=model_kwargs.get("voxel_size", -1.0),
-        gs_attr=model_kwargs.get("gs_attr", "3D"),
-        render_mode=model_kwargs.get("render_mode", "RGB+ED"),
-        tile_size_2dgs=model_kwargs.get("tile_size_2dgs", 8),
+    anchor_cloud = AnchorCloud()
+    decoder = GaussianDecoder(
+        feature_dim=model_kwargs.get("feat_dim", 32),
+        anchor_cloud=anchor_cloud,
     )
+    decoder.gs_attr = model_kwargs.get("gs_attr", "3D")
+    decoder.render_mode = model_kwargs.get("render_mode", "RGB+ED")
+    decoder.tile_size_2dgs = model_kwargs.get("tile_size_2dgs", 8)
 
     class DatasetArgs:
         def __init__(self, **kwargs):
@@ -87,9 +86,9 @@ def _load_model(model_path: Path, cfg: dict, iteration: int, source_path: Option
         exp_name=model_params.get("exp_name", ""),
     )
 
-    scene = TrainingScene(dataset_args, gaussians, load_iteration=iteration, shuffle=False)
-    gaussians.set_eval()
-    return gaussians, scene
+    scene = TrainingScene(dataset_args, anchor_cloud, decoder, load_iteration=iteration, shuffle=False)
+    decoder.eval()
+    return anchor_cloud, decoder, scene
 
 
 def _resolve_iteration(model_path: Path, requested: int) -> int:
@@ -123,7 +122,8 @@ def render_object_set(
     split_name: str,
     iteration: int,
     views,
-    gaussians: GaussianModel,
+    anchor_cloud: AnchorCloud,
+    decoder: GaussianDecoder,
     pipe: _RenderPipe,
     background: torch.Tensor,
     query_label_id: int,
@@ -135,26 +135,37 @@ def render_object_set(
     os.makedirs(gt_dir, exist_ok=True)
 
     # Build per-anchor object mask: only anchors with this label
-    object_mask = (gaussians.label_ids.squeeze() == query_label_id)
+    object_mask = (anchor_cloud.semantic_labels.squeeze() == query_label_id)
 
     visible_count_list = []
     per_view_dict = {}
 
     for idx, view in enumerate(tqdm(views, desc=f"Rendering label {query_label_id} — {split_name}")):
-        gaussians.set_anchor_mask(view.camera_center, view.resolution_scale)
         visible_mask = (
-            prefilter_voxel(view, gaussians).squeeze()
+            prefilter_voxel(view, anchor_cloud, decoder).squeeze()
             if pipe.add_prefilter
-            else gaussians._anchor_mask
+            else anchor_cloud.visibility_mask
         )
 
         torch.cuda.synchronize()
         t_start = time.time()
+        mask = visible_mask
+        if object_mask is not None:
+            mask = mask & object_mask
+
+        decoded_output = decoder.forward_pass(
+            anchor_cloud=anchor_cloud,
+            visible_anchors_mask=mask,
+            camera=view,
+        )
         render_pkg = render(
-            view, gaussians, pipe, background,
-            visible_mask=visible_mask,
-            training=False,
-            object_mask=object_mask,
+            viewpoint_camera=view,
+            decoded_output=decoded_output,
+            bg_color=background,
+            gs_attr=decoder.gs_attr,
+            render_mode=decoder.render_mode,
+            tile_size_2dgs=decoder.tile_size_2dgs,
+            semantics=None,
         )
         torch.cuda.synchronize()
         t_end = time.time()
@@ -200,12 +211,26 @@ def main():
     args = parser.parse_args()
 
     model_path = Path(args.model_path).resolve()
-    config_path = model_path / "config.yaml"
+    config_path = model_path / "config.json"
     if not config_path.exists():
-        raise FileNotFoundError(f"No config.yaml found at {config_path}")
+        config_path = model_path / "config.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"No config.json or config.yaml found at {model_path}")
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.load(f, Loader=yaml.FullLoader)
+    if config_path.suffix == ".json":
+        import json
+        from vroom_core.utils.config import parse_vroom_config
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw_cfg = json.load(f)
+        model_params, optim_params, pipeline_params = parse_vroom_config(raw_cfg)
+        cfg = {
+            "model_params": model_params,
+            "optim_params": optim_params,
+            "pipeline_params": pipeline_params
+        }
+    else:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.load(f, Loader=yaml.FullLoader)
 
     if args.gpu != "-1":
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -214,17 +239,17 @@ def main():
     iteration = _resolve_iteration(model_path, args.iteration)
     print(f"Rendering objects from {model_path} — iteration {iteration}")
 
-    gaussians, scene = _load_model(model_path, cfg, iteration, args.source_path, args.scene_name)
+    anchor_cloud, decoder, scene = _load_model(model_path, cfg, iteration, args.source_path, args.scene_name)
     pipe = _RenderPipe(add_prefilter=not args.no_prefilter)
 
     # White background for cleaner object isolation
-    background = torch.ones(3, dtype=torch.float32, device=gaussians.device)
+    background = torch.ones(3, dtype=torch.float32, device=anchor_cloud.device)
 
     # Determine which labels to render
-    if gaussians.label_ids is None:
+    if anchor_cloud.semantic_labels is None:
         raise SystemExit("This checkpoint has no semantic labels — cannot render individual objects.")
 
-    all_labels = torch.unique(gaussians.label_ids.view(-1)).cpu().tolist()
+    all_labels = torch.unique(anchor_cloud.semantic_labels.view(-1)).cpu().tolist()
     all_labels = sorted(int(l) for l in all_labels)
     print(f"Available labels in checkpoint: {all_labels}")
 
@@ -241,12 +266,12 @@ def main():
         if not args.skip_train:
             render_object_set(
                 str(model_path), "train", iteration,
-                scene.getTrainCameras(), gaussians, pipe, background, label_id,
+                scene.getTrainCameras(), anchor_cloud, decoder, pipe, background, label_id,
             )
         if not args.skip_test:
             render_object_set(
                 str(model_path), "test", iteration,
-                scene.getTestCameras(), gaussians, pipe, background, label_id,
+                scene.getTestCameras(), anchor_cloud, decoder, pipe, background, label_id,
             )
 
     print("\nObject rendering complete.")
