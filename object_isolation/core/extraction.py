@@ -4,7 +4,7 @@ For each visible training camera of an object, produce a clean RGBA tile of
 just the object cut out of the real photograph. Two-source mask:
 
     M_objgs  = render(ObjectGS, object_label_id=k).alpha > tau_alpha
-    M_real   = (id_map == module1_obj_id)              (Module-1 SAM-based)
+    M_real   = (id_map == module1_obj_id)              (Module1 SAM-based)
     M_hybrid = largest_cc(M_objgs ∩ M_real, min_pixels=64)
 
 Source modes (CLI):
@@ -88,13 +88,13 @@ def _resolve_id_map_path(id_map_dir: Path, img_name: str) -> Optional[Path]:
     return None
 
 
-# ── Module-1 ID auto-resolution ────────────────────────────────────────────
+# ── Module1 ID auto-resolution ────────────────────────────────────────────
 
 def auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir: Path,
                             n_probe_cams: int = 5,
                             tau_alpha: float = 0.4) -> Optional[int]:
     """Probe a few visible cams. For each, build M_objgs and find the
-    Module-1 instance id whose mask has the highest IoU with M_objgs.
+    Module1 instance id whose mask has the highest IoU with M_objgs.
     Vote across cams. Return the winning id (excluding 0=bg).
     """
     if not id_map_dir.exists():
@@ -258,7 +258,7 @@ def extract_frame(scope: ObjectScope, gaussians, pipe_config,
     else:
         m_objgs_rs = m_objgs
 
-    # Module-1 mask if available.
+    # Module1 mask if available.
     used_real = False
     m_real = None
     if id_map_dir is not None and module1_obj_id is not None:
@@ -348,7 +348,7 @@ def run_extraction(scope: ObjectScope, gaussians, pipe_config, *,
     if id_map_dir is not None and module1_obj_id is None and auto_resolve:
         module1_obj_id = auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir)
     if id_map_dir is not None and module1_obj_id is None:
-        logger.warning("Could not determine Module-1 obj id — falling back to ObjectGS-alpha-only.")
+        logger.warning("Could not determine Module1 obj id — falling back to ObjectGS-alpha-only.")
 
     extractions: list[FrameExtraction] = []
     for ci in scope.visible_cam_indices:

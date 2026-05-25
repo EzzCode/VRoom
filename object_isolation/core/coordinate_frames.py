@@ -42,8 +42,6 @@ Frame V (SV3D canonical):
 
 The fixed L→V mapping below maps Local +X (front) onto Virtual +Z (front) so
 that azimuth 0 in V corresponds to the orbit zero-azimuth in L.
-
-NUMPY-ONLY by design — no torch — so this file can be unit-tested without GPU.
 """
 from __future__ import annotations
 

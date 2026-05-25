@@ -101,7 +101,7 @@ def discover_object_scope(
     order = np.argsort(eigvals)[::-1]
     principal_extents = np.sqrt(np.clip(eigvals[order], 0.0, None)).astype(np.float32)
 
-    # ── Camera analysis (reuse perspective_graph) ──
+    # ── Camera analysis  ──
     pgraph = build_perspective_graph(str(cameras_json))
     cameras = pgraph.cameras
 

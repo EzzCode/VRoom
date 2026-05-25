@@ -1,5 +1,5 @@
 """
-Module-1 End-to-End Runner
+Module1 End-to-End Runner
 
 This entrypoint coordinates the four-stage processing pipeline:
 1) COLMAP reconstruction
@@ -48,7 +48,7 @@ def build_paths(data_path):
 
 def main():
     """Parse CLI arguments, build stage commands, and execute pipeline."""
-    parser = argparse.ArgumentParser(description="Run the full Module-1 pipeline")
+    parser = argparse.ArgumentParser(description="Run the full Module1 pipeline")
     parser.add_argument("--data_path", required=True, help="Scene folder containing images/")
 
     parser.add_argument("--dry_run", action="store_true", help="Print commands without executing")
@@ -63,7 +63,7 @@ def main():
     parser.add_argument("--matcher_type", default="sequential", choices=["exhaustive", "sequential", "spatial"])
 
     # Mask generation
-    parser.add_argument("--sam_ckpt", default="Module-1/models/sam3.pt", help="SAM3 checkpoint (e.g., sam3.pt, sam3_b.pt)")
+    parser.add_argument("--sam_ckpt", default="Module1/models/sam3.pt", help="SAM3 checkpoint (e.g., sam3.pt, sam3_b.pt)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
     parser.add_argument("--text_prompts", nargs="+", default=["chair", "table", "sofa", "bed", "desk", "cabinet"])

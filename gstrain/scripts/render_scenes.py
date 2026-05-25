@@ -28,6 +28,7 @@ from tqdm import tqdm
 from gstrain.gaussian_renderer.render import prefilter_voxel, render
 from gstrain.vroom_core.utils.checkpoints import CheckpointManager
 from gstrain.vroom_core.models.facade import GaussianModel
+from gstrain.vroom_core.data.scene_pipeline import TrainingScene
 from typing import Optional, List, Dict, Tuple
 
 def _load_model(model_path: Path, cfg: dict, iteration: int, source_path: Optional[str], scene_name: Optional[str]):
