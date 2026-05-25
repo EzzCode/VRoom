@@ -4,7 +4,6 @@ import {
   Viro3DObject,
   ViroNode,
   ViroAmbientLight,
-  ViroDirectionalLight,
   ViroMaterials,
 } from '@reactvision/react-viro';
 import ARReticle from './ARReticle';
@@ -160,16 +159,7 @@ export default function ARMeshScene(arSceneProps: any) {
       onClick={handleClick}
       anchorDetectionTypes={['PlanesHorizontal', 'PlanesVertical']}
     >
-      <ViroAmbientLight color="#FFFFFF" intensity={500} />
-      <ViroDirectionalLight
-        direction={[0, -1, -0.5]}
-        castsShadow={true}
-        shadowOrthographicPosition={[0, 3, -2]}
-        shadowOrthographicSize={5}
-        shadowBias={0.003}
-        color="#FFFFFF"
-        intensity={800}
-      />
+      <ViroAmbientLight color="#FFFFFF" intensity={1000} />
 
       {!isMeshPlaced && <ARReticle position={reticlePosition} visible={reticleVisible} />}
 

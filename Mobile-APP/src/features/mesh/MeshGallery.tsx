@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, FlatList, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, FlatList, Text, StyleSheet, ActivityIndicator, Alert, TouchableOpacity } from 'react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { useTheme } from '../../shared/theme';
 import { Header, MeshCard, Button } from '../../shared/components';
 import {
   getAvailableMeshes,
   importMeshFromFilePicker,
+  deleteImportedMesh,
   formatFileSize,
 } from '../../services/mesh/meshStorage';
 import { MeshInfo } from '../../shared/core/types';
@@ -39,8 +41,34 @@ export default function MeshGallery({ navigation }: Props) {
     }
   }, []);
 
+  const handleDelete = useCallback((mesh: MeshInfo) => {
+    Alert.alert(
+      'Delete Mesh',
+      `Delete "${mesh.name}"? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            await deleteImportedMesh(mesh);
+            setMeshes((prev) => prev.filter((m) => m.id !== mesh.id));
+          },
+        },
+      ],
+    );
+  }, []);
+
   const handleMeshPress = useCallback(
     (mesh: MeshInfo) => {
+      if (mesh.format === 'PLY') {
+        Alert.alert(
+          'Format Not Supported in AR',
+          'PLY files cannot be viewed in AR. Please convert your file to GLB or OBJ first.',
+          [{ text: 'OK' }],
+        );
+        return;
+      }
       navigation.navigate('ARView', {
         meshId: mesh.id,
         meshName: mesh.name,
@@ -87,6 +115,15 @@ export default function MeshGallery({ navigation }: Props) {
                 size={formatFileSize(item.size)}
                 onPress={() => handleMeshPress(item)}
               />
+              {!item.isBundled && (
+                <TouchableOpacity
+                  style={styles.deleteBtn}
+                  onPress={() => handleDelete(item)}
+                  hitSlop={{ top: 6, right: 6, bottom: 6, left: 6 }}
+                >
+                  <Ionicons name="close-circle" size={22} color="#e53935" />
+                </TouchableOpacity>
+              )}
             </View>
           )}
         />
@@ -115,6 +152,15 @@ const styles = StyleSheet.create({
   gridItem: {
     flex: 1,
     maxWidth: '50%',
+    position: 'relative',
+  },
+  deleteBtn: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    zIndex: 10,
+    backgroundColor: 'white',
+    borderRadius: 11,
   },
   fab: {
     position: 'absolute',

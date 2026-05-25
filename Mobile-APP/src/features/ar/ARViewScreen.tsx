@@ -82,8 +82,8 @@ export default function ARViewScreen({ navigation, route }: Props) {
         ref={arNavigatorRef}
         autofocus={true}
         shadowsEnabled={true}
-        pbrEnabled={true}
-        hdrEnabled={true}
+        pbrEnabled={false}
+        hdrEnabled={false}
         initialScene={{
           scene: ARMeshScene as any,
         }}

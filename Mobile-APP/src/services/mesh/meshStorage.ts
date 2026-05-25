@@ -1,6 +1,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import * as DocumentPicker from 'expo-document-picker';
 import { MeshInfo } from '../../shared/core/types';
+import { convertPlyToGlb } from './plyToGlb';
 
 const IMPORTED_MESH_DIR = `${FileSystem.documentDirectory}meshes/`;
 
@@ -32,18 +33,18 @@ export async function getImportedMeshes(): Promise<MeshInfo[]> {
 
   for (const file of files) {
     const ext = file.split('.').pop()?.toUpperCase();
-    if (ext !== 'GLB' && ext !== 'OBJ') continue;
+    if (ext !== 'GLB' && ext !== 'OBJ' && ext !== 'PLY') continue;
 
     const filePath = `${IMPORTED_MESH_DIR}${file}`;
     const info = await FileSystem.getInfoAsync(filePath);
-    const name = file.replace(/\.(glb|obj)$/i, '');
+    const name = file.replace(/\.(glb|obj|ply)$/i, '');
 
     const fileUri = filePath.startsWith('file://') ? filePath : `file://${filePath}`;
 
     meshes.push({
       id: `imported_${file}`,
       name,
-      format: ext as 'GLB' | 'OBJ',
+      format: ext as 'GLB' | 'OBJ' | 'PLY',
       size: (info as any).size ?? 0,
       uri: fileUri,
       isBundled: false,
@@ -75,7 +76,7 @@ export async function importMeshFromFilePicker(): Promise<MeshInfo | null> {
   const fileName = asset.name;
   const ext = fileName.split('.').pop()?.toUpperCase();
 
-  if (ext !== 'GLB' && ext !== 'OBJ') {
+  if (ext !== 'GLB' && ext !== 'OBJ' && ext !== 'PLY') {
     return null;
   }
 
@@ -83,13 +84,33 @@ export async function importMeshFromFilePicker(): Promise<MeshInfo | null> {
 
   await FileSystem.makeDirectoryAsync(IMPORTED_MESH_DIR, { intermediates: true });
 
+  const name = fileName.replace(/\.(glb|obj|ply)$/i, '');
+
+  if (ext === 'PLY') {
+    // Convert PLY → GLB on-device so it can be rendered in AR
+    const tempPlyPath = `${IMPORTED_MESH_DIR}_tmp_${Date.now()}.ply`;
+    await FileSystem.copyAsync({ from: asset.uri, to: tempPlyPath });
+    const glbFileName = `${name}.glb`;
+    const glbPath = `${IMPORTED_MESH_DIR}${glbFileName}`;
+    await convertPlyToGlb(tempPlyPath, glbPath);
+    await FileSystem.deleteAsync(tempPlyPath, { idempotent: true });
+    const info = await FileSystem.getInfoAsync(glbPath);
+    return {
+      id: `imported_${glbFileName}`,
+      name,
+      format: 'GLB',
+      size: (info as any).size ?? 0,
+      uri: glbPath,
+      isBundled: false,
+    };
+  }
+
   const destPath = `${IMPORTED_MESH_DIR}${fileName}`;
   await FileSystem.copyAsync({
     from: asset.uri,
     to: destPath,
   });
 
-  const name = fileName.replace(/\.(glb|obj)$/i, '');
   const info = await FileSystem.getInfoAsync(destPath);
 
   return {
