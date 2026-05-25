@@ -43,6 +43,8 @@ parser.add_argument("--smooth_sigma", type=float, default=0.8,
                      " (default: 0.8). Try 0.5-2.0 in voxel units.")
 parser.add_argument("--depth_margin", type=float, default=1.1,
                      help="Depth truncation margin multiplier (default: 1.1).")
+parser.add_argument("--depth_percentile", type=float, default=99.0,
+                     help="Percentile of valid object depth values used to compute depth truncation (default: 99.0).")
 parser.add_argument("--label",        type=int,   default=None,
                      help="Process only this label ID (default: None (all labels))")
 args = parser.parse_args()
@@ -56,8 +58,9 @@ TRUNC_FACTOR  = args.trunc_factor
 MIN_OBS       = args.min_obs
 MIN_COMPONENT = args.min_component
 SMOOTH_SIGMA  = args.smooth_sigma
-DEPTH_MARGIN  = args.depth_margin
-LABEL_FILTER  = args.label
+DEPTH_MARGIN      = args.depth_margin
+DEPTH_PERCENTILE  = args.depth_percentile
+LABEL_FILTER      = args.label
 
 print ("Loaded Parameters:")
 print(f"MIN_PIXELS: {MIN_PIXELS}")
@@ -69,6 +72,7 @@ print(f"MIN_OBS: {MIN_OBS}")
 print(f"MIN_COMPONENT: {MIN_COMPONENT}")
 print(f"SMOOTH_SIGMA: {SMOOTH_SIGMA}")
 print(f"DEPTH_MARGIN: {DEPTH_MARGIN}")
+print(f"DEPTH_PERCENTILE: {DEPTH_PERCENTILE}")
 print(f"LABEL_FILTER: {LABEL_FILTER}\n")
 
 start_time = time.time() # keep track of total runtime
@@ -178,8 +182,9 @@ for label_id in sorted_labels:
     # 5.1: Compute per-object depth truncation
     # Exclude depth pixels that are too far from the camera for the object
     # , as they are likely noise and outliers that can break the mesh extraction.
-    BBOX_DEPTH_TRUNC = compute_depth_trunc(depth_maps_raw, 
-                                           semantic_maps, label_id, margin = DEPTH_MARGIN)
+    BBOX_DEPTH_TRUNC = compute_depth_trunc(depth_maps_raw,
+                                           semantic_maps, label_id,
+                                           percentile=DEPTH_PERCENTILE, margin=DEPTH_MARGIN)
     print("Depth truncation:", round(BBOX_DEPTH_TRUNC, 2))
 
     # 5.2: Mask depth maps and collect data for cameras that see this object
