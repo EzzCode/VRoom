@@ -55,7 +55,19 @@ def serve_checkpoint(iteration_dir: Path, source_path: Path, host: str, port: in
             if custom_cam is not None:
                 gaussians.set_anchor_mask(custom_cam.camera_center, 1.0)
                 visible = prefilter_voxel(custom_cam, gaussians).squeeze() if pipe.add_prefilter else gaussians._anchor_mask
-                image = render(custom_cam, gaussians, pipe, background, visible, training=False)["render"]
+                # --- DEBUG ---
+                print(f"[DBG] visible anchors: {visible.sum().item()} / {visible.shape[0]}")
+                # --- END DEBUG ---
+                render_pkg = render(custom_cam, gaussians, pipe, background, visible, training=False)
+                image = render_pkg["render"]
+                # --- DEBUG ---
+                n_gs = render_pkg["visibility_filter"].sum().item()
+                print(f"[DBG] neural gaussians on-screen: {n_gs}")
+                print(f"[DBG] image  min={image.min():.4f} max={image.max():.4f} mean={image.mean():.4f}")
+                clamped = torch.clamp(image, 0.0, 1.0)
+                print(f"[DBG] clamped mean={clamped.mean():.4f}  alpha mean={render_pkg['render_alphas'].mean():.4f}")
+                # --- END DEBUG ---
+
                 payload = memoryview(
                     (torch.clamp(image, min=0.0, max=1.0) * 255)
                     .byte()
@@ -65,6 +77,7 @@ def serve_checkpoint(iteration_dir: Path, source_path: Path, host: str, port: in
                     .numpy()
                 )
             network_gui.send(payload, str(source_path))
+
         except KeyboardInterrupt:
             raise
         except Exception:
