@@ -1,7 +1,7 @@
 """
-Frame W - World
-Frame L - Local Object (centered on object centroid, axis-aligned to scene up)
-Frame V - Stable Diffusion Virtual Camera
+W - World
+L - Local Object (centered on object centroid, axis-aligned to scene up)
+V - Stable Diffusion Virtual Camera
 
 W2C - World to Camera
 L2V - Local to Virtual
@@ -23,7 +23,7 @@ def look_at(eye, target, up):
     return R_w2c, T_w2c
 
 
-# L→V mapping: +X_L (orbit front) → +Z_V, +Z_L (up) → +Y_V, +Y_L (right) → +X_V
+# L2V mapping: +X_L (orbit front) → +Z_V, +Z_L (up) → +Y_V, +Y_L (right) → +X_V
 R_L2V = np.array([
     [0.0, 1.0, 0.0],
     [0.0, 0.0, 1.0],
@@ -98,8 +98,8 @@ class ObjectFrame:
 
 
 def scale_intrinsics(K, src_width, src_height, out_size=576):
-    """Scale camera intrinsics K to a square output resolution.
-    Preserves angular FoV; centers the principal point."""
+    """Scale camera intrinsics K to a square output resolution (SV3D input)
+    Preserves angular FoV & centers principal point"""
     K = np.asarray(K, dtype=np.float32).reshape(3, 3)
     fx = float(K[0, 0]) * (out_size / float(src_width))
     fy = float(K[1, 1]) * (out_size / float(src_height))
