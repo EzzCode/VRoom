@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_shape, voxel_size, trunc_margin, color_image_t=None, depth_trunc=None, world_points_h_t=None):
+def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_shape, voxel_size, trunc_margin, world_points_h_t, color_image_t=None):
     """
     GPU-Accelerated TSDF generation using PyTorch.
     
@@ -12,11 +12,9 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
     - grid_shape: Tuple (Nx, Ny, Nz) for the grid size.
     - voxel_size: Physical size of one voxel in coordinate units.
     - trunc_margin: The maximum +/- distance to cap the SDF (the "T" in TSDF).
+    - world_points_h_t: Pre-computed (N³, 4) homogeneous world-point matrix.
+      Pre-computed once in fuse_tsdf and shared across all cameras to avoid redundant work.
     - color_image_t: (optional) (H, W, 3) RGB image tensor from the same camera.
-    - depth_trunc: (optional) Maximum depth value to consider. Pixels with depth beyond
-      this are ignored, preventing noisy far-away surfaces from corrupting the TSDF.
-    - world_points_h_t: (optional) Pre-computed (N³, 4) homogeneous world-point matrix.
-      If provided, skips computation (saves time when the same grid is used across multiple cameras)
       
     Returns:
     - final_grid: (Nx, Ny, Nz) PyTorch tensor containing the TSDF values for each voxel.
@@ -77,8 +75,6 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
 
     # Check if all 4 surrounding pixels have valid depth values
     depth_check = (d00 > 0) & (d01 > 0) & (d10 > 0) & (d11 > 0)
-    if depth_trunc is not None:
-        depth_check &= (d00 < depth_trunc) & (d01 < depth_trunc) & (d10 < depth_trunc) & (d11 < depth_trunc)
 
     sampled_depths = wa * d00 + wb * d01 + wc * d10 + wd * d11
 
@@ -159,7 +155,7 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
     return final_grid, color_grid, final_weights
 
 
-def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_size, trunc_margin, color_images=None, grid_origin=None, depth_trunc=None):
+def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_size, trunc_margin, color_images=None, grid_origin=None):
     """
     GPU-Accelerated multi-camera fusion using PyTorch.
     Inputs and outputs remain as standard NumPy arrays for compatibility with the rest of the pipeline.
@@ -177,7 +173,6 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
     - trunc_margin: The maximum +/- distance to cap the SDF.
     - color_images: (optional) list of (H, W, 3) RGB images, one per camera.
     - grid_origin: (optional) (3,) array, the world-space corner where the grid starts.
-    - depth_trunc: (optional) Maximum depth to consider per camera.
     
     Returns:
     - fused_tsdf: (Nx, Ny, Nz) numpy array of fused TSDF values.
@@ -228,9 +223,7 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
 
         tsdf_i, color_i, weight_i = generate_tsdf_single_camera(
             depth_t, intrinsics_t, extrinsics_t,
-            grid_shape, voxel_size, trunc_margin, color_image_t=colors_t,
-            depth_trunc=depth_trunc,
-            world_points_h_t=precomputed_wph_t
+            grid_shape, voxel_size, trunc_margin, precomputed_wph_t, color_image_t=colors_t
         )
 
         tsdf_sum += tsdf_i * weight_i # grid of sdf values

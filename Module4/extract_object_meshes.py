@@ -218,7 +218,7 @@ for label_id in sorted_labels:
         if len(pts) > 0:
             if len(pts) > 5000: # if too many points, randomly sample to speed up
                 # We don't need all points for bounding box calculation
-                sampled_indices = np.random.choice(len(pts), size=5000, replace=False)
+                sampled_indices = np.random.default_rng(42).choice(len(pts), size=5000, replace=False)
                 pts = pts[sampled_indices]
             all_world_pts.append(pts)
 
@@ -246,7 +246,6 @@ for label_id in sorted_labels:
 
     voxel_size = grid_size.max() / N # max to make sure object fits in grid
     trunc_margin = voxel_size * TRUNC_FACTOR # tsdf truncation margin
-    depth_trunc = BBOX_DEPTH_TRUNC
     print("Grid:", str(N) + "^3, voxel =", round(voxel_size, 4), "trunc =", round(trunc_margin, 4))
 
     # 5.5: Run TSDF fusion
@@ -258,8 +257,7 @@ for label_id in sorted_labels:
         voxel_size=voxel_size,
         trunc_margin=trunc_margin,
         color_images=masked_colors,
-        grid_origin=grid_min,
-        depth_trunc=depth_trunc
+        grid_origin=grid_min
     )
     print("TSDF fusion:", round(time.time() - t_fusion, 2), "s")
 
