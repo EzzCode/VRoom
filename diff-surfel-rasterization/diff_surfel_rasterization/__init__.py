@@ -553,12 +553,19 @@ _SUPPORTED_CHANNELS = [1, 3, 4, 8, 16, 32]
 
 def _next_supported(n) -> int:
     """Find the smallest supported channel count >= n. 
-    If n is larger than the largest supported channel count, return the largest supported channel count.
+    Raises for channel counts larger than the native CUDA templates support.
     """
     for s in _SUPPORTED_CHANNELS:
         if s >= n:
             return s
-    return _SUPPORTED_CHANNELS[-1]
+    raise ValueError(f"Unsupported channel count {n}; max supported template size is {_SUPPORTED_CHANNELS[-1]}")
+
+
+def _next_chunk_stride(n: int) -> int:
+    """Return a safe per-pass template size, chunking large feature tensors."""
+    if n > _SUPPORTED_CHANNELS[-1]:
+        return _SUPPORTED_CHANNELS[-1]
+    return _next_supported(n)
 
 def _get_projection_matrix(znear, zfar, fovX, fovY, device):
     """Build OpenGL-style projection matrix from FoV."""
@@ -765,7 +772,7 @@ def rasterization_2dgs_inria_wrapper(
         allmap = None
 
         # Create the rasterizer
-        first_stride = _next_supported(channels)
+        first_stride = _next_chunk_stride(channels)
         if backgrounds is not None:
             bg = backgrounds[cid]
             if bg.shape[0] < first_stride:
@@ -799,7 +806,7 @@ def rasterization_2dgs_inria_wrapper(
 
         while color_idx < channels:
             remaining = channels - color_idx
-            stride = _next_supported(remaining)
+            stride = _next_chunk_stride(remaining)
 
             _colors = colors[..., color_idx : color_idx + stride]
             shape_before = _colors.shape
@@ -899,3 +906,61 @@ def rasterization_2dgs_inria_wrapper(
         "gaussian_ids": None,
     }
     return (render_colors, render_alphas), meta
+
+
+def rasterization_2dgs(
+    means: Tensor,
+    quats: Tensor,
+    scales: Tensor,
+    opacities: Tensor,
+    colors: Tensor,
+    viewmats: Tensor,
+    Ks: Tensor,
+    width: int,
+    height: int,
+    backgrounds: Optional[Tensor] = None,
+    features: Optional[Tensor] = None,
+    **kwargs,
+):
+    """gsplat-style 2DGS rasterization API backed by the Inria CUDA kernel.
+
+    Returns the same 8-tuple shape convention used by ``gsplat.rasterization_2dgs``:
+    RGB, alpha, rendered normals, depth-derived normals, distortion, median depth,
+    optional rendered features, and an info dictionary.
+    """
+    feature_dim = 0 if features is None else int(features.shape[-1])
+    if features is None:
+        packed_colors = colors
+    else:
+        packed_colors = torch.cat([colors, features.detach()], dim=-1)
+
+    (packed_render, render_alphas), info = rasterization_2dgs_inria_wrapper(
+        means=means,
+        quats=quats,
+        scales=scales,
+        opacities=opacities,
+        colors=packed_colors,
+        viewmats=viewmats,
+        Ks=Ks,
+        width=width,
+        height=height,
+        backgrounds=backgrounds,
+        **kwargs,
+    )
+
+    render_colors = packed_render[..., :3]
+    render_features = None
+    if features is not None:
+        render_features = packed_render[..., 3:3 + feature_dim].detach()
+    render_median = packed_render[..., -1:]
+
+    return (
+        render_colors,
+        render_alphas,
+        info["normals_rend"],
+        info["normals_surf"],
+        info["render_distloss"],
+        render_median,
+        render_features,
+        info,
+    )

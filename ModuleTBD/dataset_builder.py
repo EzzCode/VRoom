@@ -149,6 +149,38 @@ def _compute_world_scale_px(seed_points_W, R_w2c, T_w2c, K, target_size):
     return float(np.clip(world_px / max(sv3d_px, 1.0), _WS_CLIP_MIN, _WS_CLIP_MAX))
 
 
+def _project_seed_bbox(seed_points_W, R_w2c, T_w2c, K, width, height):
+    R = np.asarray(R_w2c, np.float64)
+    T = np.asarray(T_w2c, np.float64).reshape(3)
+    K64 = np.asarray(K, np.float64)
+    pts = np.asarray(seed_points_W, np.float64)
+    pts_c = (R @ pts.T).T + T
+    in_front = pts_c[:, 2] > _SEED_DEPTH_MIN
+    if int(in_front.sum()) < _SEED_MIN_IN_FRONT:
+        return None
+    pts_f = pts_c[in_front]
+    u = pts_f[:, 0] / pts_f[:, 2] * float(K64[0, 0]) + float(K64[0, 2])
+    v = pts_f[:, 1] / pts_f[:, 2] * float(K64[1, 1]) + float(K64[1, 2])
+    valid = (u >= 0) & (u < int(width)) & (v >= 0) & (v < int(height))
+    if int(valid.sum()) < _SEED_MIN_IN_FRONT:
+        return None
+    u = u[valid]
+    v = v[valid]
+    return (
+        float(np.percentile(u, _SEED_PERCENTILE_LO)),
+        float(np.percentile(v, _SEED_PERCENTILE_LO)),
+        float(np.percentile(u, _SEED_PERCENTILE_HI)),
+        float(np.percentile(v, _SEED_PERCENTILE_HI)),
+    )
+
+
+def _mask_bbox(mask):
+    ys, xs = np.where(np.asarray(mask).astype(bool))
+    if len(xs) == 0:
+        return None
+    return float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)
+
+
 # ---------------------------------------------------------------------------
 # Hallucinated views
 # ---------------------------------------------------------------------------
@@ -239,7 +271,19 @@ def build_hallucinated_views(halluc_index_path, frame, *,
         K_view = K_sv3d.copy()
         K_view[0, 0] = float(K_sv3d[0, 0] / ws)
         K_view[1, 1] = float(K_sv3d[1, 1] / ws)
-        # cx/cy intentionally unchanged — see _compute_world_scale_px docstring
+        proj_bbox = _project_seed_bbox(seed_points_W, R_w2c, T_w2c, K_view, res, res)
+        img_bbox = _mask_bbox(mask)
+        alignment_shift = [0.0, 0.0]
+        if proj_bbox is not None and img_bbox is not None:
+            proj_cx = 0.5 * (proj_bbox[0] + proj_bbox[2])
+            proj_cy = 0.5 * (proj_bbox[1] + proj_bbox[3])
+            img_cx = 0.5 * (img_bbox[0] + img_bbox[2])
+            img_cy = 0.5 * (img_bbox[1] + img_bbox[3])
+            shift_x = float(np.clip(img_cx - proj_cx, -0.25 * res, 0.25 * res))
+            shift_y = float(np.clip(img_cy - proj_cy, -0.25 * res, 0.25 * res))
+            K_view[0, 2] += shift_x
+            K_view[1, 2] += shift_y
+            alignment_shift = [shift_x, shift_y]
 
         views.append({
             "source": "hallucinated",
@@ -257,6 +301,10 @@ def build_hallucinated_views(halluc_index_path, frame, *,
                 "elevation_offset_deg": el_V,
                 "is_conditioning": bool(fr.get("is_conditioning", False)),
                 "frame_index": int(fr.get("index", 0)),
+                "alignment_transform": "principal_point_shift",
+                "alignment_shift_px": alignment_shift,
+                "seed_projection_bbox_before_shift": proj_bbox,
+                "image_mask_bbox": img_bbox,
             },
             "weight": float(weight),
         })
@@ -484,6 +532,10 @@ def save_supervision_manifest(views, output_path):
             "elevation_deg":   float(cam.get("elevation_offset_deg", 0.0)),
             "is_conditioning": bool(cam.get("is_conditioning", False)),
             "frame_index":     cam.get("frame_index"),
+            "alignment_transform": cam.get("alignment_transform"),
+            "alignment_shift_px": cam.get("alignment_shift_px"),
+            "seed_projection_bbox_before_shift": cam.get("seed_projection_bbox_before_shift"),
+            "image_mask_bbox": cam.get("image_mask_bbox"),
             "R_w2c":           np.asarray(cam["R"]).tolist(),
             "T_w2c":           np.asarray(cam["T"]).tolist(),
             "K":               np.asarray(cam["K"]).tolist(),

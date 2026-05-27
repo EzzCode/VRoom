@@ -55,7 +55,7 @@ def load_cameras(cameras_json: str):
     return result
 
 
-def load_gaussians(model_path: str):
+def load_gaussians(model_path: str, ply_path=None):
     model_path = Path(model_path)
     config_path = model_path / "config.yaml"
 
@@ -80,9 +80,16 @@ def load_gaussians(model_path: str):
     if kwargs is None:
         raise ValueError(f"model_config.kwargs is missing in {config_path}")
 
-    model = GaussianModel(**kwargs)                      # construct empty model
-    model.load_ply(str(model_path / "point_cloud.ply"))  # load anchors + label_ids
-    model.load_mlp_checkpoints(model_path)               # load MLPs
+    _GAUSSIAN_MODEL_KWARGS = {
+        "n_offsets", "feat_dim", "view_dim", "appearance_dim",
+        "voxel_size", "gs_attr", "render_mode", "tile_size_2dgs",
+    }
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k in _GAUSSIAN_MODEL_KWARGS}
+
+    resolved_ply = Path(ply_path) if ply_path else model_path / "point_cloud.ply"
+    model = GaussianModel(**filtered_kwargs)             # construct empty model
+    model.load_ply(str(resolved_ply))                    # load anchors + label_ids
+    model.load_mlp_checkpoints(str(resolved_ply.parent)) # load MLPs (same dir as PLY)
     if model.label_ids is None:
         raise ValueError(
             f"Model at {model_path} does not have label_ids; cannot compute object scope."
@@ -164,19 +171,17 @@ class ObjectScope:
     cameras: list = field(default_factory=list)
 
 
-def compute_object_scope(path, object_label_id: int, min_anchors: int = 50,
-):
-    
+def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_path=None):
     model_path = Path(path)
     cameras_json = model_path / "cameras.json"
     if not cameras_json.exists():
         raise FileNotFoundError(f"Expected cameras.json at {cameras_json}")
 
-    ply_path = model_path / "point_cloud.ply"
-    if not ply_path.exists():
-        raise FileNotFoundError(f"PLY not found: {ply_path}")
+    resolved_ply = Path(ply_path) if ply_path else model_path / "point_cloud.ply"
+    if not resolved_ply.exists():
+        raise FileNotFoundError(f"PLY not found: {resolved_ply}")
 
-    gaussians, pipe_config = load_gaussians(str(model_path))
+    gaussians, pipe_config = load_gaussians(str(model_path), ply_path=str(resolved_ply))
     all_anchors = gaussians.get_anchor.detach().cpu().numpy().astype(np.float32)
     label_ids = gaussians.label_ids.detach().cpu().numpy().reshape(-1).astype(np.int64)
 
@@ -241,6 +246,10 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50,
         cameras=cameras,
     )
     obj_frame = _build_coordinate_frames(scope)
+    for ci in visible_index:
+        az, el = obj_frame.world_to_virtual(cameras[ci]["position"])
+        cameras[ci]["azimuth_deg"] = float(az) % 360.0
+        cameras[ci]["elevation_deg"] = float(el)
     
     logger.info(
         "ObjectScope obj=%d: %d anchors | centroid=%s | radius=%.3f | visible_cams=%d/%d",

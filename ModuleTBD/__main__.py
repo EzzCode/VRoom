@@ -1,0 +1,445 @@
+"""ModuleTBD end-to-end pipeline CLI.
+
+Drop-in replacement for ``object_isolation.run_pipeline`` using the
+rewritten ModuleTBD modules.
+
+Usage::
+
+    python -m ModuleTBD \\
+        --model_path temp_deps/ObjectGS/outputs/3dovs/2d_crossentropy_loss_01/2026-03-19_04-01-38 \\
+        --scene_dir  data/3dovs/bed \\
+        --output_root object_isolation/outputs \\
+        --object_id  8 \\
+        --iterations 12000 \\
+        --debug \\
+        --enable_densification \\
+        --hallucination_weight 0.6
+
+By default ``--ply_path`` is resolved to ``<model_path>/point_cloud/point_cloud.ply``
+(the standard ObjectGS checkpoint layout). Pass it explicitly if your layout differs.
+"""
+
+import argparse
+import json
+import logging
+import sys
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+def _setup_logging(level=logging.INFO):
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+
+def run(
+    *,
+    model_path,
+    scene_dir,
+    output_root,
+    object_id,
+    ply_path=None,
+    iterations=1200,
+    # Extraction
+    id_map_dir="auto",
+    module1_obj_id=None,
+    tau_alpha=0.4,
+    min_pixels=64,
+    # Frame scoring
+    top_k=5,
+    # Novel views
+    iou_threshold=0.20,
+    fov_y_deg=50.0,
+    num_inference_steps=25,
+    safe_mode=False,
+    seed=0,
+    reuse_sv3d=False,
+    # Training
+    hallucination_weight=1.0,
+    real_weight=1.0,
+    rgb_weight=1.0,
+    hallucination_rgb_scale=1.0,
+    depth_weight=0.1,
+    depth_start_iter=100,
+    depth_front_weight=1.0,
+    depth_back_weight=0.15,
+    colmap_init_target_points=8000,
+    enable_densification=False,
+    max_anchor_count=20000,
+    densify_grad_threshold=0.00005,
+    densify_extra_ratio=0.08,
+    n_compare_views=8,
+    skip_compare=False,
+    debug=False,
+):
+    """Run extraction → frame scoring → hallucination → training for one object."""
+    import torch
+    from ModuleTBD.utils.scene_analysis import compute_object_scope, load_gaussians
+    from ModuleTBD.utils.transforms import ObjectFrame
+    from ModuleTBD.view_selection import run_extraction, run_scoring
+    from ModuleTBD.hallucination import run_hallucination
+    from ModuleTBD.utils.sv3d_prior import SV3DBackend
+    from ModuleTBD.pipeline import run_pipeline
+
+    torch.backends.cudnn.benchmark = True
+
+    model_path = Path(model_path)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    obj_id = int(object_id)
+    obj_dir = output_root / f"obj_{obj_id}"
+
+    # Resolve PLY path — prefer latest iteration_* checkpoint (has label_ids);
+    # fall back to flat point_cloud/point_cloud.ply if no iterations exist.
+    if ply_path:
+        resolved_ply = Path(ply_path)
+    else:
+        pc_base = model_path / "point_cloud"
+        iter_dirs = sorted(
+            [d for d in pc_base.iterdir() if d.is_dir() and d.name.startswith("iteration_")],
+            key=lambda d: int(d.name.split("_")[-1]),
+        ) if pc_base.exists() else []
+        resolved_ply = (iter_dirs[-1] / "point_cloud.ply") if iter_dirs else (pc_base / "point_cloud.ply")
+
+    logger.info("\n" + "=" * 80)
+    logger.info("STARTING COMPLETE PIPELINE FOR OBJECT %d", obj_id)
+    logger.info("=" * 80 + "\n")
+
+    summary = {
+        "object_id": obj_id,
+        "model_path": str(model_path),
+        "ply_path": str(resolved_ply),
+        "scene_dir": str(scene_dir),
+        "output_root": str(output_root),
+        "phases": {},
+    }
+
+    backend = SV3DBackend(num_inference_steps=num_inference_steps, safe_mode=safe_mode)
+    if not reuse_sv3d:
+        logger.info("Preloading SV3D before ObjectGS CUDA state …")
+        backend._load()
+
+    # ── Scope & model ─────────────────────────────────────────────────────────
+    logger.info("Computing scope and loading model …")
+    scope, frame, pipe_config = compute_object_scope(
+        str(model_path), obj_id, ply_path=str(resolved_ply)
+    )
+    gaussians, _ = load_gaussians(str(model_path), ply_path=str(resolved_ply))
+
+    # ── Extraction ───────────────────────────────────────────────────────────
+    logger.info("\n" + "─" * 80)
+    logger.info("EXTRACTION: Hybrid Object Extraction")
+    logger.info("─" * 80)
+
+    try:
+        scene_p = Path(scene_dir)
+        images_dir = scene_p / "images"
+
+        resolved_id_map_dir = None
+        if id_map_dir == "auto":
+            for candidate in [
+                scene_p / "tracked" / "id_maps",
+                scene_p / "semantic_instance",
+                scene_p / "object_mask",
+            ]:
+                if candidate.exists() and any(candidate.iterdir()):
+                    resolved_id_map_dir = candidate
+                    break
+        elif str(id_map_dir).lower() not in ("none", "null", ""):
+            resolved_id_map_dir = Path(id_map_dir)
+
+        extraction_manifest = run_extraction(
+            scope=scope,
+            gaussians=gaussians,
+            pipe_config=pipe_config,
+            images_dir=images_dir,
+            output_dir=obj_dir / "01_extraction",
+            id_map_dir=resolved_id_map_dir,
+            module1_obj_id=module1_obj_id,
+            auto_resolve=True,
+        )
+        summary["phases"]["extraction"] = extraction_manifest
+        logger.info("✓ Extraction: %d frames extracted", extraction_manifest["n_extracted"])
+    except Exception as exc:
+        logger.exception("✗ Extraction failed: %s", exc)
+        summary["phases"]["extraction"] = {"error": str(exc)}
+        return summary
+
+    # ── Frame scoring ─────────────────────────────────────────────────────────
+    logger.info("\n" + "─" * 80)
+    logger.info("FRAME SCORING: Pick SV3D conditioning view")
+    logger.info("─" * 80)
+
+    scores_manifest = None
+
+    try:
+        scores_manifest = run_scoring(
+            extraction_index_path=obj_dir / "01_extraction" / "extraction_index.json",
+            top_k=top_k,
+        )
+        summary["phases"]["frame_scoring"] = scores_manifest
+        top1 = scores_manifest.get("top_k", [{}])[0] if scores_manifest.get("top_k") else {}
+        logger.info("✓ Frame scoring: best score = %.3f  cam=%s  az=%.1f°",
+                    top1.get("score", 0.0), top1.get("cam_index", "?"),
+                    top1.get("azimuth_deg", 0.0))
+    except Exception as exc:
+        logger.exception("✗ Frame scoring failed: %s", exc)
+        summary["phases"]["frame_scoring"] = {"error": str(exc)}
+        return summary
+
+    # ── Novel-view hallucination ──────────────────────────────────────────────
+    logger.info("\n" + "─" * 80)
+    logger.info("NOVEL VIEWS: SV3D Hallucination")
+    logger.info("─" * 80)
+
+    try:
+        halluc_manifest = run_hallucination(
+            scope=scope,
+            frame=frame,
+            gaussians=gaussians,
+            pipe_config=pipe_config,
+            scores=scores_manifest,
+            output_dir=obj_dir / "03_novel_views",
+            object_label_id=obj_id,
+            backend=backend,
+            iou_threshold=iou_threshold,
+            fov_y_deg=fov_y_deg,
+            seed=seed,
+            reuse_sv3d=reuse_sv3d,
+        )
+        backend.unload()
+        summary["phases"]["novel_views"] = halluc_manifest
+        logger.info("✓ Novel views: %d/%d kept",
+                    halluc_manifest.get("n_kept", 0), halluc_manifest.get("n_views", 0))
+    except Exception as exc:
+        logger.exception("✗ Novel views failed: %s", exc)
+        summary["phases"]["novel_views"] = {"error": str(exc)}
+        return summary
+
+    # ── Training ──────────────────────────────────────────────────────────────
+    logger.info("\n" + "─" * 80)
+    logger.info("TRAINING: Supervision + ObjectGS scratch")
+    logger.info("─" * 80)
+
+    try:
+        training_result = run_pipeline(
+            model_path=str(model_path),
+            object_label_id=obj_id,
+            halluc_index_path=obj_dir / "03_novel_views" / "hallucination_index.json",
+            output_dir=output_root,
+            halluc_manifest=halluc_manifest,
+            gaussians=gaussians,
+            pipe_config=pipe_config,
+            scope=scope,
+            frame=frame,
+            iterations=iterations,
+            hallucination_weight=hallucination_weight,
+            real_weight=real_weight,
+            rgb_weight=rgb_weight,
+            hallucination_rgb_scale=hallucination_rgb_scale,
+            depth_weight=depth_weight,
+            depth_start_iter=depth_start_iter,
+            depth_front_weight=depth_front_weight,
+            depth_back_weight=depth_back_weight,
+            colmap_init_target_points=colmap_init_target_points,
+            enable_densification=enable_densification,
+            max_anchor_count=max_anchor_count,
+            densify_grad_threshold=densify_grad_threshold,
+            densify_extra_ratio=densify_extra_ratio,
+            fov_y_deg=fov_y_deg,
+            debug=debug,
+        )
+        training_result_clean = {k: v for k, v in training_result.items() if k != "_gaussians"}
+        summary["phases"]["training"] = training_result_clean
+        logger.info("✓ Training complete")
+    except Exception as exc:
+        logger.exception("✗ Training failed: %s", exc)
+        summary["phases"]["training"] = {"error": str(exc)}
+        return summary
+
+    # ── Compare renders (debug) ───────────────────────────────────────────────
+    if debug:
+        try:
+            import numpy as np
+            from ModuleTBD.pipeline import build_orbit_cameras, render_orbit, save_compare_grid
+            compare_dir = obj_dir / "07_compare"
+            object_half_size = float(np.linalg.norm(
+                np.asarray(scope.aabb_max, dtype=np.float32)
+                - np.asarray(scope.aabb_min, dtype=np.float32)
+            ) / 2.0)
+            cams = build_orbit_cameras(
+                center=scope.centroid,
+                radius=object_half_size,
+                orbit_radius=scope.radius,
+                up=scope.up,
+                ref_cam_position=np.asarray(scope.cam_centers_visible, dtype=np.float32).mean(axis=0),
+                n_views=n_compare_views,
+            )
+            before = render_orbit(gaussians, pipe_config, cams, object_label_id=obj_id)
+            trained_gaussians = training_result.get("_gaussians")
+            if trained_gaussians is not None:
+                after = render_orbit(trained_gaussians, pipe_config, cams)
+                save_compare_grid(before, after, compare_dir)
+                logger.info("✓ Comparison renders saved to %s", compare_dir)
+        except Exception as exc:
+            logger.warning("Compare render failed (non-fatal): %s", exc)
+
+        # ── Debug-only visual artifacts ──────────────────────────────────────
+        try:
+            from ModuleTBD.debug import generate_all_debug_artifacts
+            generate_all_debug_artifacts(
+                obj_dir=obj_dir,
+                scope=scope,
+                frame=frame,
+                gaussians=gaussians,
+                pipe_config=pipe_config,
+                images_dir=images_dir,
+                id_map_dir=resolved_id_map_dir,
+                extraction_manifest=extraction_manifest,
+                scores_manifest=scores_manifest,
+                halluc_manifest=halluc_manifest,
+                training_summary=summary["phases"].get("training"),
+                model_path=str(model_path),
+                object_id=obj_id,
+                n_compare_views=n_compare_views,
+                do_compare_renders=False,  # we already rendered 07_compare above
+            )
+            logger.info("✓ Debug artifacts written under %s", obj_dir)
+        except Exception as exc:
+            logger.warning("Debug artifacts failed (non-fatal): %s", exc)
+
+    # ── Save summary ──────────────────────────────────────────────────────────
+    logger.info("\n" + "=" * 80)
+    logger.info("PIPELINE COMPLETE — object %d", obj_id)
+    logger.info("  extraction : %d frames", summary["phases"].get("extraction", {}).get("n_extracted", 0))
+    logger.info("  novel views: %d kept", summary["phases"].get("novel_views", {}).get("n_kept", 0))
+    logger.info("  output dir : %s", obj_dir)
+    logger.info("=" * 80 + "\n")
+
+    summary_path = obj_dir / "99_pipeline_summary.json"
+    if debug:
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
+        logger.info("Summary saved to %s", summary_path)
+    return summary
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description="ModuleTBD — end-to-end object isolation pipeline",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    # Required
+    p.add_argument("--model_path", required=True,
+                   help="Trained ObjectGS run dir (contains cameras.json, config.yaml)")
+    p.add_argument("--scene_dir", required=True,
+                   help="Scene dir with images/ subdir")
+    p.add_argument("--object_id", required=True, type=int)
+
+    # Paths
+    p.add_argument("--output_root", default="object_isolation/outputs")
+    p.add_argument("--ply_path", default=None,
+                   help="Explicit path to point_cloud.ply "
+                        "(default: <model_path>/point_cloud/point_cloud.ply)")
+
+    # Training length
+    p.add_argument("--iterations", type=int, default=1200)
+
+    # Extraction
+    p.add_argument("--id_map_dir", default="auto",
+                   help="'auto' | 'none' | explicit path to Module1 id_maps")
+    p.add_argument("--module1_obj_id", type=int, default=None)
+    p.add_argument("--tau_alpha", type=float, default=0.4)
+    p.add_argument("--min_pixels", type=int, default=64)
+
+    # Frame scoring
+    p.add_argument("--top_k", type=int, default=5)
+
+    # Novel views
+    p.add_argument("--iou_threshold", type=float, default=0.20)
+    p.add_argument("--fov_y_deg", type=float, default=50.0)
+    p.add_argument("--num_inference_steps", type=int, default=25)
+    p.add_argument("--safe_mode", action="store_true")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--reuse_sv3d", action="store_true")
+
+    # Training
+    p.add_argument("--hallucination_weight", type=float, default=1.0)
+    p.add_argument("--real_weight", type=float, default=1.0)
+    p.add_argument("--rgb_weight", type=float, default=1.0)
+    p.add_argument("--hallucination_rgb_scale", type=float, default=1.0)
+    p.add_argument("--depth_weight", type=float, default=0.1)
+    p.add_argument("--depth_start_iter", type=int, default=100)
+    p.add_argument("--depth_front_weight", type=float, default=1.0)
+    p.add_argument("--depth_back_weight", type=float, default=0.15)
+    p.add_argument("--colmap_init_target_points", type=int, default=8000)
+    p.add_argument("--enable_densification", action="store_true")
+    p.add_argument("--max_anchor_count", type=int, default=20000)
+    p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
+    p.add_argument("--densify_extra_ratio", type=float, default=0.08)
+    p.add_argument("--n_compare_views", type=int, default=8)
+    p.add_argument("--skip_compare", action="store_true")
+
+    # General
+    p.add_argument("--debug", action="store_true")
+    p.add_argument("--log_level", default="INFO")
+
+    return p.parse_args()
+
+
+def main():
+    args = _parse_args()
+    _setup_logging(getattr(logging, args.log_level.upper(), logging.INFO))
+    run(
+        model_path=args.model_path,
+        scene_dir=args.scene_dir,
+        output_root=args.output_root,
+        object_id=args.object_id,
+        ply_path=args.ply_path,
+        iterations=args.iterations,
+        id_map_dir=args.id_map_dir,
+        module1_obj_id=args.module1_obj_id,
+        tau_alpha=args.tau_alpha,
+        min_pixels=args.min_pixels,
+        top_k=args.top_k,
+        iou_threshold=args.iou_threshold,
+        fov_y_deg=args.fov_y_deg,
+        num_inference_steps=args.num_inference_steps,
+        safe_mode=args.safe_mode,
+        seed=args.seed,
+        reuse_sv3d=args.reuse_sv3d,
+        hallucination_weight=args.hallucination_weight,
+        real_weight=args.real_weight,
+        rgb_weight=args.rgb_weight,
+        hallucination_rgb_scale=args.hallucination_rgb_scale,
+        depth_weight=args.depth_weight,
+        depth_start_iter=args.depth_start_iter,
+        depth_front_weight=args.depth_front_weight,
+        depth_back_weight=args.depth_back_weight,
+        colmap_init_target_points=args.colmap_init_target_points,
+        enable_densification=args.enable_densification,
+        max_anchor_count=args.max_anchor_count,
+        densify_grad_threshold=args.densify_grad_threshold,
+        densify_extra_ratio=args.densify_extra_ratio,
+        n_compare_views=args.n_compare_views,
+        skip_compare=args.skip_compare,
+        debug=args.debug,
+    )
+
+
+if __name__ == "__main__":
+    main()

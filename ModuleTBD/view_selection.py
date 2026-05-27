@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 WEIGHTS = {
     "front":  0.35, # prefer front-facing views
-    "cover":  0.30, # how big the object is in frame. max is COVER_TARGET
-    "expose": 0.20, 
+    "cover":  0.20, # how big the object is in frame. max is COVER_TARGET
+    "sharp":  0.20, # rank-normalized masked Laplacian variance
+    "expose": 0.10, 
     "occl":   0.15, # higher fraction of trained model pixels kept in hybrid mask
 }
 
@@ -33,6 +34,7 @@ class ExtractedFrame:
     bbox_xywh: list
     fg_fraction: float
     azimuth_deg: float
+    elevation_deg: float
     out_rgba_path: str
     out_mask_path: str
     used_real_mask: bool
@@ -118,6 +120,7 @@ def extract_frame(scope, gaussians, pipe_config, cam_index, images_dir,
         bbox_xywh=bbox,
         fg_fraction=n_pixels_hybrid / (height * width),
         azimuth_deg=float(cam.get("azimuth_deg", float("nan"))),
+        elevation_deg=float(cam.get("elevation_deg", float("nan"))),
         out_rgba_path=str(rgba_path),
         out_mask_path=str(mask_path),
         used_real_mask=used_real,
@@ -179,6 +182,28 @@ def _cover_score(fg_fraction):
     return max(0.0, 1.0 - (fg_fraction - COVER_TARGET) / max(COVER_CEIL - COVER_TARGET, 1e-6))
 
 
+def _sharp_metric(rgb, mask):
+    if mask.sum() < 32:
+        return 0.0
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    lap = cv2.Laplacian(gray, cv2.CV_32F)
+    vals = lap[mask]
+    return float(np.var(vals)) if vals.size else 0.0
+
+
+def _rank_normalize(values):
+    values = np.asarray(values, np.float64)
+    n = len(values)
+    if n == 0:
+        return values
+    if n == 1:
+        return np.array([1.0], np.float64)
+    order = np.argsort(values)
+    ranks = np.empty(n, dtype=np.float64)
+    ranks[order] = np.linspace(0.0, 1.0, n)
+    return ranks
+
+
 
 
 
@@ -203,7 +228,7 @@ def score_frames(extraction_index_path, top_k=5):
     if not frames:
         return {"weights": weights, "frames": [], "ranking": [], "top_k": []}
 
-    results = []
+    collected = []
     for fr in frames:
         img = cv2.imread(fr["image_path"], cv2.IMREAD_COLOR)
         mask_u8 = cv2.imread(fr["out_mask_path"], cv2.IMREAD_GRAYSCALE)
@@ -214,9 +239,19 @@ def score_frames(extraction_index_path, top_k=5):
         az = float(fr.get("azimuth_deg", float("nan")))
         if math.isfinite(az):
             az = ((az + 180.0) % 360.0) - 180.0
+        el = float(fr.get("elevation_deg", 0.0))
+        if not math.isfinite(el):
+            el = 0.0
+        collected.append((fr, img, mask, az, el, _sharp_metric(img, mask)))
+
+    sharp_norm = _rank_normalize([item[5] for item in collected])
+
+    results = []
+    for (fr, img, mask, az, el, sharp_raw), sharp in zip(collected, sharp_norm):
         comp = {
-            "front":  _front_score(az, 0.0),
+            "front":  _front_score(az, el),
             "cover":  _cover_score(float(fr["fg_fraction"])),
+            "sharp":  float(sharp),
             "expose": _exposure_score(img, mask),
             "occl":   _occl_score(int(fr["n_pixels_hybrid"]), int(fr["n_pixels_objgs"])),
         }
@@ -225,9 +260,11 @@ def score_frames(extraction_index_path, top_k=5):
             "image_name": fr["image_name"],
             "out_rgba_path": fr["out_rgba_path"],
             "azimuth_deg": az,
+            "elevation_deg": el,
             "fg_fraction": float(fr["fg_fraction"]),
             "n_pixels_hybrid": int(fr["n_pixels_hybrid"]),
             "n_pixels_objgs": int(fr["n_pixels_objgs"]),
+            "sharpness_raw": float(sharp_raw),
             "components": comp,
             "score": sum(weights[k] * comp[k] for k in weights),
         })

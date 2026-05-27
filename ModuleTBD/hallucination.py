@@ -24,68 +24,40 @@ _MIN_SV3D_MASK_PX = 200
 # ---------------------------------------------------------------------------
 
 def _prepare_conditioning(rgba_path, target_size=576, fill_frac=_SV3D_FILL_FRAC, bg_value=255):
-    """Load RGBA, tight-crop on alpha, pad to square, composite on white, resize.
+    """Crop tight on alpha, pad to square, composite on neutral bg."""
+    rgba = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
+    if rgba is None or rgba.ndim != 3 or rgba.shape[2] != 4:
+        raise ValueError(f"Bad RGBA: {rgba_path}")
+    bgr = rgba[..., :3]
+    alpha = rgba[..., 3]
+    ys, xs = np.where(alpha > 127)
+    if len(xs) == 0:
+        raise ValueError(f"Empty alpha in {rgba_path}")
 
-    Returns an (H, W, 3) uint8 RGB array ready to pass to SV3DBackend.
-    """
-    img = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise FileNotFoundError(f"Cannot load conditioning frame: {rgba_path}")
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    obj_w, obj_h = x1 - x0, y1 - y0
+    side = max(obj_w, obj_h)
+    pad = int(round(side * (1.0 - fill_frac) / (2.0 * fill_frac)))
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    half = side // 2 + pad
+    sx0 = max(0, cx - half); sy0 = max(0, cy - half)
+    sx1 = min(rgba.shape[1], cx + half); sy1 = min(rgba.shape[0], cy + half)
+    crop_bgr = bgr[sy0:sy1, sx0:sx1]
+    crop_alpha = alpha[sy0:sy1, sx0:sx1].astype(np.float32) / 255.0
 
-    if img.ndim == 2:
-        # Greyscale — treat as opaque
-        rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        alpha = np.ones(rgb.shape[:2], np.uint8) * 255
-    elif img.shape[2] == 3:
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        alpha = np.ones(rgb.shape[:2], np.uint8) * 255
-    else:
-        alpha = img[:, :, 3]
-        rgb = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2RGB)
+    h, w = crop_bgr.shape[:2]
+    side2 = max(h, w)
+    pad_top = (side2 - h) // 2; pad_bot = side2 - h - pad_top
+    pad_left = (side2 - w) // 2; pad_right = side2 - w - pad_left
+    crop_bgr = cv2.copyMakeBorder(crop_bgr, pad_top, pad_bot, pad_left, pad_right,
+                                  cv2.BORDER_CONSTANT, value=(bg_value,) * 3)
+    crop_alpha = cv2.copyMakeBorder(crop_alpha, pad_top, pad_bot, pad_left, pad_right,
+                                    cv2.BORDER_CONSTANT, value=0.0)
 
-    mask = alpha > 0
-    ys, xs = np.where(mask)
-    if len(ys) == 0:
-        # No foreground — return a blank white square
-        return np.full((target_size, target_size, 3), bg_value, np.uint8)
-
-    y0, y1, x0, x1 = int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
-    crop_rgb = rgb[y0:y1 + 1, x0:x1 + 1]
-    crop_alpha = alpha[y0:y1 + 1, x0:x1 + 1]
-
-    h, w = crop_rgb.shape[:2]
-    side = max(h, w)
-    pad_top  = (side - h) // 2
-    pad_bot  = side - h - pad_top
-    pad_left = (side - w) // 2
-    pad_rig  = side - w - pad_left
-
-    def _pad_channel(ch, bg):
-        return cv2.copyMakeBorder(ch, pad_top, pad_bot, pad_left, pad_rig,
-                                  cv2.BORDER_CONSTANT, value=bg)
-
-    sq_alpha = _pad_channel(crop_alpha, 0).astype(np.float32) / 255.0
-    sq_rgb   = np.stack([_pad_channel(crop_rgb[:, :, c], bg_value) for c in range(3)], axis=-1)
-
-    # Composite on white background
-    bg  = np.full((side, side, 3), bg_value, np.uint8)
-    a3  = sq_alpha[:, :, None]
-    out = (sq_rgb.astype(np.float32) * a3 + bg.astype(np.float32) * (1.0 - a3)).clip(0, 255).astype(np.uint8)
-
-    # Shrink so that object fills fill_frac of the square
-    obj_side = int(target_size * fill_frac)
-    if obj_side < side:
-        scale = obj_side / side
-        obj_side_px = int(round(side * scale))
-        resized = cv2.resize(out, (obj_side_px, obj_side_px), interpolation=cv2.INTER_AREA)
-        pad = (target_size - obj_side_px) // 2
-        pad_r = target_size - obj_side_px - pad
-        out = cv2.copyMakeBorder(resized, pad, pad_r, pad, pad_r,
-                                  cv2.BORDER_CONSTANT, value=bg_value)
-    else:
-        out = cv2.resize(out, (target_size, target_size), interpolation=cv2.INTER_AREA)
-
-    return out
+    bg = np.full_like(crop_bgr, bg_value)
+    comp = (crop_alpha[..., None] * crop_bgr + (1.0 - crop_alpha[..., None]) * bg).astype(np.uint8)
+    comp = cv2.resize(comp, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(comp, cv2.COLOR_BGR2RGB)
 
 
 def _alpha_from_white_bg(rgb, sat_thresh=12, val_thresh=245):
@@ -106,67 +78,47 @@ def _alpha_from_white_bg(rgb, sat_thresh=12, val_thresh=245):
 
 
 def _normalize_framing(rgb, alpha, target_size, fill_frac=_SV3D_FILL_FRAC, bg_value=255):
-    """Tight-crop on largest CC of alpha, pad to square, composite on white, resize.
+    """Tight-crop on alpha, square-pad to give ``fill_frac`` coverage, resize."""
+    alpha01 = alpha.astype(np.float32)
+    if alpha01.max() > 1.5:
+        alpha01 = alpha01 / 255.0
+    alpha01 = np.clip(alpha01, 0.0, 1.0)
+    mask = alpha01 > _ALPHA_THRESHOLD
 
-    Drops floaters by keeping only the largest connected component before computing bbox.
-    Returns (rgb_uint8 HxWx3, alpha_float HxW).
-    """
-    bin_mask = (alpha > _ALPHA_THRESHOLD).astype(np.uint8) * 255
-    n, labels = cv2.connectedComponents(bin_mask, connectivity=8)
-    if n < 2:
-        # No foreground — return blank
-        blank = np.full((target_size, target_size, 3), bg_value, np.uint8)
-        return blank, np.zeros((target_size, target_size), np.float32)
+    labels_n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    if labels_n > 1:
+        biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        mask = labels == biggest
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return np.full((target_size, target_size, 3), bg_value, np.uint8), np.zeros((target_size, target_size), np.float32)
 
-    # Largest CC by pixel count (label 0 = background)
-    counts = np.bincount(labels.ravel())
-    counts[0] = 0
-    best = int(np.argmax(counts))
-    fg_mask = (labels == best)
+    x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+    obj_w, obj_h = x1 - x0, y1 - y0
+    side = max(obj_w, obj_h)
+    pad = int(round(side * (1.0 - fill_frac) / (2.0 * fill_frac)))
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    half = side // 2 + pad
+    height, width = rgb.shape[:2]
+    sx0 = max(0, cx - half); sy0 = max(0, cy - half)
+    sx1 = min(width, cx + half); sy1 = min(height, cy + half)
+    crop_rgb = rgb[sy0:sy1, sx0:sx1]
+    crop_alpha = alpha01[sy0:sy1, sx0:sx1]
 
-    ys, xs = np.where(fg_mask)
-    y0, y1, x0, x1 = int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
-
-    crop_rgb   = rgb[y0:y1 + 1, x0:x1 + 1]
-    crop_alpha = alpha[y0:y1 + 1, x0:x1 + 1]
     h, w = crop_rgb.shape[:2]
-    side = max(h, w)
+    side2 = max(h, w)
+    pad_top = (side2 - h) // 2; pad_bot = side2 - h - pad_top
+    pad_left = (side2 - w) // 2; pad_right = side2 - w - pad_left
+    crop_rgb = cv2.copyMakeBorder(crop_rgb, pad_top, pad_bot, pad_left, pad_right,
+                                  cv2.BORDER_CONSTANT, value=(bg_value,) * 3)
+    crop_alpha = cv2.copyMakeBorder(crop_alpha, pad_top, pad_bot, pad_left, pad_right,
+                                    cv2.BORDER_CONSTANT, value=0.0)
 
-    pad_top  = (side - h) // 2
-    pad_bot  = side - h - pad_top
-    pad_left = (side - w) // 2
-    pad_rig  = side - w - pad_left
-
-    def _pad_f(arr, bg):
-        return cv2.copyMakeBorder(arr, pad_top, pad_bot, pad_left, pad_rig,
-                                  cv2.BORDER_CONSTANT, value=bg)
-
-    sq_alpha = _pad_f(crop_alpha.astype(np.float32), 0.0)
-    sq_rgb   = np.stack([_pad_f(crop_rgb[:, :, c].astype(np.float32), float(bg_value))
-                         for c in range(3)], axis=-1)
-
-    bg  = np.full((side, side, 3), float(bg_value), np.float32)
-    a3  = sq_alpha[:, :, None]
-    out = (sq_rgb * a3 + bg * (1.0 - a3)).clip(0, 255).astype(np.uint8)
-
-    # Scale so object fills fill_frac of target
-    obj_side = int(target_size * fill_frac)
-    if obj_side < side:
-        obj_side_px = int(round(side * obj_side / side))
-        obj_side_px = max(obj_side_px, 2)
-        out_r     = cv2.resize(out,         (obj_side_px, obj_side_px), interpolation=cv2.INTER_AREA)
-        alpha_r   = cv2.resize(sq_alpha,    (obj_side_px, obj_side_px), interpolation=cv2.INTER_AREA)
-        pad       = (target_size - obj_side_px) // 2
-        pad_r     = target_size - obj_side_px - pad
-        out_pad   = cv2.copyMakeBorder(out_r,   pad, pad_r, pad, pad_r,
-                                        cv2.BORDER_CONSTANT, value=bg_value)
-        alpha_pad = cv2.copyMakeBorder(alpha_r, pad, pad_r, pad, pad_r,
-                                        cv2.BORDER_CONSTANT, value=0.0)
-    else:
-        out_pad   = cv2.resize(out,      (target_size, target_size), interpolation=cv2.INTER_AREA)
-        alpha_pad = cv2.resize(sq_alpha, (target_size, target_size), interpolation=cv2.INTER_AREA)
-
-    return out_pad, alpha_pad.astype(np.float32)
+    bg = np.full_like(crop_rgb, bg_value)
+    comp = (crop_alpha[..., None] * crop_rgb.astype(np.float32) + (1.0 - crop_alpha[..., None]) * bg).astype(np.uint8)
+    comp = cv2.resize(comp, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    crop_alpha = cv2.resize(crop_alpha, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    return comp, crop_alpha.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +293,7 @@ class HallucinatedFrame:
 # ---------------------------------------------------------------------------
 
 def run_hallucination(scope, frame, gaussians, pipe_config, *,
-                      scores_json_path, output_dir, object_label_id,
+                      scores, output_dir, object_label_id,
                       backend=None, iou_threshold=0.20, min_objgs_pixels=600,
                       fov_y_deg=50.0, seed=0, save_dropped=True,
                       reuse_sv3d=False):
@@ -353,7 +305,7 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *,
     frame            : ObjectFrame (from transforms.py)
     gaussians        : GaussianModel loaded by load_gaussians
     pipe_config      : PipelineConfig from load_gaussians
-    scores_json_path : path to scores.json written by view_selection.run_scoring
+    scores           : dict returned by view_selection.run_scoring (in-memory)
     output_dir       : directory where outputs are written
     object_label_id  : integer label id of the target object
     backend          : SV3DBackend instance; created on-demand if None
@@ -386,19 +338,45 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *,
             for p in d.glob("*.png"):
                 p.unlink()
 
-    # ── Load scores and pick conditioning frame ───────────────────────────
-    with open(scores_json_path) as f:
-        scores = json.load(f)
-
-    if not scores.get("top_k"):
-        raise RuntimeError(f"scores file has no top_k entries: {scores_json_path}")
+    # ── Pick conditioning frame from in-memory scores ────────────────────
+    if not scores or not scores.get("top_k"):
+        raise RuntimeError("scores dict has no top_k entries")
 
     top1     = scores["top_k"][0]
     rgba_path = Path(top1["out_rgba_path"])
 
-    # Conditioning pose in V-frame
-    cond_az = float(top1.get("azimuth_deg", 0.0))
-    cond_el = 0.0   # view_selection always evaluates at elevation 0
+    # Conditioning pose in V-frame: use score metadata first, as generated by view_selection.
+    cond_cam_idx = int(top1["cam_index"])
+    cond_az = float(top1.get("azimuth_deg", float("nan")))
+    cond_el = float(top1.get("elevation_deg", 0.0))
+    if not math.isfinite(cond_el):
+        cond_el = 0.0
+
+    if scope.cameras and 0 <= cond_cam_idx < len(scope.cameras):
+        cam_pos = np.asarray(scope.cameras[cond_cam_idx]["position"], np.float32)
+        current_az, current_el = frame.world_to_virtual(cam_pos)
+        current_az = ((float(current_az) + 180.0) % 360.0) - 180.0
+        current_el = float(current_el)
+        if math.isfinite(cond_az):
+            delta_az = abs(((float(cond_az) - current_az + 180.0) % 360.0) - 180.0)
+            if delta_az > 0.5 or abs(float(cond_el) - current_el) > 0.5:
+                logger.warning(
+                    "Frame-scoring pose for conditioning cam %d is stale: "
+                    "scores az/el=(%.2f, %.2f), current az/el=(%.2f, %.2f). "
+                    "Using current pose for SV3D.",
+                    cond_cam_idx, cond_az, cond_el, current_az, current_el)
+                cond_az = current_az
+                cond_el = current_el
+        else:
+            logger.warning(
+                "Frame-scoring pose for conditioning cam %d is missing; "
+                "using current az/el=(%.2f, %.2f) for SV3D.",
+                cond_cam_idx, current_az, current_el)
+            cond_az = current_az
+            cond_el = current_el
+    else:
+        if not math.isfinite(cond_az):
+            cond_az = 0.0
 
     # Verify the RGBA file still exists (guard against stale scores)
     if not rgba_path.exists():
@@ -408,7 +386,6 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *,
         )
 
     # Up vector from the conditioning camera row
-    cond_cam_idx = int(top1["cam_index"])
     cond_cam_up  = None
     if scope.cameras and len(scope.cameras) > cond_cam_idx:
         cam_dict = scope.cameras[cond_cam_idx]
@@ -528,6 +505,7 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *,
             "elevation_deg": float(cond_el),
             "score": float(top1.get("score", 0.0)),
             "image_path": str(cond_png),
+            "rgba_path": str(rgba_path),
             "md5": cond_png_md5,
         },
         "params": {

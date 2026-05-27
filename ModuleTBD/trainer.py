@@ -141,6 +141,7 @@ def train_object(
     densify_grad_threshold=0.00005,
     densify_extra_ratio=0.08,
     max_offset_abs=0.45,
+    debug=False,
 ):
     """Train a fresh per-object gstrain model from COLMAP seed points.
 
@@ -203,7 +204,10 @@ def train_object(
     initial_scaling = gaussians._scaling.detach().clone()
     initial_anchor_count = int(gaussians._anchor.shape[0])
 
-    pipe = pipe_config or SimpleNamespace(add_prefilter=True)
+    if isinstance(pipe_config, dict):
+        pipe = SimpleNamespace(**pipe_config)
+    else:
+        pipe = pipe_config or SimpleNamespace()
     if not hasattr(pipe, "add_prefilter"):
         pipe.add_prefilter = True
 
@@ -322,6 +326,7 @@ def train_object(
         "depth_loss_history": depth_hist,
         "model_dir": str(model_dir),
     }
-    with open(out_dir / "05_training_summary.json", "w") as f:
-        json.dump(summary, f, indent=2)
+    if debug:
+        with open(out_dir / "05_training_summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
     return {"gaussians": gaussians, "summary": summary}

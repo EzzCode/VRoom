@@ -137,6 +137,7 @@ def run_pipeline(
     object_label_id,
     halluc_index_path,
     output_dir,
+    halluc_manifest=None,
     gaussians=None,
     pipe_config=None,
     scope=None,
@@ -158,6 +159,7 @@ def run_pipeline(
     densify_extra_ratio=0.08,
     use_cond_cam_up=True,
     fov_y_deg=50.0,
+    debug=False,
 ):
     """Train a fresh ObjectGS model for one object.
 
@@ -184,8 +186,11 @@ def run_pipeline(
 
     # ── Validate hallucination manifest ──────────────────────────────────
     halluc_path = Path(halluc_index_path)
-    with open(halluc_path) as f:
-        halluc = json.load(f)
+    if halluc_manifest is not None:
+        halluc = halluc_manifest
+    else:
+        with open(halluc_path) as f:
+            halluc = json.load(f)
 
     cam_idx = int(halluc.get("conditioning", {}).get("cam_index", -1))
     if not (0 <= cam_idx < len(scope.cameras)):
@@ -241,7 +246,8 @@ def run_pipeline(
     if not supervision_views:
         raise RuntimeError(f"No supervision views produced for obj {obj_id}.")
 
-    save_supervision_manifest(supervision_views, obj_dir / "04_supervision_manifest.json")
+    if debug:
+        save_supervision_manifest(supervision_views, obj_dir / "04_supervision_manifest.json")
 
     n_real = sum(1 for v in supervision_views if v.get("source") == "real")
     n_hall = len(supervision_views) - n_real
@@ -276,6 +282,7 @@ def run_pipeline(
         max_anchor_count=int(max_anchor_count),
         densify_grad_threshold=float(densify_grad_threshold),
         densify_extra_ratio=float(densify_extra_ratio),
+        debug=bool(debug),
     )
 
     summary = dict(result["summary"])
