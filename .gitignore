@@ -44,6 +44,7 @@ vroom_output/
 # ─── Module4 / Mesh Pipeline ──────────────────────────────────────────────────
 Module4/inputs/
 Module4/objects/
+Module4/objects_glb
 
 # ─── Datasets & Large Data ────────────────────────────────────────────────────
 datasets/

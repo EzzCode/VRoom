@@ -65,10 +65,10 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
     v1 = v0 + 1
 
     # Interpolation weights
-    wa = (u1.double() - u_valid) * (v1.double() - v_valid)
-    wb = (u_valid - u0.double()) * (v1.double() - v_valid)
-    wc = (u1.double() - u_valid) * (v_valid - v0.double())
-    wd = (u_valid - u0.double()) * (v_valid - v0.double())
+    wa = (u1.float() - u_valid) * (v1.float() - v_valid)
+    wb = (u_valid - u0.float()) * (v1.float() - v_valid)
+    wc = (u1.float() - u_valid) * (v_valid - v0.float())
+    wd = (u_valid - u0.float()) * (v_valid - v0.float())
 
     d00 = depth_map_t[v0, u0]
     d01 = depth_map_t[v0, u1]
@@ -99,7 +99,7 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
 
     # Initialize all voxels with a dummy "empty space" value (1e6)
     # This guarantees that even with a huge trunc_margin, unseen voxels will always normalize to exactly 1.0 TSDF.
-    sdf_values = torch.ones(world_points_h_t.shape[0], device=device, dtype=torch.float64) * 1e6
+    sdf_values = torch.ones(world_points_h_t.shape[0], device=device, dtype=torch.float32) * 1e6
 
     # SDF = Camera's Measurement - Voxel's actual depth
     # (Distance along the camera ray to the surface) - (Distance along the camera ray to the voxel)
@@ -116,12 +116,12 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
     # This ensures that the TSDF values are always between -1 and 1.
     tsdf_valid = torch.clamp(valid_sdf, -trunc_margin, trunc_margin) / trunc_margin
 
-    tsdf_values = torch.ones(world_points_h_t.shape[0], device=device, dtype=torch.float64)
+    tsdf_values = torch.ones(world_points_h_t.shape[0], device=device, dtype=torch.float32)
     tsdf_values[valid_mask] = tsdf_valid
 
     # Dynamic Weighting
     # We assign higher confidence (weight) to measurements taken close to the camera.
-    weights = torch.zeros(world_points_h_t.shape[0], device=device, dtype=torch.float64)
+    weights = torch.zeros(world_points_h_t.shape[0], device=device, dtype=torch.float32)
     
     # Carving Mask: We only assign weight to empty space (>0) or surface (~0). 
     # We ignore deep interior (-1) because cameras cannot see through solid walls
@@ -138,7 +138,7 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
 
     color_grid = None
     if color_image_t is not None:
-        color_values = torch.zeros((world_points_h_t.shape[0], 3), device=device, dtype=torch.float64)
+        color_values = torch.zeros((world_points_h_t.shape[0], 3), device=device, dtype=torch.float32)
         
         c00 = color_image_t[v0, u0]
         c01 = color_image_t[v0, u1]
@@ -185,14 +185,14 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
     - obs_count: (Nx, Ny, Nz) numpy array counting how many cameras observed each voxel.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"  [PyTorch TSDF] Accelerated on {device.type.upper()} (float64 precision)")
+    print(f"  [PyTorch TSDF] Accelerated on {device.type.upper()} (float32 precision)")
 
-    tsdf_sum = torch.zeros(grid_shape, device=device, dtype=torch.float64)
-    weight_sum = torch.zeros(grid_shape, device=device, dtype=torch.float64)
+    tsdf_sum = torch.zeros(grid_shape, device=device, dtype=torch.float32)
+    weight_sum = torch.zeros(grid_shape, device=device, dtype=torch.float32)
     obs_count = torch.zeros(grid_shape, device=device, dtype=torch.int32)
     
     if color_images is not None:
-        color_sum = torch.zeros((*grid_shape, 3), device=device, dtype=torch.float64)
+        color_sum = torch.zeros((*grid_shape, 3), device=device, dtype=torch.float32)
 
     num_cameras = len(depth_maps)
 
@@ -201,9 +201,9 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
     # Pre-compute the world-point grid + homogeneous coords once on the GPU.
     # All cameras share the same grid, so we avoid recomputing meshgrid + hstack
     # for every camera (saves N³ allocations per camera).
-    coords_x = torch.arange(grid_shape[0], device=device, dtype=torch.float64) * voxel_size + _grid_origin[0]
-    coords_y = torch.arange(grid_shape[1], device=device, dtype=torch.float64) * voxel_size + _grid_origin[1]
-    coords_z = torch.arange(grid_shape[2], device=device, dtype=torch.float64) * voxel_size + _grid_origin[2]
+    coords_x = torch.arange(grid_shape[0], device=device, dtype=torch.float32) * voxel_size + _grid_origin[0]
+    coords_y = torch.arange(grid_shape[1], device=device, dtype=torch.float32) * voxel_size + _grid_origin[1]
+    coords_z = torch.arange(grid_shape[2], device=device, dtype=torch.float32) * voxel_size + _grid_origin[2]
     
     gx, gy, gz = torch.meshgrid(coords_x, coords_y, coords_z, indexing='ij')
 
@@ -212,19 +212,19 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape, voxel_si
     world_points = torch.stack([gx, gy, gz], dim=-1).view(-1, 3)
 
     # Add a column of 1s to make [x, y, z] -> [x, y, z, 1] (homogeneous coordinates)
-    ones = torch.ones((world_points.shape[0], 1), device=device, dtype=torch.float64)
+    ones = torch.ones((world_points.shape[0], 1), device=device, dtype=torch.float32)
     # Precomputed world points homogeneous coordinates, shape (N³, 4)
     precomputed_wph_t = torch.cat([world_points, ones], dim=1)
 
     for i in range(num_cameras):
         # Move inputs to GPU
-        depth_t = torch.from_numpy(depth_maps[i]).to(device=device, dtype=torch.float64)
-        intrinsics_t = torch.from_numpy(intrinsics_list[i]).to(device=device, dtype=torch.float64)
-        extrinsics_t = torch.from_numpy(extrinsics_list[i]).to(device=device, dtype=torch.float64)
+        depth_t = torch.from_numpy(depth_maps[i]).to(device=device, dtype=torch.float32)
+        intrinsics_t = torch.from_numpy(intrinsics_list[i]).to(device=device, dtype=torch.float32)
+        extrinsics_t = torch.from_numpy(extrinsics_list[i]).to(device=device, dtype=torch.float32)
         
         colors_t = None
         if color_images is not None:
-            colors_t = torch.from_numpy(color_images[i]).to(device=device, dtype=torch.float64)
+            colors_t = torch.from_numpy(color_images[i]).to(device=device, dtype=torch.float32)
 
         tsdf_i, color_i, weight_i = generate_tsdf_single_camera(
             depth_t, intrinsics_t, extrinsics_t,

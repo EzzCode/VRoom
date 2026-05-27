@@ -116,7 +116,7 @@ for i, cam in enumerate(cameras):
     depth_maps_raw.append(np.load(os.path.join(input_dir, "raw_depth", f"{i:05d}.npy")))
     rgba = np.array(Image.open(os.path.join(input_dir, "renders", f"{i:05d}.png")))
     # Drop alpha channel and convert to [0,1] range
-    color_images_raw.append(rgba[:, :, :3].astype(np.float64) / 255.0)
+    color_images_raw.append(rgba[:, :, :3].astype(np.float32) / 255.0)
     semantic_maps.append(np.array(Image.open(os.path.join(input_dir, "semantic", f"{i:05d}.png"))))
 
     # Load intrinsics and extrinsics
