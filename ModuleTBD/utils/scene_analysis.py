@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 import yaml
+from ModuleTBD.utils.transforms import ObjectFrame
+from ModuleTBD.utils.transforms import ObjectFrame
 from gstrain.vroom_core import GaussianModel
 from gstrain.vroom_core.models.semantics import SemanticCodec
 from .helpers import normalize
@@ -238,11 +240,23 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50,
         cam_centers_visible=camera_centers,
         cameras=cameras,
     )
-
+    obj_frame = _build_coordinate_frames(scope)
+    
     logger.info(
         "ObjectScope obj=%d: %d anchors | centroid=%s | radius=%.3f | visible_cams=%d/%d",
         scope.object_label_id, scope.n_anchors,
         np.round(scope.centroid, 3).tolist(), scope.radius,
         len(scope.visible_cam_indices), len(cameras),
     )
-    return scope, pipe_config
+    return scope,obj_frame, pipe_config
+
+def _build_coordinate_frames(object_scope: ObjectScope):
+    """Build coordinate frames for object isolation training."""
+    obj_frame = ObjectFrame(
+        centroid=object_scope.centroid,
+        up=object_scope.up,
+        base_dir=object_scope.base_dir,
+        radius=object_scope.radius,
+    )
+
+    return obj_frame

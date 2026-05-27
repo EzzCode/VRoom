@@ -12,7 +12,8 @@ from .helpers import normalize
 
 
 def look_at(eye, target, up):
-    """Axes: x-right, y-down, z-forward (right hand)"""
+    """Axes: x-right, y-down, z-forward (right hand)
+    a camera matrix pointing at the object"""
     eye = np.asarray(eye, dtype=np.float32)
     forward = normalize(np.asarray(target) - eye)
     up = normalize(up)
@@ -23,7 +24,7 @@ def look_at(eye, target, up):
     return R_w2c, T_w2c
 
 
-# L2V mapping: +X_L (orbit front) → +Z_V, +Z_L (up) → +Y_V, +Y_L (right) → +X_V
+# L2V mapping: +X_L (orbit front) -> +Z_V, +Z_L (up) -> +Y_V, +Y_L (right) -> +X_V
 R_L2V = np.array([
     [0.0, 1.0, 0.0],
     [0.0, 0.0, 1.0],
@@ -38,6 +39,10 @@ def orbit_position(azimuth_deg, elevation_deg):
     """
     azimuth = np.deg2rad(float(azimuth_deg))
     elevation = np.deg2rad(float(elevation_deg))
+# calculates  X, Y, Z position on sphere
+#X = sin(azimuth) * cos(elevation)
+#Y = sin(elevation)
+#Z = cos(azimuth) * cos(elevation)
     return np.array([
         np.sin(azimuth) * np.cos(elevation),
         np.sin(elevation),
@@ -60,13 +65,17 @@ class ObjectFrame:
         # project base onto the plane perpendicular to up
         base = base - float(np.dot(base, up)) * up
         base = normalize(base)
-        right = np.cross(up, base)              # +Y_L = Z_L × X_L
-        base = np.cross(right, up)              # +X_L re-orthogonalized
+        right = np.cross(up, base)              # +Y_L = Z_L x X_L
+        base = np.cross(right, up)            
         self.up = up
         self.base_dir = base
         self.centroid = np.asarray(self.centroid, dtype=np.float32).reshape(3)
         self.radius = float(self.radius)
-        self.R = np.stack([base, right, up], axis=0)   # rows: X_L, Y_L, Z_L
+        self.R = np.stack([
+                base,
+                right,
+                up
+            ], axis=0)
 
     def world_to_local(self, pts):
         pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
@@ -97,12 +106,3 @@ class ObjectFrame:
         return az, el
 
 
-def scale_intrinsics(K, src_width, src_height, out_size=576):
-    """Scale camera intrinsics K to a square output resolution (SV3D input)
-    Preserves angular FoV & centers principal point"""
-    K = np.asarray(K, dtype=np.float32).reshape(3, 3)
-    fx = float(K[0, 0]) * (out_size / float(src_width))
-    fy = float(K[1, 1]) * (out_size / float(src_height))
-    cx = out_size / 2.0
-    cy = out_size / 2.0
-    return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
