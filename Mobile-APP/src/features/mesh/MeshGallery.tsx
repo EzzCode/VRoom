@@ -6,6 +6,7 @@ import {
   getAvailableMeshes,
   importMeshFromFilePicker,
   formatFileSize,
+  prepareMeshForViro,
 } from '../../services/mesh/meshStorage';
 import { MeshInfo } from '../../shared/core/types';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -40,13 +41,19 @@ export default function MeshGallery({ navigation }: Props) {
   }, []);
 
   const handleMeshPress = useCallback(
-    (mesh: MeshInfo) => {
+    async (mesh: MeshInfo) => {
+      let prepared = mesh;
+      try {
+        prepared = await prepareMeshForViro(mesh);
+      } catch (e) {
+        console.warn('Mesh upload to Metro failed, falling back to local URI:', e);
+      }
       navigation.navigate('ARView', {
-        meshId: mesh.id,
-        meshName: mesh.name,
-        meshUri: mesh.uri,
-        meshType: mesh.format,
-        isBundled: mesh.isBundled,
+        meshId: prepared.id,
+        meshName: prepared.name,
+        meshUri: prepared.uri,
+        meshType: prepared.format,
+        isBundled: prepared.isBundled,
       });
     },
     [navigation],

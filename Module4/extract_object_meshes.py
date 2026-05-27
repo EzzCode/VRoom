@@ -12,6 +12,7 @@ from export_ply import export_ply_binary
 from generate_sdf import fuse_tsdf
 from marching_cubes import run_marching_cubes
 from utils import remove_small_components, compute_depth_trunc, unproject_to_3d
+from ply_to_glb import build_glb_from_mesh
 
 # 1. Parse arguments
 
@@ -35,16 +36,18 @@ parser.add_argument("--trunc_factor", type=float, default=5.0,
                        " (default: 5.0)")
 parser.add_argument("--min_obs",      type=int,   default=3,
                      help="Min cameras that must observe a voxel to keep it (default: 3).")
-parser.add_argument("--min_component",type=float, default=0.05,
+parser.add_argument("--min_component",type=float, default=0.15,
                      help="Remove mesh fragments smaller than this fraction of" \
-                     " the largest component (default: 0.05)")
+                     " the largest component (default: 0.15)")
 parser.add_argument("--smooth_sigma", type=float, default=0.8,
-                     help="Gaussian smoothing sigma applied to TSDF grid before marching cubes"
+                     help="Gaussian smoothing sigma applied to TSDF grid before" \
+                     " marching cubes"
                      " (default: 0.8). Try 0.5-2.0 in voxel units.")
 parser.add_argument("--depth_margin", type=float, default=1.1,
                      help="Depth truncation margin multiplier (default: 1.1).")
 parser.add_argument("--depth_percentile", type=float, default=99.0,
-                     help="Percentile of valid object depth values used to compute depth truncation (default: 99.0).")
+                     help="Percentile of valid object depth values used to compute" \
+                     " depth truncation (default: 99.0).")
 parser.add_argument("--label",        type=int,   default=None,
                      help="Process only this label ID (default: None (all labels))")
 args = parser.parse_args()
@@ -84,6 +87,8 @@ curr_directory = os.path.dirname(__file__)
 input_dir = os.path.join(curr_directory, "inputs")
 output_dir = os.path.join(curr_directory, "objects")
 os.makedirs(output_dir, exist_ok=True) # create output directory if it doesn't exist
+output_glb_dir = os.path.join(curr_directory, "objects_glb") # glb for mobile app
+os.makedirs(output_glb_dir, exist_ok=True)
 
 # Load cameras
 with open(os.path.join(input_dir, "cameras.json"), 'r') as f:
@@ -300,6 +305,16 @@ for label_id in sorted_labels:
     ply_path = os.path.join(output_dir, f"object_{label_id:03d}.ply")
     export_ply_binary(scaled_vertices, triangles, ply_path, vertex_colors=vertex_colors)
     print("Saved", ply_path)
+
+    # 5.12: Export mesh to GLB file (for mobile AR)
+    glb_path = os.path.join(output_glb_dir, f"object_{label_id:03d}.glb")
+    try:
+        glb_bytes = build_glb_from_mesh(verts_arr, np.array(triangles), vertex_colors)
+        with open(glb_path, "wb") as glb_f:
+            glb_f.write(glb_bytes)
+        print(f"Saved {glb_path} ({len(glb_bytes) / 1024:.1f} KB)")
+    except Exception as glb_err:
+        print(f"Warning: GLB export failed for label {label_id}: {glb_err}")
 
 total_end_time = time.time()
 total_time = total_end_time - start_time
