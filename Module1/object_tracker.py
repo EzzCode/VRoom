@@ -128,12 +128,26 @@ def extract_lbp_hist(gray, mask):
 	if gray.shape != mask.shape:
 		raise ValueError("Gray image and mask must have identical shape for LBP extraction")
 
+	# Find coordinates of non-zero mask pixels to crop
+	ys, xs = np.where(mask)
+	if len(xs) == 0:
+		return np.zeros((256, 1), dtype=np.float32)
+
+	# Crop range with 1-pixel margin for LBP neighbor calculation
+	y_min = max(0, int(ys.min()) - 1)
+	y_max = min(gray.shape[0], int(ys.max()) + 2)
+	x_min = max(0, int(xs.min()) - 1)
+	x_max = min(gray.shape[1], int(xs.max()) + 2)
+
+	crop_gray = gray[y_min:y_max, x_min:x_max]
+	crop_mask = mask[y_min:y_max, x_min:x_max]
+
 	# If image is too small for LBP (needs at least 3x3), return zero histogram
-	if gray.shape[0] < 3 or gray.shape[1] < 3:
+	if crop_gray.shape[0] < 3 or crop_gray.shape[1] < 3:
 		return np.zeros((256, 1), dtype=np.float32)
 
 	# Center pixels (exclude border, since LBP needs 8 neighbors)
-	center = gray[1:-1, 1:-1]
+	center = crop_gray[1:-1, 1:-1]
 	# Prepare output array for LBP 
 	lbp = np.zeros_like(center, dtype=np.uint8)
 
@@ -152,12 +166,12 @@ def extract_lbp_hist(gray, mask):
 	# Compute LBP code for each center pixel
 	for dy, dx, bit in neighbors:
 		# Shifted neighbor region
-		neighbor = gray[1 + dy:gray.shape[0] - 1 + dy, 1 + dx:gray.shape[1] - 1 + dx]
+		neighbor = crop_gray[1 + dy:crop_gray.shape[0] - 1 + dy, 1 + dx:crop_gray.shape[1] - 1 + dx]
 		# If neighbor >= center, set corresponding bit
 		lbp |= ((neighbor >= center).astype(np.uint8) * bit)
 
 	# Mask out border pixels (LBP is not defined there)
-	inner_mask = mask[1:-1, 1:-1]
+	inner_mask = crop_mask[1:-1, 1:-1]
 	# Get LBP values for masked pixels
 	values = lbp[inner_mask]
 
