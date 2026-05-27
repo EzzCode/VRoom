@@ -25,6 +25,13 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+try:
+	from . import opencv_scratch
+except ImportError:
+	import opencv_scratch
+
+cv = opencv_scratch
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -34,11 +41,21 @@ logger = logging.getLogger(__name__)
 
 
 def load_frame_masks(npz_path: Path) -> List[np.ndarray]:
-	"""Load boolean masks for a frame from compressed NPZ."""
-	if not npz_path.exists():
-		return []
-	with np.load(str(npz_path)) as data:
-		arr = data.get("masks")
+	"""Load boolean masks for a frame from compressed NPZ or uncompressed NPY."""
+	path = npz_path
+	if not path.exists():
+		npy_path = npz_path.with_suffix(".npy")
+		if npy_path.exists():
+			path = npy_path
+		else:
+			return []
+	
+	if path.suffix == ".npy":
+		arr = np.load(str(path), allow_pickle=True)
+	else:
+		with np.load(str(path)) as data:
+			arr = data.get("masks")
+			
 	if arr is None or arr.ndim != 3:
 		return []
 	return [arr[i].astype(bool) for i in range(arr.shape[0])]
@@ -165,10 +182,10 @@ def create_kalman_filter(cx, cy):
 		cx (float): Initial x position (centroid x)
 		cy (float): Initial y position (centroid y)
 	Returns:
-		cv2.KalmanFilter: Configured Kalman filter instance
+		cv.KalmanFilter: Configured Kalman filter instance
 	"""
 	# Create Kalman filter with 4 dynamic params (x, y, vx, vy) and 2 measured params (x, y)
-	kf = cv2.KalmanFilter(4, 2)
+	kf = cv.KalmanFilter(4, 2)
 
 	# State transition matrix (models constant velocity)
 	kf.transitionMatrix = np.array([
@@ -223,8 +240,8 @@ def estimate_camera_motion(prev_bgr, curr_bgr, curr_masks, max_corners=1200):
 		return identity_affine()
 
 	# Convert both frames to grayscale for feature detection and tracking
-	prev_gray = cv2.cvtColor(prev_bgr, cv2.COLOR_BGR2GRAY)
-	curr_gray = cv2.cvtColor(curr_bgr, cv2.COLOR_BGR2GRAY)
+	prev_gray = cv.cvtColor(prev_bgr, cv.COLOR_BGR2GRAY)
+	curr_gray = cv.cvtColor(curr_bgr, cv.COLOR_BGR2GRAY)
 	h, w = curr_gray.shape[:2]
 
 	# Create a foreground mask (fg) of zeros 
@@ -237,17 +254,17 @@ def estimate_camera_motion(prev_bgr, curr_bgr, curr_masks, max_corners=1200):
 	# Dilate the foreground mask to cover more area around objects
 	if np.any(fg):
 		kernel = np.ones((5, 5), dtype=np.uint8)
-		fg = cv2.dilate(fg, kernel, iterations=2)
+		fg = cv.dilate(fg, kernel, iterations=2)
 
 	# Invert the foreground mask to get the background mask (bg)
-	bg = cv2.bitwise_not(fg)
+	bg = cv.bitwise_not(fg)
 	# If not enough background pixels, return identity
 	if int(np.count_nonzero(bg)) < 200:
 		return identity_affine()
 
 	# Detect good features to track in the background regions of the previous frame
 	# Shi-Tomasi corner detection
-	p0 = cv2.goodFeaturesToTrack( 
+	p0 = cv.goodFeaturesToTrack( 
 		prev_gray,
 		mask=bg,
 		maxCorners=max_corners,
@@ -261,14 +278,14 @@ def estimate_camera_motion(prev_bgr, curr_bgr, curr_masks, max_corners=1200):
 
 	# Track the detected features from previous to current frame using optical flow
 	# Lucas-Kanade optical flow
-	p1, st, _ = cv2.calcOpticalFlowPyrLK(
+	p1, st, _ = cv.calcOpticalFlowPyrLK(
 		prev_gray,
 		curr_gray,
 		p0,
 		None,
 		winSize=(21, 21),
 		maxLevel=3,
-		criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+		criteria=(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 30, 0.01),
 	)
 	# If tracking failed, return identity
 	if p1 is None or st is None:
@@ -282,10 +299,10 @@ def estimate_camera_motion(prev_bgr, curr_bgr, curr_masks, max_corners=1200):
 		return identity_affine()
 
 	# Estimate affine transform (translation, rotation, scale, shear) using RANSAC
-	affine, _ = cv2.estimateAffinePartial2D(
+	affine, _ = cv.estimateAffinePartial2D(
 		good_prev,
 		good_curr,
-		method=cv2.RANSAC,
+		method=cv.RANSAC,
 		ransacReprojThreshold=3.0
 	)
 	# If estimation failed, return identity
@@ -390,8 +407,8 @@ def appearance_distance(track_data, det_feat):
 	Lower mean more similar
 	"""
 	# Compute Bhattacharyya distance between color histograms and LBP histograms
-	dist_color = cv2.compareHist(track_data["hist"], det_feat["hist"], cv2.HISTCMP_BHATTACHARYYA)
-	dist_texture = cv2.compareHist(track_data["lbp"], det_feat["lbp"], cv2.HISTCMP_BHATTACHARYYA)
+	dist_color = cv.compareHist(track_data["hist"], det_feat["hist"], cv.HISTCMP_BHATTACHARYYA)
+	dist_texture = cv.compareHist(track_data["lbp"], det_feat["lbp"], cv.HISTCMP_BHATTACHARYYA)
 	# color is weighted more than texture 
 	return 0.60 * dist_color + 0.40 * dist_texture
 
@@ -542,8 +559,8 @@ def match_with_consensus(
 		best_gid, best_cost = None, reid_threshold
 		for gid, gdata in graveyard.items():
 			# Compute appearance and bbox distance to graveyard tracks
-			dist_color = cv2.compareHist(gdata["hist"], new_feats[c]["hist"], cv2.HISTCMP_BHATTACHARYYA)
-			dist_texture = cv2.compareHist(gdata["lbp"], new_feats[c]["lbp"], cv2.HISTCMP_BHATTACHARYYA)
+			dist_color = cv.compareHist(gdata["hist"], new_feats[c]["hist"], cv.HISTCMP_BHATTACHARYYA)
+			dist_texture = cv.compareHist(gdata["lbp"], new_feats[c]["lbp"], cv.HISTCMP_BHATTACHARYYA)
 			dist_bbox = 1.0 - box_iou_xyxy(gdata.get("bbox", [0, 0, 0, 0]), new_feats[c]["bbox"])
 			cost = 0.45 * dist_color + 0.35 * dist_texture + 0.20 * dist_bbox
 			if cost < best_cost:
@@ -585,9 +602,9 @@ def extract_features(mask, frame_hsv, frame_gray):
 	# Convert mask to uint8 for OpenCV functions
 	mask_uint8 = mask.astype(np.uint8)
 	# Compute 2D HSV histogram for masked region
-	hist = cv2.calcHist([frame_hsv], [0, 1], mask_uint8, [32, 32], [0, 180, 0, 256])
+	hist = cv.calcHist([frame_hsv], [0, 1], mask_uint8, [32, 32], [0, 180, 0, 256])
 	# Normalize histogram to [0, 1]
-	cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+	cv.normalize(hist, hist, alpha=0, beta=1, norm_type=cv.NORM_MINMAX)
 	# Compute LBP histogram for masked region
 	lbp_hist = extract_lbp_hist(frame_gray, mask)
 	# Compute centroid of the mask
@@ -626,8 +643,8 @@ def compute_cost_matrix(tracks, active_ids, new_feats, alpha, beta, gamma, delta
 
 		for j, det in enumerate(new_feats):
 			dist_iou = 1.0 - mask_iou(trk["mask"], det["mask"])
-			dist_color = cv2.compareHist(trk["hist"], det["hist"], cv2.HISTCMP_BHATTACHARYYA)
-			dist_texture = cv2.compareHist(trk["lbp"], det["lbp"], cv2.HISTCMP_BHATTACHARYYA)
+			dist_color = cv.compareHist(trk["hist"], det["hist"], cv.HISTCMP_BHATTACHARYYA)
+			dist_texture = cv.compareHist(trk["lbp"], det["lbp"], cv.HISTCMP_BHATTACHARYYA)
 			dist_centroid = float(dist_centroids[j])
 			dist_bbox = float(dist_bboxes[j])
 
@@ -714,8 +731,8 @@ def track_frame(
 	img_diag = np.sqrt(h ** 2 + w ** 2)
 	tracks = state["tracks"]
 	next_id = state["next_id"]
-	curr_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-	curr_hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+	curr_gray = cv.cvtColor(frame_bgr, cv.COLOR_BGR2GRAY)
+	curr_hsv = cv.cvtColor(frame_bgr, cv.COLOR_BGR2HSV)
 
 	if tracks:
 		predict_tracks(tracks, frame_bgr.shape)
@@ -792,14 +809,14 @@ def draw_tracked_overlay(image, tracked_objects, alpha=0.5):
 	overlay = image.copy()
 	for obj_id, mask in tracked_objects.items():
 		overlay[mask] = get_id_color(obj_id)
-	blended = cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
+	blended = cv.addWeighted(overlay, alpha, image, 1 - alpha, 0)
 	for obj_id, mask in tracked_objects.items():
 		ys, xs = np.where(mask)
 		if len(xs) > 0:
 			cx, cy = int(xs.mean()), int(ys.mean())
 			color = get_id_color(obj_id)
-			cv2.putText(blended, str(obj_id), (cx - 10, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-			cv2.putText(blended, str(obj_id), (cx - 10, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+			cv.putText(blended, str(obj_id), (cx - 10, cy + 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+			cv.putText(blended, str(obj_id), (cx - 10, cy + 5), cv.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 	return blended
 
 
@@ -807,6 +824,13 @@ def draw_tracked_overlay(image, tracked_objects, alpha=0.5):
 
 def run_pipeline(args):
 	"""Run tracker over all images and aligned NPZ masks."""
+	global cv
+	if args.use_opencv:
+		logger.info("Using standard OpenCV (cv2) library as requested.")
+		cv = cv2
+	else:
+		logger.info("Using custom from-scratch OpenCV replacement (opencv_scratch) by default.")
+
 	input_dir = Path(args.input_dir)
 	mask_dir = Path(args.mask_dir)
 	output_dir = Path(args.output_dir)
@@ -833,7 +857,7 @@ def run_pipeline(args):
 	logger.info(f"Tracking {len(image_paths)} frames in vanilla NPZ-mask mode...")
 
 	for frame_idx, img_path in enumerate(image_paths):
-		frame = cv2.imread(str(img_path))
+		frame = cv.imread(str(img_path))
 		if frame is None:
 			logger.warning(f"Could not read image: {img_path}")
 			continue
@@ -866,10 +890,10 @@ def run_pipeline(args):
 			id_map[fill] = np.uint16(obj_id)
 			empty[fill] = False
 
-		cv2.imwrite(str(id_map_dir / (img_path.stem + ".png")), id_map)
+		cv.imwrite(str(id_map_dir / (img_path.stem + ".png")), id_map)
 		vis = draw_tracked_overlay(frame, tracked)
-		cv2.putText(vis, f"Frame {frame_idx:05d} | Seg={len(seg_masks)} Track={len(tracked)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-		cv2.imwrite(str(vis_dir / f"tracked_{frame_idx:05d}.png"), vis)
+		cv.putText(vis, f"Frame {frame_idx:05d} | Seg={len(seg_masks)} Track={len(tracked)}", (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+		cv.imwrite(str(vis_dir / f"tracked_{frame_idx:05d}.png"), vis)
 		logger.info(f"Frame {frame_idx:05d} | Seg={len(seg_masks)} Track={len(tracked)}")
 
 	logger.info(f"Done. ID maps: {id_map_dir}, Visualizations: {vis_dir}")
@@ -891,4 +915,5 @@ if __name__ == "__main__":
 	parser.add_argument("--disable_motion_comp", action="store_true", help="Disable global camera-motion compensation")
 	parser.add_argument("--consensus_window", type=int, default=8, help="Temporal window length for consensus voting")
 	parser.add_argument("--consensus_tie_margin", type=float, default=0.05, help="IoU vote margin to trigger appearance tie-break")
+	parser.add_argument("--use_opencv", action="store_true", help="Use standard OpenCV (cv2) instead of the default from-scratch implementation")
 	run_pipeline(parser.parse_args())
