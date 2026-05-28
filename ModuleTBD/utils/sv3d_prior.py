@@ -21,9 +21,8 @@ class HallucinatedView:
     is_conditioning: bool = False # True for the input view, False for hallucinated views
 
 
-def _setup_hf_cache(cache_dir=None):
-    target = cache_dir or os.environ.get("HF_HOME") or _hf_cache_dir
-    target = str(Path(target).expanduser().resolve())
+def _setup_hf_cache():
+    target = str(Path(os.environ.get("HF_HOME") or _hf_cache_dir).expanduser().resolve())
     Path(target).mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", target)
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(target, "hub"))
@@ -57,19 +56,17 @@ def _build_orbit_poses(num_frames, cond_elevation_deg):
 class SV3DBackend:
     native_resolution = 576
 
-    def __init__(self, num_frames=21, decode_chunk_size=4, dtype=torch.float16,
-                 offload_strategy="sequential", safe_mode=False,
-                 num_inference_steps=25, device="cuda", hf_cache_dir=None):
-        if not torch.cuda.is_available() and device == "cuda":
+    def __init__(self, num_inference_steps=25, safe_mode=False):
+        if not torch.cuda.is_available():
             raise RuntimeError("SV3D requires CUDA; no GPU detected.")
-        self.device = device
-        self.dtype = dtype
-        self._num_frames = 14 if safe_mode else num_frames
+        self.device = "cuda"
+        self.dtype = torch.float16
+        self._num_frames = 14 if safe_mode else 21
         self._resolution = 512 if safe_mode else 576
-        self._decode_chunk_size = decode_chunk_size
-        self._offload = offload_strategy
+        self._decode_chunk_size = 4
+        self._offload = "sequential"
         self._num_inference_steps = num_inference_steps
-        self._hf_cache_dir = _setup_hf_cache(hf_cache_dir)
+        self._hf_cache_dir = _setup_hf_cache()
         self._pipe = None
 
     def _load(self):

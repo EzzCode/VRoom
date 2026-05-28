@@ -60,11 +60,7 @@ def run(
     # Frame scoring
     top_k=5,
     # Novel views
-    iou_threshold=0.20,
     fov_y_deg=50.0,
-    num_inference_steps=25,
-    safe_mode=False,
-    seed=0,
     reuse_sv3d=False,
     # Training
     hallucination_weight=1.0,
@@ -90,7 +86,6 @@ def run(
     from ModuleTBD.utils.transforms import ObjectFrame
     from ModuleTBD.view_selection import run_extraction, run_scoring
     from ModuleTBD.hallucination import run_hallucination
-    from ModuleTBD.utils.sv3d_prior import SV3DBackend
     from ModuleTBD.pipeline import run_pipeline
 
     torch.backends.cudnn.benchmark = True
@@ -125,11 +120,6 @@ def run(
         "output_root": str(output_root),
         "phases": {},
     }
-
-    backend = SV3DBackend(num_inference_steps=num_inference_steps, safe_mode=safe_mode)
-    if not reuse_sv3d:
-        logger.info("Preloading SV3D before ObjectGS CUDA state …")
-        backend._load()
 
     # ── Scope & model ─────────────────────────────────────────────────────────
     logger.info("Computing scope and loading model …")
@@ -212,14 +202,8 @@ def run(
             pipe_config=pipe_config,
             scores=scores_manifest,
             output_dir=obj_dir / "03_novel_views",
-            object_label_id=obj_id,
-            backend=backend,
-            iou_threshold=iou_threshold,
-            fov_y_deg=fov_y_deg,
-            seed=seed,
             reuse_sv3d=reuse_sv3d,
         )
-        backend.unload()
         summary["phases"]["novel_views"] = halluc_manifest
         logger.info("✓ Novel views: %d/%d kept",
                     halluc_manifest.get("n_kept", 0), halluc_manifest.get("n_views", 0))
@@ -370,11 +354,7 @@ def _parse_args():
     p.add_argument("--top_k", type=int, default=5)
 
     # Novel views
-    p.add_argument("--iou_threshold", type=float, default=0.20)
     p.add_argument("--fov_y_deg", type=float, default=50.0)
-    p.add_argument("--num_inference_steps", type=int, default=25)
-    p.add_argument("--safe_mode", action="store_true")
-    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--reuse_sv3d", action="store_true")
 
     # Training
@@ -416,11 +396,7 @@ def main():
         tau_alpha=args.tau_alpha,
         min_pixels=args.min_pixels,
         top_k=args.top_k,
-        iou_threshold=args.iou_threshold,
         fov_y_deg=args.fov_y_deg,
-        num_inference_steps=args.num_inference_steps,
-        safe_mode=args.safe_mode,
-        seed=args.seed,
         reuse_sv3d=args.reuse_sv3d,
         hallucination_weight=args.hallucination_weight,
         real_weight=args.real_weight,
