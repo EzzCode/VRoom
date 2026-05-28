@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, FlatList, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, FlatList, Text, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { useTheme } from '../../shared/theme';
 import { Header, MeshCard, Button } from '../../shared/components';
 import {
@@ -7,6 +7,7 @@ import {
   importMeshFromFilePicker,
   formatFileSize,
   prepareMeshForViro,
+  deleteImportedMesh,
 } from '../../services/mesh/meshStorage';
 import { MeshInfo } from '../../shared/core/types';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -59,6 +60,29 @@ export default function MeshGallery({ navigation }: Props) {
     [navigation],
   );
 
+  const handleDelete = useCallback((mesh: MeshInfo) => {
+    Alert.alert(
+      'Delete mesh?',
+      `"${mesh.name}" will be removed from your library.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteImportedMesh(mesh);
+              setMeshes((prev) => prev.filter((m) => m.id !== mesh.id));
+            } catch (e) {
+              console.warn('Failed to delete mesh:', e);
+              Alert.alert('Delete failed', 'Could not delete the mesh file.');
+            }
+          },
+        },
+      ],
+    );
+  }, []);
+
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
       <Header title="Mesh Library" onBack={() => navigation.goBack()} />
@@ -93,6 +117,7 @@ export default function MeshGallery({ navigation }: Props) {
                 format={item.format}
                 size={formatFileSize(item.size)}
                 onPress={() => handleMeshPress(item)}
+                onDelete={item.isBundled ? undefined : () => handleDelete(item)}
               />
             </View>
           )}

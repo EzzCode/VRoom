@@ -257,16 +257,22 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     justifyContent: 'space-between',
   },
-  topBar: {},
+  topBar: {
+    width: '100%',
+  },
   topRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
   },
   topCenter: {
     flex: 1,
     alignItems: 'center',
+    paddingHorizontal: 8,
   },
-  banner: {},
+  banner: {
+    alignSelf: 'stretch',
+  },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
@@ -276,10 +282,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   tooltip: {
-    position: 'absolute',
-    top: '40%',
-    left: 0,
-    right: 0,
     alignItems: 'center',
   },
   tooltipCard: {},
