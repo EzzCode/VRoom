@@ -261,18 +261,21 @@ class TrainingOrchestrator:
 
     def _save_checkpoint(self, step_output, iteration, camera_view):
         """
-        Saves a checkpoint for a given iteration
+        Saves a checkpoint for a given iteration.
+        Each call creates its own subdirectory (iter_<N>) so that successive
+        checkpoints don't overwrite each other's MLP .pt files.
         """
         self.logger.info(f"Saving checkpoint at iteration {iteration}")
-        checkpoint_dir = os.path.join(self.output_dir, "checkpoints")
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        # Per iteration directory keeps
+        iter_dir = os.path.join(self.output_dir, "checkpoints", f"iter_{iteration}")
+        os.makedirs(iter_dir, exist_ok=True)
         self.CheckPointManager.save_anchor_cloud(
-            path=os.path.join(checkpoint_dir, f"anchor_cloud_{iteration}.ply")
+            path=os.path.join(iter_dir, "anchor_cloud.ply")
         )
         self.CheckPointManager.save_decoder(
-            path=checkpoint_dir,
+            path=iter_dir,
             gaussian_type=self.gaussian_type,
             render_mode=self.render_mode,
             tile_size_2dgs=self.tile_size_2dgs,
         )
-        torch.save(self._state_snapshot(), os.path.join(checkpoint_dir, f"state_{iteration}.pth"))
+        torch.save(self._state_snapshot(), os.path.join(iter_dir, "state.pth"))
