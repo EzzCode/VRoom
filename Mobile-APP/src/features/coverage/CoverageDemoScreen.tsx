@@ -42,15 +42,29 @@ export default function CoverageDemoScreen({ navigation }: Props) {
   const [voxels, setVoxels] = useState<VoxelView[]>([]);
   const [coveragePercent, setCoveragePercent] = useState(0);
   const [tracking, setTracking] = useState<'unavailable' | 'limited' | 'normal'>('unavailable');
-  const observeIntervalMs = 500;
+  const observeIntervalMs = 800;
   const lastObserveRef = useRef(0);
+  // Require at least this much movement (metres) before accumulating an observation.
+  const MIN_MOVE_M = 0.04;
+  const lastPositionRef = useRef<[number, number, number] | null>(null);
 
   const handlePose = useCallback(
     (pose: CameraPose) => {
-      // Throttle the mutating observe() to keep voxel count manageable.
       const now = Date.now();
       if (now - lastObserveRef.current < observeIntervalMs) return;
+
+      // Skip if camera hasn't moved enough — prevents stationary green-ing.
+      const [px, py, pz] = pose.position;
+      const last = lastPositionRef.current;
+      if (last) {
+        const dist = Math.sqrt(
+          (px - last[0]) ** 2 + (py - last[1]) ** 2 + (pz - last[2]) ** 2,
+        );
+        if (dist < MIN_MOVE_M) return;
+      }
+
       lastObserveRef.current = now;
+      lastPositionRef.current = [px, py, pz];
 
       tracker.observe(pose);
       setVoxels(tracker.getVoxels());

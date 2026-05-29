@@ -31,7 +31,7 @@ export const CAPTURE_CONFIG = {
     /** Camera field of view in degrees (used for frustum) */
     cameraFovDeg: 60,
     /** Frustum ray-cast depth in metres */
-    frustumDepth: 5.0,
+    frustumDepth: 2.0,
   },
 } as const;
 

@@ -40,9 +40,12 @@ export default function CoverageDemoScene(props: SceneProps) {
     props.sceneNavigator.viroAppProps;
 
   const lastEmitRef = useRef(0);
+  // Only forward poses when tracking is fully initialised.
+  const trackingOkRef = useRef(false);
 
   const handleCameraTransformUpdate = useCallback(
     (transform: any) => {
+      if (!trackingOkRef.current) return;          // drop poses during limited/unavailable
       const now = Date.now();
       if (now - lastEmitRef.current < poseIntervalMs) return;
       lastEmitRef.current = now;
@@ -69,6 +72,7 @@ export default function CoverageDemoScene(props: SceneProps) {
 
   const handleTrackingUpdated = useCallback(
     (state: number) => {
+      trackingOkRef.current = state === TRACKING_NORMAL;
       if (!onTracking) return;
       if (state === TRACKING_NORMAL) onTracking('normal');
       else if (state === TRACKING_LIMITED) onTracking('limited');
