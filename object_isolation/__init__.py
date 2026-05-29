@@ -4,7 +4,7 @@ This package implements the per-object isolation pipeline that runs after
 the ObjectGS scene model has been trained. It is organized in four stages:
 
     Extract     — pull a single object's pixels and Gaussians out of the
-                  trained scene model using ObjectGS masks + Module-1 ids.
+                  trained scene model using ObjectGS masks + Module1 ids.
     Hallucinate — synthesize plausible novel views of the isolated object
                   with an SV3D diffusion prior.
     Train       — fit a fresh per-object Gaussian Splatting model from

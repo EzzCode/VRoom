@@ -367,7 +367,7 @@ if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="VRoom SAM3 Text-Prompt Mask Processor")
 	parser.add_argument("--input_dir", required=True, help="Path to input images directory")
 	parser.add_argument("--output_dir", required=True, help="Path to save masks and visualizations")
-	parser.add_argument("--sam_ckpt", default="Module-1/models/sam3.pt", help="Ultralytics SAM3 checkpoint name or .pt path")
+	parser.add_argument("--sam_ckpt", default="Module1/models/sam3.pt", help="Ultralytics SAM3 checkpoint name or .pt path")
 	parser.add_argument("--device", default="cuda", help="Device ('cuda' or 'cpu')")
 	parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
 	parser.add_argument("--text_prompts", nargs="+", default=["desk", "table", "chair", "couch", "sofa", "cabinet"], help="Open-vocabulary text prompts")

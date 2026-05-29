@@ -65,7 +65,7 @@ Key optional flags::
     --debug              enable debug visualizations for all stages
     --skip_compare       skip before/after rendering
     --reuse_sv3d         skip SV3D diffusion if 03_novel_views/ outputs already exist
-    --id_map_dir auto    'auto' | 'none' | explicit path to Module-1 id_maps
+    --id_map_dir auto    'auto' | 'none' | explicit path to Module1 id_maps
     --iou_threshold 0.20 minimum SV3D↔reference IoU to accept a hallucinated view
 """
 
@@ -390,9 +390,9 @@ def _parse_args() -> argparse.Namespace:
     
     # Extraction params
     p.add_argument("--id_map_dir", default="auto",
-                   help="'auto' (default) | 'none' | explicit path to Module-1 id_maps")
+                   help="'auto' (default) | 'none' | explicit path to Module1 id_maps")
     p.add_argument("--module1_obj_id", type=int, default=None,
-                   help="Override Module-1 instance ID; auto-resolved if omitted")
+                   help="Override Module1 instance ID; auto-resolved if omitted")
     p.add_argument("--tau_alpha", type=float, default=0.4,
                    help="ObjectGS alpha threshold for mask extraction")
     p.add_argument("--min_pixels", type=int, default=64,

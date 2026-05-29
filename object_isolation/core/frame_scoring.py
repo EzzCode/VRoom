@@ -126,7 +126,6 @@ class FrameScore:
     """Container for per-frame raw metrics, normalized components, and final score."""
     cam_index: int
     img_name: str
-    image_path: str
     out_rgba_path: str
     azimuth_V_deg: float
     elevation_V_deg: float
@@ -163,7 +162,6 @@ def _collect_raw_metrics(frame: dict, scope_cameras: list[dict]) -> FrameScore:
     return FrameScore(
         cam_index=int(frame['cam_index']),
         img_name=str(frame['img_name']),
-        image_path=str(frame['image_path']),
         out_rgba_path=str(frame['out_rgba_path']),
         azimuth_V_deg=az,
         elevation_V_deg=el,

@@ -188,12 +188,13 @@ export default function ARMeshScene(arSceneProps: any) {
             position={[0, 0, 0]}
             scale={[1, 1, 1]}
             onLoadStart={() => {
+              console.log('Viro3DObject onLoadStart, source:', meshSource);
               if (onMeshLoading) onMeshLoading(true);
             }}
             onLoadEnd={() => {
               if (onMeshLoading) onMeshLoading(false);
             }}
-            onError={(e: any) => console.warn('Mesh load error:', e.nativeEvent?.error)}
+            onError={(e: any) => console.warn('Mesh load error:', e.nativeEvent?.error, 'source:', meshSource)}
           />
         </ViroNode>
       )}

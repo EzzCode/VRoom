@@ -1,11 +1,11 @@
-"""ObjectGS Loading and Camera-Graph Helpers.
+"""Gaussian loading and camera-graph helpers.
 
-This module wraps the third-party ObjectGS package living under
-``temp_deps/ObjectGS`` so the rest of ``object_isolation`` can:
+This module wraps the local ``gstrain`` runtime so the rest of
+``object_isolation`` can:
 
     * Load a trained Gaussian model from disk (``load_gaussians``)
-    * Read camera poses from ``cameras.json`` and build an inter-camera
-      perspective graph used for view selection (``build_perspective_graph``)
+        * Read camera poses from ``cameras.json`` for view selection
+            (``build_perspective_graph``)
     * Estimate scene up-direction and an orbit base direction from cameras
 
 All public helpers are pure functions over numpy arrays / dataclasses so they
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,23 +26,18 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_VROOM_ROOT = Path(__file__).resolve().parents[2]
-_OBJECTGS_DIR = _VROOM_ROOT / "temp_deps" / "ObjectGS"
-if str(_OBJECTGS_DIR) not in sys.path:
-    sys.path.insert(0, str(_OBJECTGS_DIR))
-
-from scene.base_model import GaussianModel  # noqa: E402
-from utils.general_utils import parse_cfg  # noqa: E402
-from utils.semantic_utils import OneHotEncoder  # noqa: E402
+from gstrain.vroom_core.models.facade import GaussianModel
+from gstrain.vroom_core.models.semantics import SemanticCodec
+from gstrain.vroom_core.training.orchestration import PipelineConfig
+from gstrain.vroom_core.utils.checkpoints import CheckpointManager
 
 
 # ── Data containers ───────────────────────────────────────────────────────────────
 
 @dataclass
 class PerspectiveGraph:
-    """Camera list plus a symmetric adjacency matrix of pairwise overlap."""
+    """Camera list parsed from ``cameras.json``."""
     cameras: list[dict]
-    adjacency: np.ndarray
 
     @property
     def positions(self) -> np.ndarray:
@@ -53,8 +47,37 @@ class PerspectiveGraph:
 
 # ── Model loading ─────────────────────────────────────────────────────────────────
 
+_GSTRAIN_MODEL_KWARGS = {
+    "n_offsets",
+    "feat_dim",
+    "view_dim",
+    "appearance_dim",
+    "voxel_size",
+    "gs_attr",
+    "render_mode",
+    "tile_size_2dgs",
+}
+
+
+def _pipeline_config_from_yaml(cfg: dict) -> SimpleNamespace:
+    values = dict(cfg.get("pipeline_params", {}) or {})
+    defaults = PipelineConfig()
+    for key, value in vars(defaults).items():
+        values.setdefault(key, value)
+    return SimpleNamespace(**values)
+
+
+def _model_kwargs_from_yaml(cfg: dict, model_dir: Path) -> dict:
+    model_params = cfg.get("model_params", {}) or {}
+    raw_kwargs = ((model_params.get("model_config", {}) or {}).get("kwargs", {}) or {})
+    kwargs = {key: raw_kwargs[key] for key in _GSTRAIN_MODEL_KWARGS if key in raw_kwargs}
+    if kwargs:
+        return kwargs
+    return CheckpointManager(GaussianModel()).infer_bundle_kwargs(model_dir)
+
+
 def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[GaussianModel, SimpleNamespace]:
-    """Load a trained ObjectGS ``GaussianModel`` and its pipeline config.
+    """Load a trained ``gstrain`` ``GaussianModel`` and its pipeline config.
 
     If ``iteration`` is ``-1`` (default), the latest ``iteration_*`` checkpoint
     under ``<model_path>/point_cloud/`` is used. Falls back to a flat
@@ -67,7 +90,7 @@ def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[Gaussia
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.load(f, Loader=yaml.FullLoader)
-    lp, _op, pipe_config = parse_cfg(cfg)
+    pipe_config = _pipeline_config_from_yaml(cfg)
 
     pc_base = model_path / "point_cloud"
     root_model_dir = model_path if (model_path / "point_cloud.ply").exists() else None
@@ -93,7 +116,7 @@ def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[Gaussia
             model_dir = root_model_dir
             loaded_iteration = -1
         else:
-            raise FileNotFoundError(f"No ObjectGS checkpoint found under {pc_base}")
+            raise FileNotFoundError(f"No gstrain checkpoint found under {pc_base}")
     else:
         candidates = [pc_base / f"iteration_{int(iteration)}", pc_base / f"iteration_{int(iteration):05d}"]
         model_dir = next((path for path in candidates if path.exists()), None)
@@ -105,17 +128,17 @@ def load_gaussians(model_path: str | Path, iteration: int = -1) -> tuple[Gaussia
     if not ply_path.exists():
         raise FileNotFoundError(f"PLY not found: {ply_path}")
 
-    model_config = lp.model_config
-    gaussians = GaussianModel(**model_config["kwargs"])
+    gaussians = GaussianModel(**_model_kwargs_from_yaml(cfg, model_dir))
     gaussians.load_ply(str(ply_path))
     gaussians.load_mlp_checkpoints(str(model_dir))
-    gaussians.id_encoder = OneHotEncoder(gaussians.label_ids)
+    if gaussians.label_ids is not None:
+        gaussians.id_encoder = SemanticCodec.from_labels(gaussians.label_ids.view(-1))
     gaussians.explicit_gs = False
     gaussians.weed_ratio = 0.0
-    gaussians.eval()
+    gaussians.set_eval()
 
     logger.info(
-        "Loaded ObjectGS model from %s (iteration %s): %d anchors, n_offsets=%d, gs_attr=%s",
+        "Loaded gstrain model from %s (iteration %s): %d anchors, n_offsets=%d, gs_attr=%s",
         model_dir, loaded_iteration, int(gaussians.get_anchor.shape[0]), int(gaussians.n_offsets), gaussians.gs_attr,
     )
     return gaussians, pipe_config
@@ -135,16 +158,8 @@ def get_label_ids(gaussians: GaussianModel) -> np.ndarray:
 
 # ── Camera graph construction ─────────────────────────────────────────────────────────
 
-def build_perspective_graph(
-    cameras_json_path: str | Path,
-    anchor_xyz: np.ndarray | None = None,
-    overlap_method: str = "frustum",
-) -> PerspectiveGraph:
-    """Read ``cameras.json`` and compute pairwise camera overlap.
-
-    ``overlap_method`` selects between cheap angular/proximity overlap and a
-    visibility-based overlap that requires ``anchor_xyz``.
-    """
+def build_perspective_graph(cameras_json_path: str | Path) -> PerspectiveGraph:
+    """Read ``cameras.json`` into render-ready camera dictionaries."""
     path = Path(cameras_json_path)
     if not path.exists():
         raise FileNotFoundError(f"cameras.json not found: {path}")
@@ -175,13 +190,8 @@ def build_perspective_graph(
             "fy": fy,
         })
 
-    adjacency = (
-        _compute_visibility_overlap(cameras, anchor_xyz)
-        if overlap_method == "visibility" and anchor_xyz is not None
-        else _compute_angular_overlap(cameras)
-    )
-    logger.info("Perspective graph: %d cameras, mean adjacency=%.3f", len(cameras), float(adjacency.mean()))
-    return PerspectiveGraph(cameras=cameras, adjacency=adjacency)
+    logger.info("Perspective graph: %d cameras", len(cameras))
+    return PerspectiveGraph(cameras=cameras)
 
 
 # ── Geometry helpers ───────────────────────────────────────────────────────────────────
@@ -242,32 +252,3 @@ def _normalize(vec: np.ndarray, fallback: np.ndarray) -> np.ndarray:
     return (vec / norm).astype(np.float32)
 
 
-def _compute_angular_overlap(cameras: list[dict]) -> np.ndarray:
-    """Cheap overlap proxy using forward-vector dot product + camera proximity."""
-    positions = np.asarray([cam["position"] for cam in cameras], dtype=np.float32)
-    forwards = np.asarray([cam["R"][2, :] for cam in cameras], dtype=np.float32)
-    forwards /= np.linalg.norm(forwards, axis=1, keepdims=True) + 1e-8
-    angular = (forwards @ forwards.T + 1.0) / 2.0
-    dists = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=2)
-    proximity = 1.0 - dists / (dists.max() + 1e-8)
-    adjacency = (0.6 * angular + 0.4 * proximity).astype(np.float32)
-    np.fill_diagonal(adjacency, 1.0)
-    return adjacency
-
-
-def _compute_visibility_overlap(cameras: list[dict], anchor_xyz: np.ndarray) -> np.ndarray:
-    """Pairwise IoU of which anchors project visibly into each camera."""
-    visibility = np.zeros((len(cameras), len(anchor_xyz)), dtype=bool)
-    for index, cam in enumerate(cameras):
-        visibility[index] = count_visible_anchors(cam, anchor_xyz)
-
-    adjacency = np.zeros((len(cameras), len(cameras)), dtype=np.float32)
-    for i in range(len(cameras)):
-        for j in range(i, len(cameras)):
-            inter = float(np.logical_and(visibility[i], visibility[j]).sum())
-            union = float(np.logical_or(visibility[i], visibility[j]).sum())
-            score = inter / max(union, 1e-8)
-            adjacency[i, j] = score
-            adjacency[j, i] = score
-    np.fill_diagonal(adjacency, 1.0)
-    return adjacency

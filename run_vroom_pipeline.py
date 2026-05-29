@@ -122,12 +122,12 @@ def main():
 
     # STEP 1: COLMAP
     print("\n[1/3] STAGE: Structure-from-Motion (COLMAP)")
-    colmap_runner = workspace_root / "Module-1" / "colmap_runner.py"
+    colmap_runner = workspace_root / "Module1" / "colmap_runner.py"
     stream_command(py_u + [str(colmap_runner), "--data_path", str(data_path)], "SfM Matching", total=total_images)
 
     # STEP 2: SAM3 & Tracking
     print("\n[2/3] STAGE: Semantic Tracking (SAM3 + Tracker)")
-    module1_runner = workspace_root / "Module-1" / "module1_runner.py"
+    module1_runner = workspace_root / "Module1" / "module1_runner.py"
     module1_log_path = data_path / "module1_runner.log"
     with open(module1_log_path, "w", encoding="utf-8") as f:
         f.write(f"Module 1 runner logs for dataset: {data_path}\n")

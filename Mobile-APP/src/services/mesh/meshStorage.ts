@@ -5,6 +5,46 @@ import { convertPlyToGlb } from './plyToGlb';
 
 const IMPORTED_MESH_DIR = `${FileSystem.documentDirectory}meshes/`;
 
+// Metro dev server URL reachable from device via `adb reverse tcp:8083 tcp:8083`.
+// Used to serve runtime-uploaded GLBs over HTTP because ViroReact's native loader
+// fails on file:// URIs to the app sandbox storage.
+const METRO_BASE_URL = 'http://127.0.0.1:8083';
+
+/**
+ * Uploads a local GLB file to the Metro dev server and returns the http:// URL
+ * ViroReact can fetch it from. Required because file:// URIs to internal
+ * storage fail in ViroReact's native GLTF loader.
+ */
+export async function uploadMeshToMetro(localPath: string, id: string): Promise<string> {
+  const path = localPath.startsWith('file://') ? localPath : `file://${localPath}`;
+  const base64 = await FileSystem.readAsStringAsync(path, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const resp = await fetch(`${METRO_BASE_URL}/dynamic-mesh/upload`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: safeId, base64 }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Metro upload failed: ${resp.status} ${await resp.text()}`);
+  }
+  return `${METRO_BASE_URL}/dynamic-mesh/${safeId}.glb`;
+}
+
+/**
+ * Ensures the given mesh has an http:// URI ViroReact can load. For bundled
+ * meshes this is a no-op. For imported meshes with file:// or local paths, the
+ * file is uploaded to Metro and the returned mesh has its uri replaced.
+ */
+export async function prepareMeshForViro(mesh: MeshInfo): Promise<MeshInfo> {
+  if (mesh.isBundled) return mesh;
+  if (mesh.uri.startsWith('http://') || mesh.uri.startsWith('https://')) return mesh;
+  if (mesh.format !== 'GLB') return mesh;
+  const httpUri = await uploadMeshToMetro(mesh.uri, mesh.id);
+  return { ...mesh, uri: httpUri };
+}
+
 const SUPER_CLEAN_GLB = require('../../../assets/meshes/super_clean.glb');
 
 const BUNDLED_MESHES: MeshInfo[] = [
@@ -150,7 +190,12 @@ export function getMeshSource(mesh: MeshInfo): {
       type: mesh.format,
     };
   }
-  const uri = mesh.uri.startsWith('file://') ? mesh.uri : `file://${mesh.uri}`;
+  // http(s):// URIs (Metro-served) are passed through as-is.
+  // Local paths get file:// prefix as a fallback.
+  let uri = mesh.uri;
+  if (!uri.startsWith('http://') && !uri.startsWith('https://') && !uri.startsWith('file://')) {
+    uri = `file://${uri}`;
+  }
   return {
     source: { uri },
     type: mesh.format,

@@ -44,11 +44,9 @@ class ObjectScope:
     """
     object_label_id: int
     n_anchors: int
-    anchor_xyz_W: np.ndarray         # (N, 3) float32
     centroid_W: np.ndarray           # (3,)   float32
     aabb_min_W: np.ndarray           # (3,)   float32
     aabb_max_W: np.ndarray           # (3,)   float32
-    principal_axes_W: np.ndarray     # (3, 3) float32 columns are PCA axes (largest first)
     principal_extents: np.ndarray    # (3,)   float32 sqrt of PCA eigenvalues
     radius: float                    # orbit radius in world units
     up_W: np.ndarray                 # (3,)   float32
@@ -96,17 +94,15 @@ def discover_object_scope(
     aabb_min = anchor_xyz.min(axis=0).astype(np.float32)
     aabb_max = anchor_xyz.max(axis=0).astype(np.float32)
 
-    # ── PCA principal axes ──
+    # ── PCA principal extents ──
     centered = anchor_xyz - centroid
     cov = (centered.T @ centered) / max(len(anchor_xyz) - 1, 1)
-    eigvals, eigvecs = np.linalg.eigh(cov)            # ascending
+    eigvals = np.linalg.eigvalsh(cov)            # ascending
     order = np.argsort(eigvals)[::-1]
-    principal_axes = eigvecs[:, order].astype(np.float32)
     principal_extents = np.sqrt(np.clip(eigvals[order], 0.0, None)).astype(np.float32)
 
-    # ── Camera analysis (reuse perspective_graph) ──
-    pgraph = build_perspective_graph(str(cameras_json), anchor_xyz=None,
-                                     overlap_method='frustum')
+    # ── Camera analysis  ──
+    pgraph = build_perspective_graph(str(cameras_json))
     cameras = pgraph.cameras
 
     visible_indices: list = []
@@ -168,11 +164,9 @@ def discover_object_scope(
     scope = ObjectScope(
         object_label_id=int(object_label_id),
         n_anchors=int(n_obj),
-        anchor_xyz_W=anchor_xyz,
         centroid_W=centroid,
         aabb_min_W=aabb_min,
         aabb_max_W=aabb_max,
-        principal_axes_W=principal_axes,
         principal_extents=principal_extents,
         radius=radius,
         up_W=up_W.astype(np.float32),

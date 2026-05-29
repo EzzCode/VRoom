@@ -1,8 +1,8 @@
-"""COLMAP Point-Cloud Initialization for Object Scratch Training.
+"""COLMAP point-cloud initialization for object scratch training.
 
-Given a trained ObjectGS model and a per-object extraction manifest, locate
+Given a trained gstrain model and a per-object extraction manifest, locate
 the scene's COLMAP sparse reconstruction (``points3D.{bin,txt}``) and emit a
-small, object-local ``BasicPointCloud`` that seeds the fresh per-object
+small, object-local ``PointCloudSample`` that seeds the fresh per-object
 Gaussian model. The output is intentionally sparse — densification fills it
 out during training.
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -22,11 +21,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 _VROOM_ROOT = Path(__file__).resolve().parents[2]
-_OBJECTGS_DIR = _VROOM_ROOT / "temp_deps" / "ObjectGS"
-if str(_OBJECTGS_DIR) not in sys.path:
-    sys.path.insert(0, str(_OBJECTGS_DIR))
-
-from utils.graphics_utils import BasicPointCloud  # noqa: E402
+from gstrain.vroom_core.utils.geometry import PointCloudSample
 
 
 def _resolve_path(path_value: str | Path, *, base_dir: Path) -> Path:
@@ -295,8 +290,8 @@ def load_colmap_object_point_cloud(
     max_points: int = 20000,
     min_points: int = 16,
     target_points: int = 8000,
-) -> tuple[BasicPointCloud, dict]:
-    """Load object seed points from the scene COLMAP point cloud, not ObjectGS anchors."""
+) -> tuple[PointCloudSample, dict]:
+    """Load object seed points from the scene COLMAP point cloud, not model anchors."""
     source_path = _read_source_path(model_path)
     if source_path is None:
         raise FileNotFoundError(f"Could not determine source_path from {Path(model_path) / 'config.yaml'}")
@@ -381,7 +376,7 @@ def load_colmap_object_point_cloud(
 
     normals = np.zeros_like(xyz, dtype=np.float32)
     label_ids = np.full((xyz.shape[0],), int(object_id), dtype=np.uint8)
-    pcd = BasicPointCloud(points=xyz.astype(np.float32), colors=colors.astype(np.float32), normals=normals, label_ids=label_ids)
+    pcd = PointCloudSample(points=xyz.astype(np.float32), colors=colors.astype(np.float32), normals=normals, label_ids=label_ids)
     metadata = {
         "init_source": "colmap_labeled_ply",
         "source_path": str(source_path),

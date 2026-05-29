@@ -371,8 +371,6 @@ class HallucinatedFrame:
     elevation_V_deg: float
     is_conditioning: bool
     iou_with_objgs: float
-    n_pixels_sv3d: int
-    n_pixels_objgs: int
     accepted: bool
     reject_reason: str
     out_rgba_path: str
@@ -560,8 +558,6 @@ def run_hallucination(
             elevation_V_deg=float(v.elevation_V_deg),
             is_conditioning=bool(v.is_conditioning),
             iou_with_objgs=float(iou),
-            n_pixels_sv3d=n_sv3d,
-            n_pixels_objgs=n_objgs,
             accepted=accepted,
             reject_reason=reason,
             out_rgba_path=str(rgba_path_out),

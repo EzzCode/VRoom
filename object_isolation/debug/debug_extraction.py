@@ -245,7 +245,7 @@ def main():
     parser.add_argument("--id_map_dir", default="auto",
                         help="'auto' (default) | 'none' | explicit path")
     parser.add_argument("--module1_obj_id", type=int, default=None,
-                        help="Override Module-1 instance id; auto-resolved if omitted.")
+                        help="Override Module1 instance id; auto-resolved if omitted.")
     parser.add_argument("--tau_alpha", type=float, default=0.4)
     parser.add_argument("--min_pixels", type=int, default=64)
     args = parser.parse_args()

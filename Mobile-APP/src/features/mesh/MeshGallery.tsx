@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, FlatList, Text, StyleSheet, ActivityIndicator, Alert, TouchableOpacity } from 'react-native';
-import Ionicons from '@expo/vector-icons/Ionicons';
+import { View, FlatList, Text, StyleSheet, ActivityIndicator, Alert } from 'react-native';
 import { useTheme } from '../../shared/theme';
 import { Header, MeshCard, Button } from '../../shared/components';
 import {
@@ -8,6 +7,7 @@ import {
   importMeshFromFilePicker,
   deleteImportedMesh,
   formatFileSize,
+  prepareMeshForViro,
 } from '../../services/mesh/meshStorage';
 import { MeshInfo } from '../../shared/core/types';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -41,44 +41,51 @@ export default function MeshGallery({ navigation }: Props) {
     }
   }, []);
 
+  const handleMeshPress = useCallback(
+    async (mesh: MeshInfo) => {
+      if (mesh.format === 'PLY') {
+        Alert.alert('Format Not Supported', 'PLY files cannot be viewed in AR. Convert to GLB first.', [{ text: 'OK' }]);
+        return;
+      }
+      let prepared = mesh;
+      try {
+        prepared = await prepareMeshForViro(mesh);
+      } catch (e) {
+        console.warn('Mesh upload to Metro failed, falling back to local URI:', e);
+      }
+      navigation.navigate('ARView', {
+        meshId: prepared.id,
+        meshName: prepared.name,
+        meshUri: prepared.uri,
+        meshType: prepared.format as 'GLB' | 'OBJ',
+        isBundled: prepared.isBundled,
+      });
+    },
+    [navigation],
+  );
+
   const handleDelete = useCallback((mesh: MeshInfo) => {
     Alert.alert(
-      'Delete Mesh',
-      `Delete "${mesh.name}"? This cannot be undone.`,
+      'Delete mesh?',
+      `"${mesh.name}" will be removed from your library.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            await deleteImportedMesh(mesh);
-            setMeshes((prev) => prev.filter((m) => m.id !== mesh.id));
+            try {
+              await deleteImportedMesh(mesh);
+              setMeshes((prev) => prev.filter((m) => m.id !== mesh.id));
+            } catch (e) {
+              console.warn('Failed to delete mesh:', e);
+              Alert.alert('Delete failed', 'Could not delete the mesh file.');
+            }
           },
         },
       ],
     );
   }, []);
-
-  const handleMeshPress = useCallback(
-    (mesh: MeshInfo) => {
-      if (mesh.format === 'PLY') {
-        Alert.alert(
-          'Format Not Supported in AR',
-          'PLY files cannot be viewed in AR. Please convert your file to GLB or OBJ first.',
-          [{ text: 'OK' }],
-        );
-        return;
-      }
-      navigation.navigate('ARView', {
-        meshId: mesh.id,
-        meshName: mesh.name,
-        meshUri: mesh.uri,
-        meshType: mesh.format,
-        isBundled: mesh.isBundled,
-      });
-    },
-    [navigation],
-  );
 
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
@@ -114,16 +121,8 @@ export default function MeshGallery({ navigation }: Props) {
                 format={item.format}
                 size={formatFileSize(item.size)}
                 onPress={() => handleMeshPress(item)}
+                onDelete={item.isBundled ? undefined : () => handleDelete(item)}
               />
-              {!item.isBundled && (
-                <TouchableOpacity
-                  style={styles.deleteBtn}
-                  onPress={() => handleDelete(item)}
-                  hitSlop={{ top: 6, right: 6, bottom: 6, left: 6 }}
-                >
-                  <Ionicons name="close-circle" size={22} color="#e53935" />
-                </TouchableOpacity>
-              )}
             </View>
           )}
         />
@@ -152,15 +151,6 @@ const styles = StyleSheet.create({
   gridItem: {
     flex: 1,
     maxWidth: '50%',
-    position: 'relative',
-  },
-  deleteBtn: {
-    position: 'absolute',
-    top: -8,
-    right: -8,
-    zIndex: 10,
-    backgroundColor: 'white',
-    borderRadius: 11,
   },
   fab: {
     position: 'absolute',
