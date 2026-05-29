@@ -5,6 +5,9 @@ import React, { createContext, useContext, useRef, useState, useCallback, useMem
 import { Keyframe, CameraPose, SessionMetadata } from '../shared/core/types';
 import { KeyframeExtractor } from '../features/capture/KeyframeExtractor';
 import { AngleGate } from '../features/capture/gates/AngleGate';
+import { CoverageGate } from '../features/capture/gates/CoverageGate';
+import { CoverageTracker } from '../features/coverage/CoverageTracker';
+import { CAPTURE_CONFIG } from '../features/capture/config/captureConfig';
 
 // ── Context value type ──────────────────────────────────────
 export interface SessionContextValue {
@@ -24,6 +27,10 @@ export interface SessionContextValue {
   currentPose: CameraPose | null;
   /** Update the current camera pose */
   setCurrentPose: (pose: CameraPose) => void;
+  /** Shared coverage tracker (HUD + gate observe the same instance) */
+  coverageTracker: CoverageTracker;
+  /** Coverage percent in [0,1], updated when a keyframe is saved */
+  coveragePercent: number;
   /** Session metadata for export */
   getMetadata: () => SessionMetadata;
 }
@@ -35,42 +42,63 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [isRecording, setIsRecording] = useState(false);
   const [keyframes, setKeyframes] = useState<Keyframe[]>([]);
   const [currentPose, setCurrentPose] = useState<CameraPose | null>(null);
+  const [coveragePercent, setCoveragePercent] = useState(0);
   const sessionStartRef = useRef<string>('');
+
+  // Shared tracker — CoverageGate peeks, addKeyframe commits, HUD reads.
+  const coverageTracker = useMemo(
+    () =>
+      new CoverageTracker({
+        voxelSize: CAPTURE_CONFIG.coverage.voxelSize,
+        minObservations: CAPTURE_CONFIG.coverage.minObservations,
+        fovDeg: CAPTURE_CONFIG.coverage.cameraFovDeg,
+        frustumDepth: CAPTURE_CONFIG.coverage.frustumDepth,
+      }),
+    [],
+  );
 
   // Create the extractor once and register gates
   const extractor = useMemo(() => {
     const ext = new KeyframeExtractor();
     ext.addGate(new AngleGate());
+    ext.addGate(new CoverageGate(coverageTracker));
     // BlurGate runs inside the worklet, not in the extractor pipeline.
-    // CoverageGate will be added in Build 3.
     return ext;
-  }, []);
+  }, [coverageTracker]);
 
   const startSession = useCallback(() => {
     setKeyframes([]);
     setCurrentPose(null);
+    setCoveragePercent(0);
+    coverageTracker.reset();
     extractor.resetAll();
     sessionStartRef.current = new Date().toISOString();
     setIsRecording(true);
-  }, [extractor]);
+  }, [extractor, coverageTracker]);
 
   const stopSession = useCallback(() => {
     setIsRecording(false);
   }, []);
 
-  const addKeyframe = useCallback((kf: Keyframe) => {
-    setKeyframes((prev) => [...prev, kf]);
-  }, []);
+  const addKeyframe = useCallback(
+    (kf: Keyframe) => {
+      setKeyframes((prev) => [...prev, kf]);
+      // Commit this pose's voxel observations now that the frame is saved.
+      coverageTracker.observe(kf.pose);
+      setCoveragePercent(coverageTracker.coveragePercent);
+    },
+    [coverageTracker],
+  );
 
   const getMetadata = useCallback((): SessionMetadata => {
     return {
       startedAt: sessionStartRef.current,
       endedAt: new Date().toISOString(),
       keyframes,
-      coveragePercent: 0, // Populated in Build 3
+      coveragePercent: coverageTracker.coveragePercent,
       totalFramesAnalysed: 0, // Updated by frame processor
     };
-  }, [keyframes]);
+  }, [keyframes, coverageTracker]);
 
   const value: SessionContextValue = {
     isRecording,
@@ -81,6 +109,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     extractor,
     currentPose,
     setCurrentPose,
+    coverageTracker,
+    coveragePercent,
     getMetadata,
   };
 

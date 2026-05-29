@@ -86,23 +86,23 @@ def generate_tsdf_single_camera(depth_map_t, intrinsics_t, extrinsics_t, grid_sh
     valid_mask[bounds_mask] = depth_check
 
     # Step 4: SDF Calculation
+    # Step 4: SDF Calculation
     # Compare the distance to voxel vs the depth camera's measurement.
     valid_cam_points = cam_points[valid_mask]
-    
-    # Calculate the actual straight-line distance from the camera to the voxel (the laser ray)
+
+    # Straight-line distance from camera to voxel (the ray length)
     ray_lengths = torch.linalg.norm(valid_cam_points, dim=1)
-    
-    # Depth cameras measure "Z-depth" (straight forward parallel to the lens), not diagonal ray length.
-    # The directional cosine converts the diagonal ray distance back into flat Z-depth,
-    # ensuring flat surfaces look flat and not curved.
+
+    # Depth maps store Z-depth (perpendicular to image plane), not ray length.
+    # Multiplying the Z-depth SDF by cos(theta) projects it onto the ray direction,
+    # giving a consistent surface across views and avoiding holes at oblique angles.
     directional_cosine = corner_depths[valid_mask] / ray_lengths
 
     # Initialize all voxels with a dummy "empty space" value (1e6)
     # This guarantees that even with a huge trunc_margin, unseen voxels will always normalize to exactly 1.0 TSDF.
     sdf_values = torch.ones(world_points_h_t.shape[0], device=device, dtype=torch.float64) * 1e6
 
-    # SDF = Camera's Measurement - Voxel's actual depth
-    # (Distance along the camera ray to the surface) - (Distance along the camera ray to the voxel)
+    # SDF = (Camera's Measurement - Voxel's Z-depth) * cos(theta)
     # Positive SDF: Voxel is in empty space (in front of the surface).
     # Zero SDF: Voxel is exactly on the surface.
     # Negative SDF: Voxel is buried inside the solid object.

@@ -7,6 +7,7 @@ import CaptureScreen from '../features/capture/CaptureScreen';
 import MeshGallery from '../features/mesh/MeshGallery';
 import ARViewScreen from '../features/ar/ARViewScreen';
 import ExportScreen from '../features/export/ExportScreen';
+import CoverageDemoScreen from '../features/coverage/CoverageDemoScreen';
 import { RootStackParamList } from './types';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -50,6 +51,11 @@ export default function NavigationProvider() {
           options={{ animation: 'slide_from_bottom', orientation: 'portrait' }}
         />
         <Stack.Screen name="Export" component={ExportScreen} />
+        <Stack.Screen
+          name="CoverageDemo"
+          component={CoverageDemoScreen}
+          options={{ animation: 'slide_from_bottom', orientation: 'portrait' }}
+        />
       </Stack.Navigator>
     </NavigationContainer>
   );

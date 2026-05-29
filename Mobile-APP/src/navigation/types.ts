@@ -12,6 +12,7 @@ export type RootStackParamList = {
     isBundled: boolean;
   };
   Export: undefined;
+  CoverageDemo: undefined;
 };
 
 export type RootStackNavigation = NativeStackScreenProps<RootStackParamList>['navigation'];

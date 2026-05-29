@@ -45,7 +45,7 @@ function CaptureScreenInner({ navigation }: Props) {
 
   const captureIntervalMs = 1200;
 
-  const { isRecording, startSession, stopSession, keyframes, addKeyframe, extractor, currentPose } =
+  const { isRecording, startSession, stopSession, keyframes, addKeyframe, extractor, currentPose, coveragePercent } =
     useSession();
 
   const isRecordingRef = useRef(false);
@@ -244,6 +244,36 @@ function CaptureScreenInner({ navigation }: Props) {
             style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
           >
             {blurScore.toFixed(0)}
+          </Text>
+        </View>
+
+        <View
+          style={[
+            styles.statsBar,
+            {
+              backgroundColor: theme.colors.overlay,
+              borderRadius: theme.radii.md,
+              padding: theme.spacing.md,
+              marginTop: theme.spacing.sm,
+            },
+          ]}
+        >
+          <Text
+            style={{
+              color: theme.colors.textPrimary,
+              fontSize: theme.typography.body.fontSize,
+              fontWeight: '700',
+            }}
+          >
+            Coverage
+          </Text>
+          <View style={{ flex: 1, marginHorizontal: 12 }}>
+            <ProgressBar progress={coveragePercent} color={theme.colors.primary} />
+          </View>
+          <Text
+            style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
+          >
+            {Math.round(coveragePercent * 100)}%
           </Text>
         </View>
 
