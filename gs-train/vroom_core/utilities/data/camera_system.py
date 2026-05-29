@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 from torch import nn
 
-from vroom_core.utils.geometry import pil_image_to_tensor, projection_matrix, world_to_view_matrix
+from vroom_core.utilities.utils.geometry import pil_image_to_tensor, projection_matrix, world_to_view_matrix
 
 
 @dataclass(frozen=True)

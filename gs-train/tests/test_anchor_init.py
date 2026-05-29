@@ -35,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from vroom_core.models.anchor_field import AnchorSeedBuilder
+from vroom_core.core.models.anchor_field import AnchorSeedBuilder
 
 # ## ANSI colours for nicer terminal output ##########################
 GREEN = "\033[92m"

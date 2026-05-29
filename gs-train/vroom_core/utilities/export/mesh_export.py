@@ -1,5 +1,3 @@
-"""TSDF-based object mesh extraction for saved VRoom runs."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,9 +8,9 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from gaussian_renderer.render import prefilter_voxel, render
+from vroom_core.utilities.gaussian_renderer.render import prefilter_voxel, render
 
-from vroom_core.utils.runtime import ensure_directory
+from vroom_core.utilities.utils.runtime import ensure_directory
 
 
 @dataclass(frozen=True)
@@ -49,11 +47,14 @@ class _RenderPipe:
 
 
 class ObjectMeshExporter:
-    def __init__(self, anchor_cloud, decoder, background: torch.Tensor, add_prefilter: bool = True) -> None:
+    def __init__(self, anchor_cloud, decoder, background: torch.Tensor, add_prefilter: bool = True, gaussian_type: str = "3D", render_mode: str = "RGB+ED", tile_size_2dgs: int = 8) -> None:
         self.anchor_cloud = anchor_cloud
         self.decoder = decoder
         self.background = background.to(anchor_cloud.device)
         self.pipe = _RenderPipe(add_prefilter=add_prefilter)
+        self.gaussian_type = gaussian_type
+        self.render_mode = render_mode
+        self.tile_size_2dgs = tile_size_2dgs
 
     def available_labels(self, skip_zero: bool = True) -> list[int]:
         if self.anchor_cloud.semantic_labels is None:
@@ -125,7 +126,7 @@ class ObjectMeshExporter:
     def _capture_views(self, cameras: Iterable, label_mask: torch.Tensor) -> list[_RenderCapture]:
         captures: list[_RenderCapture] = []
         for camera in tqdm(list(cameras), desc="Render object views", dynamic_ncols=True):
-            visible = prefilter_voxel(camera, self.anchor_cloud, self.decoder).squeeze() if self.pipe.add_prefilter else self.anchor_cloud.visibility_mask
+            visible = prefilter_voxel(camera, self.anchor_cloud, self.gaussian_type).squeeze() if self.pipe.add_prefilter else self.anchor_cloud.visibility_mask
             visible = visible & label_mask
             if visible.numel() == 0 or not bool(visible.any().item()):
                 continue
@@ -134,13 +135,23 @@ class ObjectMeshExporter:
                 visible_anchors_mask=visible,
                 camera=camera,
             )
+            from vroom_core.core.training.orchestration import prepare_gaussian_space_props
+            gaussian_positions, normalized_rotations = prepare_gaussian_space_props(
+                anchor_cloud=self.anchor_cloud,
+                visible_anchors_mask=visible,
+                negative_opacity_filter=decoded_output["negative_opacity_filter"],
+                rotations_pred=decoded_output["rotations"],
+            )
+
             render_pkg = render(
                 viewpoint_camera=camera,
                 decoded_output=decoded_output,
+                gaussian_positions=gaussian_positions,
+                normalized_rotations=normalized_rotations,
                 bg_color=self.background,
-                gs_attr=self.decoder.gs_attr,
-                render_mode=self.decoder.render_mode,
-                tile_size_2dgs=self.decoder.tile_size_2dgs,
+                gaussian_type=self.gaussian_type,
+                render_mode=self.render_mode,
+                tile_size_2dgs=self.tile_size_2dgs,
                 semantics=None,
             )
             depth = render_pkg.get("render_depth")

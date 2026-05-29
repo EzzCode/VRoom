@@ -24,3 +24,20 @@ class SemanticsManager:
 
     def update_current_num_classes(self, labels):
         self.num_classes = len(torch.unique(labels))
+
+    def instantiate_semantics(
+        self,
+        semantic_labels,
+        visible_anchors_mask,
+        negative_opacity_filter,
+        gaussians_per_anchor,
+    ):
+        """
+        map visible anchor labels to one hot encodings for visible Gaussians
+        """
+        visible_labels = semantic_labels[visible_anchors_mask] # size: [num_vis_anchors]
+        visible_label_indices = self.build_lookup_table(visible_labels)
+        visible_one_hot = self.one_hot_encode(visible_label_indices).float()
+        expanded_one_hot = visible_one_hot.unsqueeze(1).expand(-1, gaussians_per_anchor, -1) # keep number of anchors and number of labels but stretch the middle dim
+        return expanded_one_hot[negative_opacity_filter] # size: [num_filtered_gaussians x num_labels]
+

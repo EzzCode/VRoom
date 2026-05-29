@@ -69,21 +69,21 @@ class LossEngine:
         model_guess = render_pkg.get("render_semantics")
 
         scales = render_pkg["scaling"]
-        lambda_dssim = getattr(opt, "lambda_dssim", 0.2)
-        lambda_object_loss = getattr(opt, "lambda_object_loss", 0.1)
-        volume_lambda = getattr(opt, "lambda_dreg", 0.01)
+        ssim_weight = getattr(opt, "ssim_weight", 0.2)
+        semantic_loss_weight = getattr(opt, "semantic_loss_weight", 0.1)
+        volume_reg_weight = getattr(opt, "volume_reg_weight", 0.01)
 
         l1_loss = self.calc_l1_loss(render, real_image)
         ssim_loss = self.calc_ssim_loss(render, real_image)
-        # Standard 3DGS blend: (1 - λ) * L1 + λ * SSIM
-        rgb_loss = (1.0 - lambda_dssim) * l1_loss + lambda_dssim * ssim_loss
+ 
+        rgb_loss = (1.0 - ssim_weight) * l1_loss + ssim_weight * ssim_loss
 
         has_mask = getattr(viewpoint_cam, "object_mask", None) is not None
         if has_mask and model_guess is not None:
-            semantic_loss = self.calc_semantic_loss(mask, model_guess) * lambda_object_loss
+            semantic_loss = self.calc_semantic_loss(mask, model_guess) * semantic_loss_weight
         else:
             semantic_loss = torch.zeros(1, device=render.device).squeeze()
-        volumetric_loss = self.calc_volumetric_loss(scales, volume_lambda)
+        volumetric_loss = self.calc_volumetric_loss(scales, volume_reg_weight)
 
         return {
             "rgb_loss": rgb_loss,

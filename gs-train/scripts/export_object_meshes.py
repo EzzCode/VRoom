@@ -13,10 +13,10 @@ from argparse import ArgumentParser
 import torch
 import yaml
 
-from vroom_core.models.anchor_field import AnchorCloud
-from vroom_core.models.decoder import GaussianDecoder
-from vroom_core.data.scene_pipeline import TrainingScene
-from vroom_core.export.mesh_export import MeshFusionOptions, ObjectMeshExporter
+from vroom_core.core.models.anchor_field import AnchorCloud
+from vroom_core.core.models.decoder import GaussianDecoder
+from vroom_core.utilities.data.scene_pipeline import TrainingScene
+from vroom_core.utilities.export.mesh_export import MeshFusionOptions, ObjectMeshExporter
 from typing import Optional, List, Dict, Tuple
 
 def _load_config(model_path: Path, config_path: Optional[str]) -> Tuple[Dict, Path]:
@@ -28,11 +28,8 @@ def _load_config(model_path: Path, config_path: Optional[str]) -> Tuple[Dict, Pa
             f"Could not find a config file at {candidate}. Pass --config or export from a run."
         )
     if candidate.suffix == ".json":
-        import json
-        from vroom_core.utils.config import parse_vroom_config
-        with open(candidate, "r", encoding="utf-8") as handle:
-            raw_cfg = json.load(handle)
-        model_params, optim_params, pipeline_params = parse_vroom_config(raw_cfg)
+        from vroom_core.utilities.utils.config import load_vroom_config
+        _, model_params, optim_params, pipeline_params = load_vroom_config(candidate)
         cfg = {
             "model_params": model_params,
             "optim_params": optim_params,
@@ -45,30 +42,30 @@ def _load_config(model_path: Path, config_path: Optional[str]) -> Tuple[Dict, Pa
 
 
 def _resolve_source_path(model_params: dict, config_file: Path, source_override: Optional[str], scene_name: Optional[str]) -> str:
-    source_path = source_override or model_params.get("source_path")
+    source_path = source_override or model_params.get("dataset_path")
     if not source_path:
-        raise ValueError("source_path is missing. Pass --source_path or provide a config with model_params.source_path.")
+        raise ValueError("dataset_path is missing. Pass --source_path or provide a config with model_params.dataset_path.")
     if scene_name is not None:
         source_path = os.path.join(source_path, scene_name)
     if not os.path.isabs(source_path):
-        source_path = os.path.abspath(os.path.join(Path(__file__).resolve().parent, source_path))
+        source_path = os.path.abspath(os.path.join(Path(__file__).resolve().parent.parent.parent, source_path))
     return source_path
 
 
-def _build_dataset_args(model_params: dict, source_path: str, model_path: str):
+def _build_dataset_args(model_params: dict, dataset_path: str, model_path: str):
     class DatasetArgs:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
     return DatasetArgs(
-        source_path=source_path,
+        dataset_path=dataset_path,
         model_path=model_path,
         resolution=model_params.get("resolution", -1),
         resolution_scales=model_params.get("resolution_scales", [1.0]),
-        images=model_params.get("images", "images"),
+        frames=model_params.get("frames", "images"),
         depths=model_params.get("depths", "depths"),
         masks=model_params.get("masks", "masks"),
-        data_device=model_params.get("data_device", "cuda"),
+        dataset_storage_device=model_params.get("dataset_storage_device", "cuda"),
         data_format=model_params.get("data_format", "colmap"),
         eval=model_params.get("eval", False),
         llffhold=model_params.get("llffhold", 8),
@@ -76,26 +73,38 @@ def _build_dataset_args(model_params: dict, source_path: str, model_path: str):
         add_depth=model_params.get("add_depth", False),
         white_background=model_params.get("white_background", False),
         random_background=False,
-        ratio=model_params.get("ratio", 1),
+        pc_downsampling_ratio=model_params.get("pc_downsampling_ratio", 1),
         global_appearance=model_params.get("global_appearance", False),
         pretrained_checkpoint="",
-        center=model_params.get("center", [0.0, 0.0, 0.0]),
-        scale=model_params.get("scale", 1.0),
+        camera_center=model_params.get("camera_center", [0.0, 0.0, 0.0]),
+        camera_scale=model_params.get("camera_scale", 1.0),
         dataset_name=model_params.get("dataset_name", ""),
-        exp_name=model_params.get("exp_name", ""),
+        save_dir=model_params.get("save_dir", ""),
     )
 
 
 def _resolve_iteration(model_path: Path, requested: int) -> int:
     if requested >= 0:
         return requested
+    checkpoints_dir = model_path / "checkpoints"
+    if checkpoints_dir.exists():
+        iterations = []
+        for path in checkpoints_dir.iterdir():
+            if path.is_file() and path.name.startswith("anchor_cloud_") and path.name.endswith(".ply"):
+                try:
+                    it = int(path.stem.split("_")[-1])
+                    iterations.append(it)
+                except ValueError:
+                    pass
+        if iterations:
+            return sorted(iterations)[-1]
     point_cloud_root = model_path / "point_cloud"
     iterations = sorted(
         [path for path in point_cloud_root.iterdir() if path.is_dir() and path.name.startswith("iteration_")],
         key=lambda path: int(path.name.split("_")[-1]),
     )
     if not iterations:
-        raise FileNotFoundError(f"No iteration_* directories found under {point_cloud_root}")
+        raise FileNotFoundError(f"No checkpoint iterations found under {checkpoints_dir} or {point_cloud_root}")
     return int(iterations[-1].name.split("_")[-1])
 
 
@@ -130,19 +139,66 @@ def main():
         torch.cuda.set_device(int(args.gpu))
 
     iteration = _resolve_iteration(model_path, args.iteration)
-    anchor_cloud = AnchorCloud()
+    
+    # resolve layout paths
+    checkpoints_dir = model_path / "checkpoints"
+    iteration_dir = model_path / "point_cloud" / f"iteration_{iteration}"
+    
+    if checkpoints_dir.exists() and (checkpoints_dir / f"anchor_cloud_{iteration}.ply").exists():
+        ply_path = checkpoints_dir / f"anchor_cloud_{iteration}.ply"
+        decoder_dir = checkpoints_dir
+    else:
+        ply_path = iteration_dir / "point_cloud.ply"
+        decoder_dir = iteration_dir
+
+    bundle_path = decoder_dir / "vroom_bundle.pt"
+    if bundle_path.exists():
+        bundle_kwargs = torch.load(bundle_path, map_location="cpu")
+        feat_dim = bundle_kwargs.get("feat_dim", model_kwargs.get("feat_dim", 32))
+        gaussian_type = bundle_kwargs.get("gaussian_type", bundle_kwargs.get("gs_attr", model_kwargs.get("gaussian_type", "3D")))
+        render_mode = bundle_kwargs.get("render_mode", model_kwargs.get("render_mode", "RGB+ED"))
+        tile_size_2dgs = bundle_kwargs.get("tile_size_2dgs", bundle_kwargs.get("tile_size_2dgs", 8))
+        gs_per_anchor = bundle_kwargs.get("n_offsets", model_kwargs.get("gs_per_anchor", 5))
+    else:
+        feat_dim = model_kwargs.get("feat_dim", 32)
+        gaussian_type = model_kwargs.get("gaussian_type", "3D")
+        render_mode = model_kwargs.get("render_mode", "RGB+ED")
+        tile_size_2dgs = model_kwargs.get("tile_size_2dgs", 8)
+        gs_per_anchor = model_kwargs.get("gs_per_anchor", 5)
+
+    anchor_cloud = AnchorCloud(gaussians_per_anchor=gs_per_anchor)
     decoder = GaussianDecoder(
-        feature_dim=model_kwargs.get("feat_dim", 32),
+        feature_dim=feat_dim,
         anchor_cloud=anchor_cloud,
     )
-    decoder.gs_attr = model_kwargs.get("gs_attr", "3D")
-    decoder.render_mode = model_kwargs.get("render_mode", "RGB+ED")
-    decoder.tile_size_2dgs = model_kwargs.get("tile_size_2dgs", 8)
     dataset_args = _build_dataset_args(model_params, source_path, str(model_path))
-    scene = TrainingScene(dataset_args, anchor_cloud, decoder, load_iteration=iteration, shuffle=False)
+    scene = TrainingScene(dataset_args, anchor_cloud, decoder, load_iteration=None, shuffle=False)
+
+    from vroom_core.utilities.utils.checkpoints import CheckpointManager
+    from vroom_core.core.models.anchor_field import AnchorCloudData
+    from vroom_core.core.models.semantics import SemanticsManager
+
+    checkpoints = CheckpointManager(anchor_cloud, decoder)
+    if not ply_path.exists():
+        raise FileNotFoundError(f"Could not find PLY checkpoint at {ply_path}")
+
+    payload = checkpoints.load_anchor_field(str(ply_path))
+    seeds = AnchorCloudData(
+        anchors_positions=payload["anchor"],
+        gaussians_offsets=payload["offset"],
+        anchor_features=payload["feature"],
+        anchors_log_scales=payload["log_scaling"],
+        anchors_rotations=payload["rotation"],
+        labels=payload["labels"],
+        semantic_manager=None if payload["labels"] is None else SemanticsManager(torch.unique(payload["labels"].view(-1))),
+        voxel_size=float(torch.exp(payload["log_scaling"][:, :3]).mean().item()) if payload["log_scaling"].numel() > 0 else 1.0,
+    )
+    anchor_cloud.set_anchors_cloud(seeds)
+    checkpoints.load_decoder(str(decoder_dir))
+    decoder.eval()
 
     background = torch.ones(3, dtype=torch.float32, device=anchor_cloud.device) if args.white_background else scene.background
-    exporter = ObjectMeshExporter(anchor_cloud, decoder, background, add_prefilter=not args.no_prefilter)
+    exporter = ObjectMeshExporter(anchor_cloud, decoder, background, add_prefilter=not args.no_prefilter, gaussian_type=gaussian_type, render_mode=render_mode, tile_size_2dgs=tile_size_2dgs)
     all_labels = exporter.available_labels(skip_zero=False)
     labels = [label for label in all_labels if label != 0]
     if args.label_id:

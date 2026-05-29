@@ -3,13 +3,13 @@ import torch
 from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_2dgs
 
 
-def render(viewpoint_camera, decoded_output, bg_color, gs_attr="3D", render_mode="RGB+ED", tile_size_2dgs=8, semantics=None):
+def render(viewpoint_camera, decoded_output, gaussian_positions, normalized_rotations, bg_color, gaussian_type="3D", render_mode="RGB+ED", tile_size_2dgs=8, semantics=None):
     """Rasterize visible neural Gaussians using gsplat."""
-    xyz = decoded_output["gaussian_possitions"]
+    xyz = gaussian_positions
     color = decoded_output["color"]
     opacity = decoded_output["opacity"]
     scaling = decoded_output["scaling"]
-    rot = decoded_output["normalized_rotations"]
+    rot = normalized_rotations
 
     render_device = xyz.device
     bg_color = bg_color.to(render_device)
@@ -24,7 +24,7 @@ def render(viewpoint_camera, decoded_output, bg_color, gs_attr="3D", render_mode
     )
     viewmat = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()
 
-    if gs_attr == "3D":
+    if gaussian_type == "3D":
         render_colors, render_alphas, render_semantics, info = gsplat.rasterization(
             means=xyz,
             quats=rot,
@@ -40,7 +40,7 @@ def render(viewpoint_camera, decoded_output, bg_color, gs_attr="3D", render_mode
             render_mode=render_mode,
             features=semantics.detach() if semantics is not None else None,
         )
-    elif gs_attr == "2D":
+    elif gaussian_type == "2D":
         (
             render_colors,
             render_alphas,
@@ -69,7 +69,7 @@ def render(viewpoint_camera, decoded_output, bg_color, gs_attr="3D", render_mode
             features=semantics.detach() if semantics is not None else None,
         )
     else:
-        raise ValueError(f"Unknown gs_attr: {gs_attr}")
+        raise ValueError(f"Unknown gaussian_type: {gaussian_type}")
 
     if render_colors.shape[-1] == 4:
         colors, depths = render_colors[..., 0:3], render_colors[..., 3:4]
@@ -92,7 +92,7 @@ def render(viewpoint_camera, decoded_output, bg_color, gs_attr="3D", render_mode
     return_dict = {
         "render": rendered_image,
         "scaling": scaling,
-        "viewspace_points": info["means2d"],
+        "rendered_2d_points": info["means2d"],
         "visibility_filter": radii > 0,
         "opacity": opacity,
         "render_depth": depth,
@@ -100,7 +100,7 @@ def render(viewpoint_camera, decoded_output, bg_color, gs_attr="3D", render_mode
         "render_alphas": render_alphas,
         "render_semantics": render_semantics,
     }
-    if gs_attr == "2D":
+    if gaussian_type == "2D":
         return_dict.update(
             {
                 "render_normals": render_normals,
@@ -111,7 +111,7 @@ def render(viewpoint_camera, decoded_output, bg_color, gs_attr="3D", render_mode
     return return_dict
 
 
-def prefilter_voxel(viewpoint_camera, anchor_cloud, decoder):
+def prefilter_voxel(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
     """Project visible anchors and return a tightened visibility mask."""
     means = anchor_cloud.anchors_positions[anchor_cloud.visibility_mask]
     scales = torch.exp(anchor_cloud.anchors_log_scales[anchor_cloud.visibility_mask])[:, :3]
@@ -130,7 +130,7 @@ def prefilter_voxel(viewpoint_camera, anchor_cloud, decoder):
     )[None]
     viewmats = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()[None]
 
-    if decoder.gs_attr == "3D":
+    if gaussian_type == "3D":
         proj_results = fully_fused_projection(
             means,
             None,
@@ -148,7 +148,7 @@ def prefilter_voxel(viewpoint_camera, anchor_cloud, decoder):
             sparse_grad=False,
             calc_compensations=False,
         )
-    elif decoder.gs_attr == "2D":
+    elif gaussian_type == "2D":
         proj_results = fully_fused_projection_2dgs(
             means,
             quats,
@@ -165,7 +165,7 @@ def prefilter_voxel(viewpoint_camera, anchor_cloud, decoder):
             sparse_grad=False,
         )
     else:
-        raise ValueError(f"Unknown gs_attr: {decoder.gs_attr}")
+        raise ValueError(f"Unknown gaussian_type: {gaussian_type}")
 
     radii = proj_results[0]
     visible_mask = anchor_cloud.visibility_mask.clone()

@@ -12,9 +12,9 @@ import torch
 from PIL import Image
 from plyfile import PlyData, PlyElement
 
-from vroom_core.data.camera_system import FrameRecord, RenderCamera
-from vroom_core.data.colmap_io import read_extrinsics_binary, read_extrinsics_text, read_intrinsics_binary, read_intrinsics_text, quaternion_to_rotation
-from vroom_core.utils.geometry import PointCloudSample, focal_to_fov, fov_to_focal, world_to_view_matrix
+from vroom_core.utilities.data.camera_system import FrameRecord, RenderCamera
+from vroom_core.utilities.data.colmap_io import read_extrinsics_binary, read_extrinsics_text, read_intrinsics_binary, read_intrinsics_text, quaternion_to_rotation
+from vroom_core.utilities.utils.geometry import PointCloudSample, focal_to_fov, fov_to_focal, world_to_view_matrix
 
 
 @dataclass(frozen=True)
@@ -286,13 +286,13 @@ class TrainingScene:
         self.test_cameras = {}
 
         if load_iteration:
-            from vroom_core.utils.checkpoints import CheckpointManager
+            from vroom_core.utilities.utils.checkpoints import CheckpointManager
             checkpoints = CheckpointManager(self.anchor_cloud, self.decoder)
             iteration_dir = os.path.join(self.model_path, "point_cloud", f"iteration_{load_iteration}")
             payload = checkpoints.load_anchor_field(os.path.join(iteration_dir, "point_cloud.ply"))
             
-            from vroom_core.models.anchor_field import AnchorCloudData
-            from vroom_core.models.semantics import SemanticsManager
+            from vroom_core.core.models.anchor_field import AnchorCloudData
+            from vroom_core.core.models.semantics import SemanticsManager
             seeds = AnchorCloudData(
                 anchors_positions=payload["anchor"],
                 gaussians_offsets=payload["offset"],

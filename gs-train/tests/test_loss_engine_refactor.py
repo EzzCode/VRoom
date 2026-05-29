@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import sys
 sys.path.insert(0, "/home/hussein_essam/gs-workspace/VRoom/gs-train/vroom_core")
 
-from training.loss_engine import (
+from vroom_core.core.training.loss_engine import (
     LossComposer,
     image_loss_fn,
     scaling_loss_fn,

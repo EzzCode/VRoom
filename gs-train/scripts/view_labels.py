@@ -11,8 +11,8 @@ if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
 try:
-    from vroom_core.models.anchor_field import AnchorCloud
-    from vroom_core.utils.checkpoints import CheckpointManager
+    from vroom_core.core.models.anchor_field import AnchorCloud
+    from vroom_core.utilities.utils.checkpoints import CheckpointManager
 except ImportError:
     print("Error: Could not import vroom_core. Make sure you are running this from gs-train directory.")
     sys.exit(1)

@@ -1,5 +1,3 @@
-"""Checkpoint and PLY serialization for the VRoom core."""
-
 from __future__ import annotations
 
 import os
@@ -10,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from plyfile import PlyData, PlyElement
 
-from vroom_core.utils.runtime import ensure_directory
+from vroom_core.utilities.utils.runtime import ensure_directory
 
 
 class CheckpointManager:
@@ -58,7 +56,7 @@ class CheckpointManager:
             "labels": None if labels is None else torch.tensor(labels, dtype=torch.long, device=self.device),
         }
 
-    def save_decoder(self, path: str) -> None:
+    def save_decoder(self, path: str, gaussian_type: str = "3D", render_mode: str = "RGB+ED", tile_size_2dgs: int = 8) -> None:
         ensure_directory(path)
         self.decoder.eval()
         feat_dim = self.decoder.feature_dim
@@ -88,9 +86,9 @@ class CheckpointManager:
                 "feat_dim": feat_dim,
                 "view_dim": view_dim,
                 "appearance_dim": appearance_dim,
-                "gs_attr": self.decoder.gs_attr,
-                "render_mode": self.decoder.render_mode,
-                "tile_size_2dgs": self.decoder.tile_size_2dgs,
+                "gs_attr": gaussian_type,
+                "render_mode": render_mode,
+                "tile_size_2dgs": tile_size_2dgs,
             },
             os.path.join(path, "vroom_bundle.pt"),
         )

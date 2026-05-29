@@ -1,5 +1,3 @@
-"""Geometry and image helpers for VRoom."""
-
 from __future__ import annotations
 
 import math

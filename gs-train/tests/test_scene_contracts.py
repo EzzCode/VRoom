@@ -7,9 +7,9 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vroom_core.data.camera_system import FrameRecord as CameraRecord
-from vroom_core.data.colmap_io import quaternion_to_rotation, read_extrinsics_binary, read_extrinsics_text, read_intrinsics_binary, read_intrinsics_text
-from vroom_core.data.scene_pipeline import compute_nerf_normalization
+from vroom_core.utilities.data.camera_system import FrameRecord as CameraRecord
+from vroom_core.utilities.data.colmap_io import quaternion_to_rotation, read_extrinsics_binary, read_extrinsics_text, read_intrinsics_binary, read_intrinsics_text
+from vroom_core.utilities.data.scene_pipeline import compute_nerf_normalization
 
 
 def _dummy_image():

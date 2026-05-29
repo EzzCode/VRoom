@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 from sklearn.neighbors import NearestNeighbors
 
-from vroom_core.utils.geometry import PointCloudSample
-from vroom_core.models.semantics import SemanticsManager
+from vroom_core.utilities.utils.geometry import PointCloudSample
+from vroom_core.core.models.semantics import SemanticsManager
 
 
 @dataclass
@@ -28,7 +28,7 @@ class AnchorCloudData:
 
 class AnchorCloud(nn.Module):
     """
-    Anchor cloud is the memory bank of the anchors, features, and gaussians.
+    Anchor cloud is the memory bank of the anchors, features, and gaussians
     """
 
     def __init__(
@@ -81,26 +81,22 @@ class AnchorCloud(nn.Module):
     def num_anchors(self) -> int:
         return self.anchors_positions.shape[0]
 
-    def initialize_anchors(self, source, cameras_extent=1.0, global_appearance=False, logger=None):
-        if hasattr(source, "points"):
-            points = torch.from_numpy(source.points).float().to(self.device)
-            labels = torch.from_numpy(source.label_ids).long().to(self.device) if getattr(source, "label_ids", None) is not None else None
+    def initialize_anchors(self, point_cloud_sampled):
+        if hasattr(point_cloud_sampled, "points"):
+            points = torch.from_numpy(point_cloud_sampled.points).float().to(self.device)
+            labels = torch.from_numpy(point_cloud_sampled.label_ids).long().to(self.device) if getattr(point_cloud_sampled, "label_ids", None) is not None else None
         else:
-            points = source.to(self.device)
-            labels = None
+            raise("no points in point cloud")
 
-        seeds = self._generate_anchors(points, labels)
-        self.set_anchors_cloud(seeds)
+        anchor_cloud = self._generate_anchors(points, labels)
+        self.set_anchors_cloud(anchor_cloud)
 
     def _generate_anchors(self, point_cloud, point_labels):
         """
         Intialize the anchor cloud from the sparse point cloud by quantization
         """
 
-        if self.density_mode:
-            self.voxel_size = self._estimate_voxel_size(point_cloud)
-        else:
-            self.voxel_size = self._estimate_voxel_size(point_cloud)
+        self.voxel_size = self._estimate_voxel_size(point_cloud)
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
@@ -160,14 +156,19 @@ class AnchorCloud(nn.Module):
         voxel_size = torch.median(distances[:, 1:]).item()
         return max(voxel_size, 1e-6)
 
-    def _knn(self, point_cloud, k):
+    def _knn(self, point_cloud, k, chunk_size=2048):
         """finds the k nearest neighbors of each point in the point cloud"""
-        knn_model = NearestNeighbors(n_neighbors=k, algorithm="ball_tree").fit(
-            point_cloud.detach().cpu().numpy()
-        )
-        distances, _ = knn_model.kneighbors(point_cloud.detach().cpu().numpy())
-        return torch.from_numpy(distances).float().to(self.device)
-
+        with torch.no_grad():
+            final_distances = torch.empty((point_cloud.shape[0], k), device=self.device)
+            for i in range(0, point_cloud.shape[0], chunk_size):
+                end = min(i + chunk_size, point_cloud.shape[0])
+                chunk = point_cloud[i:end]
+                diff = chunk.unsqueeze(1) - point_cloud.unsqueeze(0)
+                dist_matrix = torch.norm(diff, dim=-1)
+                chunk_distances= torch.topk(dist_matrix, k + 1, largest=False).values
+                final_distances[i:end] = chunk_distances[:, 1:]
+        return final_distances
+        
     def _quantize_cloud(self, point_cloud, voxel_size):
         """
         Quantize the point cloud based on the voxel size
@@ -316,3 +317,15 @@ class AnchorCloud(nn.Module):
             if self.semantic_manager is not None:
                 self.semantic_manager.update_current_num_classes(self.semantic_labels.view(-1))
                 self.semantic_manager.label_ids, _ = torch.sort(torch.unique(self.semantic_labels.view(-1)))
+
+    def instantiate_gaussian_positions(self, visible_mask, negative_opacity_filter):
+        """Compute the physical 3D positions of the visible Gaussians."""
+        anchor_positions = self.anchors_positions[visible_mask]
+        num_visible = anchor_positions.shape[0]
+        gaussian_offsets = self.gaussians_offsets[visible_mask]
+        anchor_scales = torch.exp(self.anchors_log_scales[visible_mask])
+
+        valid_scales = anchor_scales.unsqueeze(1).expand(-1, self.gaussians_per_anchor, -1)[negative_opacity_filter][:, :3]
+        valid_offsets = gaussian_offsets.view(num_visible, self.gaussians_per_anchor, 3)[negative_opacity_filter]
+        valid_anchors = anchor_positions.unsqueeze(1).expand(-1, self.gaussians_per_anchor, -1)[negative_opacity_filter]
+        return valid_anchors + (valid_offsets * valid_scales)

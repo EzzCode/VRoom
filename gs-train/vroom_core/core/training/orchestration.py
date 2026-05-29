@@ -2,12 +2,27 @@ import os
 import torch
 import torchvision
 from tqdm import tqdm
-from vroom_core.models.density import DensifcationController
-from gaussian_renderer.render import prefilter_voxel, render
-from vroom_core.training.optimizer import Optimizer
-from vroom_core.training.loss_engine import LossEngine
-from vroom_core.utils.runtime import exponential_lr_schedule
-from vroom_core.utils.checkpoints import CheckpointManager
+from vroom_core.core.models.density import DensifcationController
+from vroom_core.utilities.gaussian_renderer.render import prefilter_voxel, render
+from vroom_core.utilities.training.optimizer import Optimizer
+from vroom_core.core.training.loss_engine import LossEngine
+from vroom_core.utilities.utils.runtime import exponential_lr_schedule
+from vroom_core.utilities.utils.checkpoints import CheckpointManager
+
+
+def prepare_gaussian_space_props(
+    anchor_cloud,
+    visible_anchors_mask,
+    negative_opacity_filter,
+    rotations_pred,
+):
+    """Calculate the positions of the gaussians and normalize their rotations"""
+    gaussian_positions = anchor_cloud.instantiate_gaussian_positions(
+        visible_mask=visible_anchors_mask,
+        negative_opacity_filter=negative_opacity_filter
+    )
+    normalized_rotations = torch.nn.functional.normalize(rotations_pred, dim=-1)
+    return gaussian_positions, normalized_rotations
 
 
 class TrainingOrchestrator:
@@ -15,10 +30,14 @@ class TrainingOrchestrator:
         self.optmizer_configs = configs["optimization"]
         self.pipeline_configs = configs["pipeline"]
         self.densifier_configs = configs["densifier"]
+        self.rendering_configs = configs.get("rendering", {})
         self.output_dir = self.pipeline_configs.get("output_dir", ".")
 
         self.anchor_cloud = self.optmizer_configs["anchor_cloud"]
         self.decoder = self.optmizer_configs["decoder"]
+        self.gaussian_type = self.rendering_configs.get("gaussian_type", "3D")
+        self.render_mode = self.rendering_configs.get("render_mode", "RGB+ED")
+        self.tile_size_2dgs = self.rendering_configs.get("tile_size_2dgs", 8)
         self.bg_color = self.pipeline_configs.get("bg_color")
         self.dataloader = scene.getTrainCameras()
         self.visualization_interval = self.pipeline_configs.get("visualization_interval", 500)
@@ -30,7 +49,7 @@ class TrainingOrchestrator:
         self.color_network = self.decoder.color_network
         self.CheckPointManager = CheckpointManager(self.anchor_cloud, self.decoder)
 
-        # Resolve circular dependency
+  
         self.densifier = DensifcationController(
             voxel_size=self.anchor_cloud.voxel_size,
             anchor_cloud=self.anchor_cloud,
@@ -50,23 +69,41 @@ class TrainingOrchestrator:
         self.optimizer.zero_grad()
         self.optimizer.step_learning_rate(iteration)
 
-        visible_anchors_mask = prefilter_voxel(camera_view, self.anchor_cloud, self.decoder)
+        visible_anchors_mask = prefilter_voxel(camera_view, self.anchor_cloud, self.gaussian_type)
         decoded_output = self.decoder.forward_pass(
             anchor_cloud=self.anchor_cloud,
             visible_anchors_mask=visible_anchors_mask,
             camera=camera_view,
         )
+
+        gaussian_positions, normalized_rotations = prepare_gaussian_space_props(
+            anchor_cloud=self.anchor_cloud,
+            visible_anchors_mask=visible_anchors_mask,
+            negative_opacity_filter=decoded_output["negative_opacity_filter"],
+            rotations_pred=decoded_output["rotations"],
+        )
+
+        semantics_pred = None
+        if self.anchor_cloud.semantic_labels is not None and self.anchor_cloud.semantic_manager is not None:
+            semantics_pred = self.anchor_cloud.semantic_manager.instantiate_semantics(
+                semantic_labels=self.anchor_cloud.semantic_labels,
+                visible_anchors_mask=visible_anchors_mask,
+                negative_opacity_filter=decoded_output["negative_opacity_filter"],
+                gaussians_per_anchor=self.decoder.number_gaussians_per_anchor,
+            )
+
         rasterizer_output = render(
             viewpoint_camera=camera_view,
             decoded_output=decoded_output,
+            gaussian_positions=gaussian_positions,
+            normalized_rotations=normalized_rotations,
             bg_color=self.bg_color,
-            gs_attr=self.decoder.gs_attr,
-            render_mode=self.decoder.render_mode,
-            tile_size_2dgs=self.decoder.tile_size_2dgs,
-            semantics=decoded_output.get("semantics"),
+            gaussian_type=self.gaussian_type,
+            render_mode=self.render_mode,
+            tile_size_2dgs=self.tile_size_2dgs,
+            semantics=semantics_pred,
         )
-        rasterizer_output["rendered_2d_points"] = rasterizer_output.get("viewspace_points")
-        rasterizer_output["visible_mask"] = visible_anchors_mask
+        rasterizer_output["visible_anchors_mask"] = visible_anchors_mask
         rasterizer_output["negative_opacity_filter"] = decoded_output["negative_opacity_filter"]
         loss_engine = LossEngine(self.anchor_cloud.semantic_manager)
         losses = loss_engine.compute_total_losses(
@@ -82,14 +119,14 @@ class TrainingOrchestrator:
         self._clip_gradients()
         self.optimizer.step()
 
-        # Read the 2-D point gradients immediately after backward while the graph
-        # is still alive, then detach so we don't keep the full graph in memory.
-        viewspace_points = rasterizer_output["rendered_2d_points"]
-        if viewspace_points is not None and viewspace_points.grad is not None:
-            points_grad_detached = viewspace_points.grad.detach().clone()
+        # Read the 2D points gradients after backward 
+        # and detach so we don't keep the full graph in memory
+        rendered_2d_points = rasterizer_output["rendered_2d_points"]
+        if rendered_2d_points is not None and rendered_2d_points.grad is not None:
+            points_grad_detached = rendered_2d_points.grad.detach().clone()
         else:
             points_grad_detached = None
-
+        # densification
         if (
             iteration >= self.densifier_configs["desification_start"]
             and iteration <= self.densifier_configs["desification_end"]
@@ -105,6 +142,7 @@ class TrainingOrchestrator:
             if iteration % self.densifier_configs["densification_interval"] == 0:
                 self.densifier.growing_operation()
                 self.densifier.pruning_operation(opacity_threshold=self.densifier_configs.get("min_opacity", 0.005))
+                self.densifier.reset_state()
         else:
             self.densifier.reset_state()
             torch.cuda.empty_cache()
@@ -112,13 +150,13 @@ class TrainingOrchestrator:
         with torch.no_grad():
             psnr = self.compute_psnr(rasterizer_output, camera_view.original_image)
 
-        # Detach rendered image for visualisation/logging — frees the computation graph.
+        # Detach rendered image for visualisation
         rendered_image_detached = rasterizer_output["render"].detach()
         total_loss_value = losses["total"].item()
-        scalar_losses = {k: v.item() for k, v in losses.items()}
+        losses_copy = {k: v.item() for k, v in losses.items()}
 
         return {
-            "losses": scalar_losses,
+            "losses": losses_copy,
             "total_loss": total_loss_value,
             "psnr": psnr,
             "rendered_image": rendered_image_detached,
@@ -177,7 +215,6 @@ class TrainingOrchestrator:
             ):
                 self._save_checkpoint(step_output, iteration, camera_view)
 
-            # Explicitly release step output to free any remaining tensor references.
             del step_output
             torch.cuda.empty_cache()
 
@@ -221,5 +258,10 @@ class TrainingOrchestrator:
         self.CheckPointManager.save_anchor_cloud(
             path=os.path.join(checkpoint_dir, f"anchor_cloud_{iteration}.ply")
         )
-        self.CheckPointManager.save_decoder(path=checkpoint_dir)
+        self.CheckPointManager.save_decoder(
+            path=checkpoint_dir,
+            gaussian_type=self.gaussian_type,
+            render_mode=self.render_mode,
+            tile_size_2dgs=self.tile_size_2dgs,
+        )
         torch.save(self._state_snapshot(), os.path.join(checkpoint_dir, f"state_{iteration}.pth"))

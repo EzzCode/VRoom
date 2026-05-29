@@ -1,5 +1,3 @@
-"""Runtime helpers shared across VRoom."""
-
 from __future__ import annotations
 
 import os

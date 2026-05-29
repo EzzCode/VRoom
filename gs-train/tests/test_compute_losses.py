@@ -6,7 +6,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vroom_core.training.loss_engine import compute_losses
+from vroom_core.core.training.loss_engine import compute_losses
 
 
 class IdentityLabelEncoder:

@@ -1,16 +1,14 @@
 import torch
 import torch.nn as nn
 
-# Maps optimizer group name to AnchorCloud attribute name
-# density.py owns this mapping
-_GROUP_TO_FIELD = {
-    "anchor": "anchors_positions",
-    "offset": "gaussians_offsets",
-    "feature": "anchor_features",
-    "scaling": "anchors_log_scales",
-    "rotation": "anchors_rotations",
+# Optimizer group names
+_FIELD_GROUPS = {
+    "anchors_positions",
+    "gaussians_offsets",
+    "anchor_features",
+    "anchors_log_scales",
+    "anchors_rotations",
 }
-_FIELD_GROUPS = set(_GROUP_TO_FIELD)
 
 
 class DensifcationController:
@@ -79,12 +77,6 @@ class DensifcationController:
         2. Gaussain visits
         3. anchor visits
         4. anchor opacity
-
-        Note: opacity and points_grad cover only SELECTED gaussians
-        (N_selected = N_vis * K filtered by negative_opacity_filter). negative_opacity_filter
-        has shape [N_vis * K] and maps them back to the full visible set.
-        points_grad is the already-detached gradient tensor (or None) read
-        from viewspace_points.grad immediately after backward().
         """
         if self.gaussian_gradients_acc is None:
             self.reset_state()
@@ -94,21 +86,25 @@ class DensifcationController:
         K = self.num_gaussians_per_anchor
         device = visibility_mask.device
 
-        # accumulate the gradients every iteration and acc gaussian visits
-        # global indices of all visible gaussians in the full [N_all * K] accumulator
-        visibility_mask_for_gaussians = visibility_mask.repeat_interleave(K)
-        vis_gaussian_global_indices = visibility_mask_for_gaussians.nonzero(
-            as_tuple=True
-        )[0]  # [N_vis * K]
+        # accumulate the gradients every iteration and increment gaussian visits
 
-        # narrow to selected gaussians (decoder negative_opacity_filter filters N_vis*K -> N_selected)
-        selected_global_indices = vis_gaussian_global_indices[negative_opacity_filter]  # [N_selected]
+        # get indices of all visible gaussians
+        visibility_mask_for_gaussians = visibility_mask.repeat_interleave(K)
+        vis_gaussian_indices = visibility_mask_for_gaussians.nonzero(
+            as_tuple=True
+        )[0]  # [N_vis * K] where N_vis is the number of visible gaussians
+
+        # select only gaussians that have postive opacity
+        # the reason i apply the negative_opacity_filter first before the opacity mask
+        # is to match the dim of vis_gaussian_indices(N_vis*K) to opacity(N_selected)
+        selected_indices = vis_gaussian_indices[negative_opacity_filter]  # [N_selected]
 
         opacity_mask = opacity.view(-1) > 0.5  # [N_selected]
-        active_global_indices = selected_global_indices[opacity_mask]
+        active_indices = selected_indices[opacity_mask] # [N_active]
 
         if points_grad is None:
             return
+        # transform gradients from NDC space into pixel space
         gaussians_gradients = points_grad.reshape(
             -1, 2
         )  # already detached and cloned in train_step
@@ -118,31 +114,32 @@ class DensifcationController:
         gaussians_gradients *= scaler
         grad_magnitude = torch.norm(gaussians_gradients, dim=-1)  # [N_selected]
 
-        self.gaussian_gradients_acc[active_global_indices] += grad_magnitude[
+        self.gaussian_gradients_acc[active_indices] += grad_magnitude[
             opacity_mask
         ]
-        self.gaussian_visits[active_global_indices] += (
+        self.gaussian_visits[active_indices] += (
             1
         )  # increment the visits for the selected gaussians
 
         # accumulate anchor opacity
-        # scatter selected gaussian opacities back to their parent visible anchors
+        # create a lookup table for each gaussian to its visible parent anchor
         n_vis_anchors = int(visibility_mask.sum().item())
         vis_anchor_local_idx = torch.arange(
             n_vis_anchors, device=device
-        ).repeat_interleave(K)  # [N_vis * K]
+        ).repeat_interleave(K)  # [N_vis * K] local indices of visible anchors repeated for each gaussian
         selected_anchor_local_idx = vis_anchor_local_idx[negative_opacity_filter]  # [N_selected]
-
+        # now that we have look up table for each gaussian to its parents index
+        # we can calculate average opacity per vis anchor
         opacity_flat = opacity.view(-1).detach().clamp(min=0)  # [N_selected]
         opacity_sum = torch.zeros(n_vis_anchors, device=device)
         opacity_count = torch.zeros(n_vis_anchors, device=device)
-        opacity_sum.scatter_add_(0, selected_anchor_local_idx, opacity_flat)
+        opacity_sum.scatter_add_(0, selected_anchor_local_idx, opacity_flat) # add the opacity of each gaussian to its bucket (anchor)
         opacity_count.scatter_add_(
             0, selected_anchor_local_idx, torch.ones_like(opacity_flat)
-        )
+        ) # add 1 to each bucket per gaussian
         anchors_opacity_avg = opacity_sum / opacity_count.clamp(min=1)
 
-        self.anchor_opacity_acc[visibility_mask] += anchors_opacity_avg
+        self.anchor_opacity_acc[visibility_mask] += anchors_opacity_avg # map the local opacities to the global accumlator uisng the visibility_mask
         self.anchor_visits[visibility_mask] += 1  # increment visits for anchors
 
     def growing_operation(self):
@@ -190,6 +187,7 @@ class DensifcationController:
             above_threshold_mask = average_gradient_per_voxel > current_threshold
 
             # apply random elimination to avoid too many anchors spawining
+            # priorty is given for higher thresholds/levels
             if level == 1:  # 50% survive
                 ratio_of_voxels_to_keep = 0.5
                 random_mask = (
@@ -210,7 +208,7 @@ class DensifcationController:
                     torch.rand_like(average_gradient_per_voxel)
                     < ratio_of_voxels_to_keep
                 ).bool()
-                above_threshold_mask = above_threshold_mask & random_mask
+                above_threshold_mask = above_threshold_mask & random_mask # apply the random mask and threshold mask
             if not above_threshold_mask.any():
                 continue
 
@@ -244,7 +242,7 @@ class DensifcationController:
 
             n_new = anchors_to_add.shape[0]
 
-            # set the anchors to added features to be the average for features of the contributing gaussians
+            # set the anchors to be added features to be the average for features of the contributing gaussians
             # and will be placed at the center of the voxel
             parent_to_gaussian_features = torch.repeat_interleave(
                 self.anchor_cloud.anchor_features.detach(),
@@ -274,27 +272,29 @@ class DensifcationController:
             n_voxels = unique_quantized_gaussians.shape[0]
             voxel_to_new_anchor = torch.full(
                 (n_voxels,), -1, dtype=torch.long, device=device
-            )
+            ) # 1 tensor filled with -1 for length of voxels
             voxel_to_new_anchor[anchors_to_add_indices] = torch.arange(
                 n_new, device=device
-            ) # sets an id for voxels that we will add a new anchor to,else its a -1
+            ) # sets an id to the correct bucket for voxels that we will add a new anchor to,else its a -1
 
             # For each Gaussian, which slot does it belong to? if it maps to -1 its none
+            # inverse_gaussian_voxel_indices: knows gaussian -> voxel
+            # voxel_to_new_anchor: knows voxel -> new anchor id
             gauss_to_slot = voxel_to_new_anchor[
                 inverse_gaussian_voxel_indices
-            ]
+            ] # gauss_to_slot now knows: gaussian -> new anchor id , size is number of gaussians
             contributes = gauss_to_slot >= 0
-            contributing_slot = gauss_to_slot[contributes]
+            contributing_slot = gauss_to_slot[contributes] # which anchor are we computing feature/label for
 
             # Average features
             contributing_features = parent_to_gaussian_features[
                 contributes
-            ]
+            ] # size is number of gaussians
             feature_sum = torch.zeros(n_new, feat_dim, device=device)
             feature_count = torch.zeros(n_new, device=device)
             feature_sum.scatter_add_(
                 0,
-                contributing_slot.unsqueeze(1).expand(-1, feat_dim),
+                contributing_slot.unsqueeze(1).expand(-1, feat_dim), # anchor ids are the buckets
                 contributing_features,
             )
             feature_count.scatter_add_(
@@ -308,11 +308,12 @@ class DensifcationController:
             if parent_to_gaussian_labels is not None:
                 contributing_labels = parent_to_gaussian_labels[
                     contributes
-                ].long()
-                n_classes = int(contributing_labels.max().item()) + 1
+                ].long() # size is number of gaussians
+                n_classes = int(contributing_labels.max().item()) + 1 # beacuase indices start from zero
+                # flatten contributing_labels for scatter add
                 flat_idx = (
                     contributing_slot * n_classes + contributing_labels
-                )
+                ) # slot * number of classes + label , Ex: slot:0 * number of classes:3 + label:1 = bucket:1 -> (row * width) + col
                 class_counts = torch.zeros(n_new * n_classes, device=device)
                 class_counts.scatter_add_(
                     0, flat_idx, torch.ones(contributing_slot.shape[0], device=device)
@@ -339,11 +340,11 @@ class DensifcationController:
             )
 
             extension_dict = {
-                "anchor": anchor_positions,
-                "offset": anchor_offsets,
-                "feature": anchor_feature,
-                "scaling": anchor_log_scales,
-                "rotation": anchor_rotation,
+                "anchors_positions": anchor_positions,
+                "gaussians_offsets": anchor_offsets,
+                "anchor_features": anchor_feature,
+                "anchors_log_scales": anchor_log_scales,
+                "anchors_rotations": anchor_rotation,
             }
 
             # update optimizer and the anchor cloud data
@@ -373,8 +374,11 @@ class DensifcationController:
             return
 
         prune_them_anchors_mask = (
-            self.anchor_opacity_acc / self.anchor_visits.clamp(min=1)
-            < opacity_threshold
+            (self.anchor_visits > 0)
+            & (
+                self.anchor_opacity_acc / self.anchor_visits.clamp(min=1)
+                < opacity_threshold
+            )
         )
 
         if not prune_them_anchors_mask.any():
@@ -385,28 +389,28 @@ class DensifcationController:
         # update optimizer and the anchor cloud data
         self._prune_optimizer(keep_mask)
 
-        # update non-parameter data
+        # update semantic labels
         if self.anchor_cloud.semantic_labels is not None:
             self.anchor_cloud.semantic_labels = self.anchor_cloud.semantic_labels[
                 keep_mask
             ]
-
+        # update vis mask
         self.anchor_cloud.visibility_mask = torch.ones(
             self.anchor_cloud.anchors_positions.shape[0],
             dtype=torch.bool,
             device=self.anchor_cloud.anchors_positions.device,
         )
 
-        # mask accumulators to surviving anchors (preserve existing stats)
+        # trim accumulators to surviving anchors
         self._prune_state(keep_mask)
 
     def _extend_optimizer(self, extension_dict):
         """
-        For each anchor-cloud optimizer group:
-          1. Extend Adam state buffers (exp_avg, exp_avg_sq) with zeros for new entries.
-          2. Concatenate old param with extension to form a new Parameter.
-          3. Replace group["params"][0] with the new Parameter.
-          4. Mirror the new Parameter onto the AnchorCloud attribute.
+        For each anchor cloud optimizer group:
+          1. Extend Adam state buffers (exp_avg, exp_avg_sq) with zeros for new entries
+          2. Concatenate old param with extension to form a new Parameter
+          3. Replace group["params"][0] with the new Parameter
+          4. Mirror the new Parameter onto the AnchorCloud attribute
         """
         for group in self.optimizer.param_groups:
             name = group.get("name")
@@ -422,20 +426,20 @@ class DensifcationController:
 
             new_param = nn.Parameter(
                 torch.cat([old_param.detach(), ext], dim=0),
-                requires_grad=(name != "rotation"),
+                requires_grad=(name != "anchors_rotations"),
             )
             group["params"][0] = new_param
             if state:
                 self.optimizer.state[new_param] = state
 
-            setattr(self.anchor_cloud, _GROUP_TO_FIELD[name], new_param)
+            setattr(self.anchor_cloud, name, new_param)
 
     def _prune_optimizer(self, keep_mask):
         """
-        For each anchor-cloud optimizer group:
-          1. Slice Adam state buffers to surviving rows.
-          2. Create new Parameter from surviving rows.
-          3. Replace group["params"][0] and the AnchorCloud attribute.
+        For each anchor cloud optimizer group:
+          1. Slice Adam state buffers to surviving rows
+          2. Create new Parameter from surviving rows
+          3. Replace group["params"][0] and the AnchorCloud attribute
         """
         for group in self.optimizer.param_groups:
             name = group.get("name")
@@ -450,13 +454,13 @@ class DensifcationController:
 
             new_param = nn.Parameter(
                 old_param[keep_mask].detach().clone(),
-                requires_grad=(name != "rotation"),
+                requires_grad=(name != "anchors_rotations"),
             )
             group["params"][0] = new_param
             if state:
                 self.optimizer.state[new_param] = state
 
-            setattr(self.anchor_cloud, _GROUP_TO_FIELD[name], new_param)
+            setattr(self.anchor_cloud, name, new_param)
 
     def _quantize(self, quantization_size, gaussian_gradients):
         """
@@ -475,7 +479,7 @@ class DensifcationController:
             quantized_gaussians, dim=0, return_inverse=True
         )
 
-        # average gradient per voxel via scatter_add
+        # average gradient per voxel with scatter_add
         n_voxels = unique_quantized_gaussians.shape[0]
         average_gradient_per_voxel = torch.zeros(
             n_voxels, dtype=gaussian_gradients.dtype, device=gaussian_gradients.device

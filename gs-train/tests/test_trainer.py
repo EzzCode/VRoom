@@ -11,12 +11,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vroom_core.training.orchestration import TrainingOrchestrator
-from vroom_core.training.optimizer import Optimizer
-from vroom_core.models.anchor_field import AnchorCloud
-from vroom_core.models.decoder import GaussianDecoder
-from vroom_core.models.gaussian_model import GaussianModel
-from vroom_core.models.semantics import SemanticCodec
+from vroom_core.core.training.orchestration import TrainingOrchestrator
+from vroom_core.utilities.training.optimizer import Optimizer
+from vroom_core.core.models.anchor_field import AnchorCloud
+from vroom_core.core.models.decoder import GaussianDecoder
+from vroom_core.utilities.models.gaussian_model import GaussianModel
+from vroom_core.core.models.semantics import SemanticCodec
 
 import pytest
 
@@ -61,29 +61,29 @@ class MockScene:
 def _make_opt_args(**overrides):
     """Build a minimal _OptArgs-compatible namespace for Optimizer.setup()."""
     defaults = dict(
-        position_lr_init=0.0,
-        position_lr_final=0.0,
-        position_lr_delay_mult=0.01,
-        position_lr_max_steps=30_000,
-        offset_lr_init=0.01,
-        offset_lr_final=0.0001,
-        offset_lr_delay_mult=0.01,
-        offset_lr_max_steps=30_000,
-        feature_lr=0.0075,
-        scaling_lr=0.007,
-        rotation_lr=0.002,
-        mlp_opacity_lr_init=0.002,
-        mlp_opacity_lr_final=0.00002,
-        mlp_opacity_lr_delay_mult=0.01,
-        mlp_opacity_lr_max_steps=30_000,
-        mlp_cov_lr_init=0.004,
-        mlp_cov_lr_final=0.004,
-        mlp_cov_lr_delay_mult=0.01,
-        mlp_cov_lr_max_steps=30_000,
-        mlp_color_lr_init=0.008,
-        mlp_color_lr_final=0.00005,
-        mlp_color_lr_delay_mult=0.01,
-        mlp_color_lr_max_steps=30_000,
+        anchor_pos_lr_init=0.0,
+        anchor_pos_lr_final=0.0,
+        anchor_pos_lr_delay_mult=0.01,
+        anchor_pos_lr_max_steps=30_000,
+        gaussian_offset_lr_init=0.01,
+        gaussian_offset_lr_final=0.0001,
+        gaussian_offset_lr_delay_mult=0.01,
+        gaussian_offset_lr_max_steps=30_000,
+        anchor_feat_lr=0.0075,
+        anchor_scale_lr=0.007,
+        anchor_rot_lr=0.002,
+        decoder_opacity_lr_init=0.002,
+        decoder_opacity_lr_final=0.00002,
+        decoder_opacity_lr_delay_mult=0.01,
+        decoder_opacity_lr_max_steps=30_000,
+        decoder_cov_lr_init=0.004,
+        decoder_cov_lr_final=0.004,
+        decoder_cov_lr_delay_mult=0.01,
+        decoder_cov_lr_max_steps=30_000,
+        decoder_color_lr_init=0.008,
+        decoder_color_lr_final=0.00005,
+        decoder_color_lr_delay_mult=0.01,
+        decoder_color_lr_max_steps=30_000,
         appearance_lr_init=0.05,
         appearance_lr_final=0.0005,
         appearance_lr_delay_mult=0.01,
