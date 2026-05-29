@@ -53,8 +53,8 @@ class LossEngine:
         return F.cross_entropy(model_guess, mask_label_idx, ignore_index=0, reduction="mean")
 
     def calc_volumetric_loss(self, scales, volume_lambda):
-        volumes = torch.prod(scales, dim=1) # multiply the x, y and z scales to get the volumes of each gaussian
-        return torch.sum(volumes) * volume_lambda # sum them up and multiply by the lambda
+        volumes = torch.prod(scales, dim=1)  # multiply the x, y and z scales to get the volumes of each gaussian
+        return torch.mean(volumes) * volume_lambda
 
     def compute_total_losses(self, render_pkg, viewpoint_cam, anchor_cloud, opt, iteration):
         render = render_pkg["render"]

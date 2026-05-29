@@ -5,7 +5,6 @@ from diff_surfel_rasterization import rasterization_2dgs_inria_wrapper
 
 
 def render(viewpoint_camera, decoded_output, gaussian_positions, normalized_rotations, bg_color, gaussian_type="3D", render_mode="RGB+ED", tile_size_2dgs=8, semantics=None):
-    """Rasterize visible neural Gaussians using gsplat."""
     xyz = gaussian_positions
     color = decoded_output["color"]
     opacity = decoded_output["opacity"]
