@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 from gstrain.gaussian_renderer.render import prefilter_voxel as _prefilter
 from gstrain.gaussian_renderer.render import render as _gstrain_render
-from gstrain.vroom_core.models.facade import GaussianModel
-from gstrain.vroom_core.training.loss_engine import ssim_loss as _ssim_loss
+from gstrain.vroom_core.core.model.facade import GaussianModel
+from gstrain.vroom_core.core.training.loss_engine import ssim_loss as _ssim_loss
 
 
 # ── Tensor helpers ─────────────────────────────────────────────────────────────────────────

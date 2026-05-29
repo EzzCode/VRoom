@@ -35,7 +35,7 @@ model_params: {
     add_mask: False,
     add_depth: False,
     llffhold: 8,
-    source_path: datasets/3dovs
+    source_path: ../datasets/3dovs/bed
 }
 
 # Pipeline Parameters
