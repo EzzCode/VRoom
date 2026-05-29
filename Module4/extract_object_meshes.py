@@ -12,7 +12,7 @@ from export_ply import export_ply_binary
 from generate_sdf import fuse_tsdf
 from marching_cubes import run_marching_cubes
 from utils import remove_small_components, compute_depth_trunc, unproject_to_3d
-from ply_to_glb import build_glb_from_mesh
+from ply_to_glb import save_glb
 
 # 1. Parse arguments
 
@@ -48,7 +48,7 @@ parser.add_argument("--depth_margin", type=float, default=1.1,
 parser.add_argument("--depth_percentile", type=float, default=99.0,
                      help="Percentile of valid object depth values used to compute" \
                      " depth truncation (default: 99.0).")
-parser.add_argument("--label",        type=int,   default=None,
+parser.add_argument("--label", type=int,   default=None,
                      help="Process only this label ID (default: None (all labels))")
 args = parser.parse_args()
 
@@ -306,13 +306,8 @@ for label_id in sorted_labels:
 
     # 5.12: Export mesh to GLB file (for mobile AR)
     glb_path = os.path.join(output_glb_dir, f"object_{label_id:03d}.glb")
-    try:
-        glb_bytes = build_glb_from_mesh(verts_arr, np.array(triangles), vertex_colors)
-        with open(glb_path, "wb") as glb_f:
-            glb_f.write(glb_bytes)
-        print(f"Saved {glb_path} ({len(glb_bytes) / 1024:.1f} KB)")
-    except Exception as glb_err:
-        print(f"Warning: GLB export failed for label {label_id}: {glb_err}")
+    save_glb(verts_arr, np.array(triangles), vertex_colors, glb_path)
+    print("Saved", glb_path)
 
 total_end_time = time.time()
 total_time = total_end_time - start_time

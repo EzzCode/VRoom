@@ -311,6 +311,14 @@ def _parse_ply(path: str | Path):
 # Public convenience wrapper
 # ---------------------------------------------------------------------------
 
+def save_glb(vertices: np.ndarray, triangles: np.ndarray, vertex_colors: np.ndarray,
+             output_path: str) -> None:
+    """Build a GLB from mesh arrays and write it to *output_path*."""
+    glb_bytes = build_glb_from_mesh(vertices, triangles, vertex_colors)
+    with open(output_path, "wb") as f:
+        f.write(glb_bytes)
+
+
 def ply_to_glb(ply_path: str | Path, glb_path: str | Path) -> None:
     """Convert a single Module4 binary PLY file to a GLB file."""
     ply_path = Path(ply_path)
