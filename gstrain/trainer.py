@@ -101,7 +101,7 @@ def main():
 
     model_kwargs = model_params.get("model_config", {}).get("kwargs", {})
     anchor_cloud = AnchorCloud(
-        voxel_size=model_kwargs.get("voxel_size", -1.0),
+        voxel_size=model_kwargs.get("voxel_size", None),
         gaussians_per_anchor=model_kwargs.get("gs_per_anchor", 5),
         feature_dim=model_kwargs.get("feat_dim", 32),
     )

@@ -3,8 +3,12 @@ import torch.nn.functional as F
 
 class SemanticsManager:
     def __init__(self, label_ids):
-        self.num_classes = len(label_ids)
-        self.label_ids, _ = torch.sort(label_ids.view(-1))
+        # Ensure 0 (background/ignore class) is always in label_ids to map unseen labels safely
+        unique_labels = label_ids.view(-1)
+        if 0 not in unique_labels:
+            unique_labels = torch.cat([torch.tensor([0], dtype=unique_labels.dtype, device=unique_labels.device), unique_labels])
+        self.label_ids, _ = torch.sort(unique_labels)
+        self.num_classes = len(self.label_ids)
 
     def build_lookup_table(self, labels):
         """
@@ -12,6 +16,16 @@ class SemanticsManager:
         """
         self.label_ids = self.label_ids.to(labels.device)
         labels_indices = torch.bucketize(labels, self.label_ids)
+        
+        # use clamping to make sure the incoming label is within the existing labels
+        # if it isnt we clamp it
+        clamped_indices = torch.clamp(labels_indices, 0, self.label_ids.size(0) - 1)
+        # after clamping we check if this label is truly in the correct index
+        # if it isnt its false
+        mask_match = (self.label_ids[clamped_indices] == labels)
+        # set unknown labels to zero
+        labels_indices = torch.where(mask_match, labels_indices, torch.zeros_like(labels_indices))
+        
         return labels_indices
 
     def one_hot_encode(self, labels_indices):

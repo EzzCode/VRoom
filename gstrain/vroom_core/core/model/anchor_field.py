@@ -94,7 +94,8 @@ class AnchorCloud(nn.Module):
         Intialize the anchor cloud from the sparse point cloud by quantization
         """
 
-        self.voxel_size = self._estimate_voxel_size(point_cloud)
+        if self.voxel_size is None:
+            self.voxel_size = self._estimate_voxel_size(point_cloud)
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
