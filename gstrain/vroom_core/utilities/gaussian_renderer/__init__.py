@@ -1,1 +1,1 @@
-from .render import prefilter_voxel, render
+from .render import apply_frustum_culling, render
