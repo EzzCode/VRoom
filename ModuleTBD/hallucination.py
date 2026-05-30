@@ -188,8 +188,8 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *, scores, output_di
                 p.unlink()
 
     if not scores or not scores.get("top_k"):
-        logger.warning("No top_k scores for input image.")
-        raise RuntimeError("scores dict has no top_k entries")
+        logger.warning("scores object has no top_k")
+        raise RuntimeError("scores object has no top_k")
 
     top = scores["top_k"][0]
     rgba_path = Path(top["out_rgba_path"])
@@ -301,7 +301,7 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *, scores, output_di
     logger.info("Novel-view synthesis: kept %d / %d views (threshold IoU=%.2f).",
                 n_kept, len(views), iou_threshold)
 
-    manifest = {
+    result = {
         "backend": "sv3d",
         "n_views": len(views),
         "n_kept": n_kept,
@@ -327,7 +327,7 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *, scores, output_di
 
     index_path = output_dir / "hallucination_index.json"
     with open(index_path, "w") as f:
-        json.dump(manifest, f, indent=2)
+        json.dump(result, f, indent=2)
 
     logger.info("Hallucination manifest: %s", index_path)
-    return manifest
+    return result

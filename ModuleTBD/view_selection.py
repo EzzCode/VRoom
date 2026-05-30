@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 WEIGHTS = {
     "front":  0.35, # prefer front-facing views
-    "cover":  0.20, # how big the object is in frame. max is COVER_TARGET
+    "cover":  0.20, # how big the object is in frame max is COVER_TARGET
     "sharp":  0.20, # rank-normalized masked Laplacian variance
     "expose": 0.10, 
     "occl":   0.15, # higher fraction of trained model pixels kept in hybrid mask
@@ -46,13 +46,13 @@ def extract_frame(scope, gaussians, pipe_config, cam_index, images_dir,
     alpha_thresh = 0.4
     min_pixels = 64
 
-    cam = scope.cameras[cam_index]
-    image_name = cam["image_name"]
+    camera = scope.cameras[cam_index]
+    image_name = camera["image_name"]
     images_path = find_image(images_dir, image_name)
 
     if images_path is None:
-        logger.warning("No image for cam %d (%s) in %s", cam_index, image_name, images_dir)
-        raise FileNotFoundError(f"No image for cam {cam_index} ({image_name}) in {images_dir}")
+        logger.warning("No image for camera index %d image (%s) in %s", cam_index, image_name, images_dir)
+        raise FileNotFoundError(f"No image for camera {cam_index} ({image_name}) in {images_dir}")
 
     img = cv2.imread(str(images_path), cv2.IMREAD_COLOR)
     if img is None:
@@ -60,11 +60,11 @@ def extract_frame(scope, gaussians, pipe_config, cam_index, images_dir,
         raise IOError(f"Failed to read {images_path}")
 
     height, width = img.shape[:2]
-    img = img[:, :, ::-1]  # BGR → RGB
+    img = img[:, :, ::-1]  # BGR to RGB
 
-    v_camera = make_camera(cam["R"], cam["T"], cam["K"], cam["width"], cam["height"])
-    alpha = render_rgba(gaussians, v_camera, pipe_config,
-                        object_label_id=scope.object_label_id)["alpha"].detach().cpu().numpy()
+    v_camera = make_camera(camera["R"], camera["T"], camera["K"], camera["width"], camera["height"])
+    alpha = render_rgba(gaussians, v_camera, pipe_config, object_label_id=scope.object_label_id)
+    alpha = alpha["alpha"].detach().cpu().numpy()
 
     mask_model = (alpha[0] if alpha.ndim == 3 else alpha) > alpha_thresh
     if mask_model.shape != (height, width):
@@ -84,7 +84,7 @@ def extract_frame(scope, gaussians, pipe_config, cam_index, images_dir,
             used_real = True
 
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_hybrid.astype(np.uint8), connectivity=4)
-    if n_labels <= 1:
+    if n_labels < 0:
         mask_hybrid = np.zeros_like(mask_hybrid, dtype=bool)
     areas = stats[1:, cv2.CC_STAT_AREA]
     k = int(np.argmax(areas)) + 1
@@ -119,8 +119,8 @@ def extract_frame(scope, gaussians, pipe_config, cam_index, images_dir,
         n_pixels_hybrid=n_pixels_hybrid,
         bbox_xywh=bbox,
         fg_fraction=n_pixels_hybrid / (height * width),
-        azimuth_deg=float(cam.get("azimuth_deg", float("nan"))),
-        elevation_deg=float(cam.get("elevation_deg", float("nan"))),
+        azimuth_deg=float(camera.get("azimuth_deg", float("nan"))),
+        elevation_deg=float(camera.get("elevation_deg", float("nan"))),
         out_rgba_path=str(rgba_path),
         out_mask_path=str(mask_path),
         used_real_mask=used_real,
@@ -128,14 +128,15 @@ def extract_frame(scope, gaussians, pipe_config, cam_index, images_dir,
 
 
 def run_extraction(scope, gaussians, pipe_config, images_dir, output_dir,
-                   id_map_dir=None, module1_obj_id=None, auto_resolve=True):
+                   id_map_dir=None, module1_obj_id=None):
+ 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     id_map_dir = Path(id_map_dir) if id_map_dir else None
 
-    if id_map_dir is not None and module1_obj_id is None and auto_resolve:
-        module1_obj_id = auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir)
     if id_map_dir is not None and module1_obj_id is None:
+        module1_obj_id = auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir)
+    else:
         logger.warning("Could not resolve Module1 id — falling back to ObjectGS mask only.")
 
     views = []
@@ -164,7 +165,6 @@ def run_extraction(scope, gaussians, pipe_config, images_dir, output_dir,
                 len(views), len(scope.visible_cam_indices), n_real)
     return manifest
 
-# ── Frame scoring ──────────────────────────────────────────────────────────────
 
 def _front_score(az_deg, el_deg):
     if not math.isfinite(az_deg) or not math.isfinite(el_deg):
@@ -205,8 +205,6 @@ def _rank_normalize(values):
 
 
 
-
-
 def _exposure_score(rgb, mask):
     if mask.sum() < 32:
         return 0.0
@@ -216,12 +214,12 @@ def _exposure_score(rgb, mask):
                       * (1.0 - min(1.0, float(np.mean(pix < 0.02)) * 5.0)))
 
 
-def _occl_score(n_hybrid, n_objgs):
+def _occlusion_score(n_hybrid, n_objgs):
     return float(min(1.0, n_hybrid / max(n_objgs, 1)))
 
 
 
-def score_frames(extraction_index_path, top_k=5):
+def run_scoring(extraction_index_path, top_k=5):
     weights = WEIGHTS
     with open(extraction_index_path) as f:
         frames = json.load(f)["frames"]
@@ -253,7 +251,7 @@ def score_frames(extraction_index_path, top_k=5):
             "cover":  _cover_score(float(fr["fg_fraction"])),
             "sharp":  float(sharp),
             "expose": _exposure_score(img, mask),
-            "occl":   _occl_score(int(fr["n_pixels_hybrid"]), int(fr["n_pixels_objgs"])),
+            "occl":   _occlusion_score(int(fr["n_pixels_hybrid"]), int(fr["n_pixels_objgs"])),
         }
         results.append({
             "cam_index": fr["cam_index"],
@@ -272,17 +270,14 @@ def score_frames(extraction_index_path, top_k=5):
     results.sort(key=lambda x: -x["score"])
     for i, r in enumerate(results):
         r["rank"] = i + 1
-
-    return {
+    
+    result = {
         "weights": weights,
         "n_frames": len(results),
         "ranking": results,
         "top_k": results[:top_k],
     }
-
-
-def run_scoring(extraction_index_path, top_k=5):
-    result = score_frames(extraction_index_path, top_k=top_k)
+    
     if result["top_k"]:
         best = result["top_k"][0]
         logger.info("Best frame: camera=%d azimuth degree=%.1f score=%.3f components=%s",
