@@ -218,10 +218,10 @@ def postprocess_masks(
     frame_bgr: np.ndarray,
     min_mask_area: int = 120,
     max_area_ratio: float = 0.50,
-    border_touch_threshold: float = 0.35,
+    border_touch_threshold: float = 0.45,
     merge_thresh: float = 0.78,
     proximity_gap: int = 20,
-    proximity_color_thresh: float = 0.32,
+    proximity_color_thresh: float = 0.48,
     split_components: bool = True,
 ) -> Tuple[List[np.ndarray], Dict[str, int]]:
     """Clean up raw SAM3 masks using rule-based spatial processing.
@@ -245,17 +245,25 @@ def postprocess_masks(
         max_area_ratio=max_area_ratio,
         border_touch_threshold=border_touch_threshold,
     )
+    logger.debug(f"After background filter: {len(raw_masks)} -> {len(masks)} masks")
+
     masks = merge_overlapping_masks(masks, thresh=merge_thresh)
+    logger.debug(f"After overlap merge: {len(masks)} masks")
+
     masks = merge_by_proximity(
         masks,
         frame_bgr=frame_bgr,
         gap_px=proximity_gap,
         color_thresh=proximity_color_thresh,
     )
+    logger.debug(f"After proximity merge: {len(masks)} masks")
+
     if split_components:
         masks = split_disconnected(masks, min_component_area=min_mask_area)
+        logger.debug(f"After component split: {len(masks)} masks")
 
     masks = [m.astype(bool) for m in masks if int(m.sum()) >= min_mask_area]
+    logger.debug(f"After area filter (>={min_mask_area}px): {len(masks)} masks")
     return masks, {"raw_mask_count": len(raw_masks), "final_mask_count": len(masks)}
 
 
@@ -392,7 +400,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--text_prompts",
         nargs="+",
-        default=["red cup"],
+        default=["mug"],
         help="Open-vocabulary text prompts",
     )
     parser.add_argument(
@@ -410,8 +418,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--border_touch_threshold",
         type=float,
-        default=0.35,
-        help="Drop masks with high border-touch ratio",
+        default=0.45,
+        help="Drop masks with high border-touch ratio (relaxed to 0.45 for objects near edges)",
     )
     parser.add_argument(
         "--merge_thresh",
@@ -428,8 +436,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--proximity_color_thresh",
         type=float,
-        default=0.32,
-        help="HSV distance threshold for proximity merge",
+        default=0.48,
+        help="HSV distance threshold for proximity merge (relaxed to 0.48 for dark/highlighted objects)",
     )
     parser.add_argument(
         "--no_split_disconnected",

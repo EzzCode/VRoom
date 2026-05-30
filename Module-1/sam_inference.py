@@ -60,7 +60,7 @@ class SAM3TextSegmenter:
 
         return SAM3SemanticPredictor(
             overrides=dict(
-                conf=0.25,
+                conf=0.15,  # Lowered from 0.25 – dark/low-contrast objects (e.g. black mug) score lower
                 task="segment",
                 mode="predict",
                 model=self.checkpoint,
