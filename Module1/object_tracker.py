@@ -523,14 +523,14 @@ def match_with_consensus(
 		# Get the row index for the chosen track
 		chosen_row = row_by_tid[chosen_tid]
 		chosen_cost = float(cost_matrix[chosen_row, c])
-		proposals.append((chosen_tid, chosen_row, c, chosen_vote, chosen_cost))
+		proposals.append((chosen_row, c, chosen_vote, chosen_cost))
 
 	# Step 3: Accept pairs by best vote, lowest cost, no duplicates to solve conflicts
 	used_rows = set()
 	used_cols = set()
 	accepted_pairs = []
-	# Sort proposals by vote (desc) then cost (asc) to prioritize better matches
-	for tid, r, c, vote_score, pair_cost in sorted(proposals, key=lambda x: (-x[3], x[4])):
+	# Sort proposals by descending vote (higher is better) and then ascending cost (lower is better)
+	for r, c, _, pair_cost in sorted(proposals, key=lambda x: (-x[2], x[3])):
 		if r in used_rows or c in used_cols:
 			continue
 		if pair_cost >= match_threshold:
@@ -792,20 +792,18 @@ def track_frame(
 
 	if not tracks and new_masks:
 		next_id = init_tracks(tracks, next_id, new_masks, curr_hsv, curr_gray)
-		state.update({"next_id": next_id, "prev_gray": curr_gray, "prev_bgr": frame_bgr.copy()})
+		state.update({"next_id": next_id, "prev_bgr": frame_bgr.copy()})
 		update_frame_history(state, tracks, consensus_window)
 		return {tid: data["mask"] for tid, data in tracks.items()}
 
 	if not new_masks:
 		if not tracks:
-			state["prev_gray"] = curr_gray
 			state["prev_bgr"] = frame_bgr.copy()
 			return {}
 		for tid in list(tracks.keys()):
 			tracks[tid]["lost"] += 1
 		state["tracks"] = prune_lost_tracks(tracks, state["graveyard"], patience)
 		state["next_id"] = next_id
-		state["prev_gray"] = curr_gray
 		state["prev_bgr"] = frame_bgr.copy()
 		update_frame_history(state, state["tracks"], consensus_window)
 		return {}
@@ -834,7 +832,6 @@ def track_frame(
 
 	state["tracks"] = prune_lost_tracks(tracks, state["graveyard"], patience)
 	state["next_id"] = next_id
-	state["prev_gray"] = curr_gray
 	state["prev_bgr"] = frame_bgr.copy()
 	update_frame_history(state, state["tracks"], consensus_window)
 	return output
@@ -894,7 +891,7 @@ def run_pipeline(args):
 	with open(meta_path, "w", encoding="utf-8") as f:
 		json.dump({"format": "png", "bit_depth": 16, "dtype": "uint16", "background_id": 0, "id_range": [0, int(np.iinfo(np.uint16).max)]}, f, indent=2)
 
-	state = {"tracks": {}, "next_id": 1, "prev_gray": None, "prev_bgr": None, "graveyard": {}, "frame_history": []}
+	state = {"tracks": {}, "next_id": 1, "prev_bgr": None, "graveyard": {}, "frame_history": []}
 	image_paths = sorted([p for p in input_dir.iterdir() if p.suffix.lower() in [".png", ".jpg", ".jpeg"]])
 	if not image_paths:
 		sys.exit(logger.error(f"No images found in {input_dir}"))
