@@ -242,17 +242,6 @@ class TrainingOrchestrator:
             rendered_image.device
         )  # two images have to be on the same device or torch will crash
 
-        # Guard against NaN/Inf produced by exploding gradients or bad scales
-        if not torch.isfinite(rendered_image).all():
-            self.logger.warning(
-                f"[iteration {iteration}] Rendered image contains NaN/Inf - "
-                "clamping for visualization. Check volumetric loss, scales, and gradients."
-            )
-            rendered_image = torch.nan_to_num(rendered_image, nan=0.0, posinf=1.0, neginf=0.0)
-
-        # Clamp both images to valid display range
-        rendered_image = rendered_image.clamp(0.0, 1.0)
-        real_image = real_image.clamp(0.0, 1.0)
 
         grid = torchvision.utils.make_grid([real_image, rendered_image], nrow=2)
         vis_dir = os.path.join(self.output_dir, "visualization")
@@ -266,7 +255,7 @@ class TrainingOrchestrator:
         checkpoints don't overwrite each other's MLP .pt files.
         """
         self.logger.info(f"Saving checkpoint at iteration {iteration}")
-        # Per iteration directory keeps
+        # Per iteration directory
         iter_dir = os.path.join(self.output_dir, "checkpoints", f"iter_{iteration}")
         os.makedirs(iter_dir, exist_ok=True)
         self.CheckPointManager.save_anchor_cloud(

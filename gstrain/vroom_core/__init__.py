@@ -1,5 +1,3 @@
-"""Greenfield VRoom runtime."""
-
 from .utilities.data_utils.camera_system import FrameRecord, RenderCamera
 from .utilities.data_utils.colmap_io import (
     quaternion_to_rotation,

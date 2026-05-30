@@ -1,4 +1,3 @@
-"Training loop entrypoint"
 from __future__ import annotations
 
 import logging

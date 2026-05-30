@@ -3,7 +3,7 @@ import torch.nn.functional as F
 
 class SemanticsManager:
     def __init__(self, label_ids):
-        # Ensure 0 (background/ignore class) is always in label_ids to map unseen labels safely
+        # Ensure 0 (which represents unknown or background) is always in label_ids for saftey
         unique_labels = label_ids.view(-1)
         if 0 not in unique_labels:
             unique_labels = torch.cat([torch.tensor([0], dtype=unique_labels.dtype, device=unique_labels.device), unique_labels])
