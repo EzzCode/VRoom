@@ -565,11 +565,42 @@ def match_with_consensus(
 		assigned_new.add(c)
 
 	# Step 5: Increment lost counter for unmatched tracks
-	for r in set(range(len(active_ids))) - {r for r, _ in accepted_pairs}:
+	matched_rows = {r for r, _ in accepted_pairs}
+	unmatched_rows = set(range(len(active_ids))) - matched_rows
+	for r in unmatched_rows:
 		tracks[active_ids[r]]["lost"] += 1
 
 	# Step 6: Try to re-identify unmatched detections from graveyard, or create new tracks
 	for c in set(range(len(new_feats))) - assigned_new:
+		best_row, best_cost = None, reid_threshold
+		for r in list(unmatched_rows):
+			tid = active_ids[r]
+			dist_color = cv.compareHist(tracks[tid]["hist"], new_feats[c]["hist"], cv.HISTCMP_BHATTACHARYYA)
+			dist_texture = cv.compareHist(tracks[tid]["lbp"], new_feats[c]["lbp"], cv.HISTCMP_BHATTACHARYYA)
+			track_bbox = tracks[tid].get("predicted_bbox", tracks[tid].get("bbox", [0, 0, 0, 0]))
+			dist_bbox = 1.0 - box_iou_xyxy(track_bbox, new_feats[c]["bbox"])
+			cost = 0.45 * dist_color + 0.35 * dist_texture + 0.20 * dist_bbox
+			if cost < best_cost:
+				best_row, best_cost = r, cost
+
+		if best_row is not None:
+			tid = active_ids[best_row]
+			tracks[tid]["hist"] = ema * new_feats[c]["hist"] + (1 - ema) * tracks[tid]["hist"]
+			tracks[tid]["lbp"] = ema * new_feats[c]["lbp"] + (1 - ema) * tracks[tid]["lbp"]
+			tracks[tid]["mask"] = new_feats[c]["mask"]
+			tracks[tid]["centroid"] = new_feats[c]["centroid"]
+			tracks[tid]["bbox"] = new_feats[c]["bbox"]
+			tracks[tid]["bbox_wh"] = (max(1.0, new_feats[c]["bbox"][2] - new_feats[c]["bbox"][0]), max(1.0, new_feats[c]["bbox"][3] - new_feats[c]["bbox"][1]))
+			if tracks[tid].get("kalman") is None:
+				tracks[tid]["kalman"] = create_kalman_filter(*new_feats[c]["centroid"])
+			measurement = np.array([[new_feats[c]["centroid"][0]], [new_feats[c]["centroid"][1]]], dtype=np.float32)
+			tracks[tid]["kalman"].correct(measurement)
+			tracks[tid]["lost"] = 0
+			current_output[tid] = new_feats[c]["mask"]
+			assigned_new.add(c)
+			unmatched_rows.remove(best_row)
+			continue
+
 		best_gid, best_cost = None, reid_threshold
 		for gid, gdata in graveyard.items():
 			# Compute appearance and bbox distance to graveyard tracks
