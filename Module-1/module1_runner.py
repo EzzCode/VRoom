@@ -112,7 +112,7 @@ def main():
         default="",
         help="Directory for Ultralytics checkpoints/cache",
     )
-    parser.add_argument("--text_prompts", nargs="+", default=["red cup"])
+    parser.add_argument("--text_prompts", nargs="+", default=["mug"])
     parser.add_argument("--min_mask_area", type=int, default=120)
     parser.add_argument("--max_area_ratio", type=float, default=0.50)
     parser.add_argument("--border_touch_threshold", type=float, default=0.35)
