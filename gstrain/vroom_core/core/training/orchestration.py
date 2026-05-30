@@ -3,7 +3,7 @@ import torch
 import torchvision
 from tqdm import tqdm
 from gstrain.vroom_core.core.model.density import DensifcationController
-from gstrain.vroom_core.utilities.gaussian_renderer.render import prefilter_voxel, render
+from gstrain.vroom_core.utilities.gaussian_renderer.render import apply_frustum_culling, render
 from gstrain.vroom_core.utilities.training.optimizer import Optimizer
 from gstrain.vroom_core.core.training.loss_engine import LossEngine
 from gstrain.vroom_core.utilities.utils.runtime import exponential_lr_schedule
@@ -69,7 +69,7 @@ class TrainingOrchestrator:
         self.optimizer.zero_grad()
         self.optimizer.step_learning_rate(iteration)
 
-        visible_anchors_mask = prefilter_voxel(camera_view, self.anchor_cloud, self.gaussian_type)
+        visible_anchors_mask = apply_frustum_culling(camera_view, self.anchor_cloud, self.gaussian_type)
         decoded_output = self.decoder.forward_pass(
             anchor_cloud=self.anchor_cloud,
             visible_anchors_mask=visible_anchors_mask,

@@ -118,7 +118,7 @@ def render(viewpoint_camera, decoded_output, gaussian_positions, normalized_rota
     return return_dict
 
 
-def prefilter_voxel(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
+def apply_frustum_culling(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
     """Project visible anchors and return a tightened visibility mask."""
     means = anchor_cloud.anchors_positions[anchor_cloud.visibility_mask]
     scales = torch.exp(anchor_cloud.anchors_log_scales[anchor_cloud.visibility_mask])[:, :3]
