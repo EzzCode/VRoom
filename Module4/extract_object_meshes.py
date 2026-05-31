@@ -1,4 +1,5 @@
 import argparse
+import gc
 import json
 import os
 import time
@@ -115,8 +116,8 @@ for i, cam in enumerate(cameras):
 
     depth_maps_raw.append(np.load(os.path.join(input_dir, "raw_depth", f"{i:05d}.npy")))
     rgba = np.array(Image.open(os.path.join(input_dir, "renders", f"{i:05d}.png")))
-    # Drop alpha channel and convert to [0,1] range
-    color_images_raw.append(rgba[:, :, :3].astype(np.float32) / 255.0)
+    # Drop alpha channel
+    color_images_raw.append(rgba[:, :, :3])
     semantic_maps.append(np.array(Image.open(os.path.join(input_dir, "semantic", f"{i:05d}.png"))))
 
     # Load intrinsics and extrinsics
@@ -293,10 +294,7 @@ for label_id in sorted_labels:
     print("After cleanup:", len(vertices), "vertices,", len(triangles), "triangles")
         
     # 5.10: Scale and translate vertices from grid coordinates back to world coordinates
-    verts_arr = np.array(vertices) * voxel_size + grid_min # vectorized scaling
-
-    # Turn the array of vertices back into a list of tuples to be used in export
-    # Example: if verts_arr[i] = [x, y, z], then scaled_vertices[i] = (x, y, z)
+    verts_arr = vertices * voxel_size + grid_min # vectorized scaling
     scaled_vertices = [tuple(v) for v in verts_arr]
 
     # 5.11: Export mesh to PLY file
@@ -306,8 +304,15 @@ for label_id in sorted_labels:
 
     # 5.12: Export mesh to GLB file (for mobile AR)
     glb_path = os.path.join(output_glb_dir, f"object_{label_id:03d}.glb")
-    save_glb(verts_arr, np.array(triangles), vertex_colors, glb_path)
+    save_glb(verts_arr, triangles, vertex_colors, glb_path)
     print("Saved", glb_path)
+
+    # 5.13: Clenaup
+    del masked_depths, masked_colors, active_intrinsics, active_extrinsics, all_world_pts
+    del fused_grid, fused_colors, obs_count
+    del vertices, triangles, vertex_colors, verts_arr, scaled_vertices
+    gc.collect()
+    torch.cuda.empty_cache()
 
 total_end_time = time.time()
 total_time = total_end_time - start_time

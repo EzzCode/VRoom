@@ -225,7 +225,8 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape,
         extrinsics_t = torch.from_numpy(extrinsics_list[i]).to(device=device, dtype=torch.float32)
         colors_t = None
         if color_images is not None:
-            colors_t = torch.from_numpy(color_images[i]).to(device=device, dtype=torch.float32)
+            # color_images[i] is uint8 (H,W,3); convert to float32 [0,1] on GPU
+            colors_t = torch.from_numpy(color_images[i]).to(device=device, dtype=torch.float32) / 255.0
         
         tsdf_i, color_i, weight_i = generate_tsdf_single_cam(
             depth_t, intrinsics_t, extrinsics_t,
@@ -237,6 +238,10 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape,
         obs_count += (weight_i > 0).to(torch.int32) # grid of observation counts
         if color_images is not None and color_i is not None:
             color_sum += color_i * weight_i.unsqueeze(-1)
+
+        # Cleanup
+        del depth_t, intrinsics_t, extrinsics_t, colors_t, tsdf_i, color_i, weight_i
+        torch.cuda.empty_cache()
 
     # 4. Average
     valid_mask = weight_sum > 0
@@ -250,11 +255,20 @@ def fuse_tsdf(depth_maps, intrinsics_list, extrinsics_list, grid_shape,
     print(f"Fusion complete. Corners observed by at least 1 camera: "
           f"{valid_mask.sum().item()} / {np.prod(grid_shape)}")
 
-    # 5. Move results back to CPU as NumPy arrays
+    # 5. Move results back to CPU as NumPy arrays, then free GPU tensors
     fused_tsdf_cpu = fused_tsdf.cpu().numpy()
     if fused_colors is not None:
         fused_colors_cpu = fused_colors.cpu().numpy()
     else:
         fused_colors_cpu = None
     obs_count_cpu = obs_count.cpu().numpy()
+
+    del tsdf_sum, weight_sum, obs_count
+    if color_sum is not None:
+        del color_sum
+    del fused_tsdf, fused_colors, valid_mask
+    del precomputed_wph_t, world_points, ones, grid_x, grid_y, grid_z
+    del coords_x, coords_y, coords_z
+    torch.cuda.empty_cache()
+
     return fused_tsdf_cpu, fused_colors_cpu, obs_count_cpu
