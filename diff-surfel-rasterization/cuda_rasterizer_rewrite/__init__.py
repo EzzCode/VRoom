@@ -49,6 +49,7 @@ class _RasterizerFirstPass(torch.autograd.Function):
     """
 
     @staticmethod
+    @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32) # Ensure receieved inputs are float32
     def forward(
         ctx,
         points_world_space,
@@ -128,6 +129,7 @@ class _RasterizerFirstPass(torch.autograd.Function):
         )
 
     @staticmethod
+    @torch.cuda.amp.custom_bwd # Ensure receieved inputs are of same precision as fwd
     def backward(
         ctx,
         grad_rendered_color_feat,  # Image rendering loss
@@ -228,6 +230,7 @@ class _RasterizerSubsequent(torch.autograd.Function):
     """
 
     @staticmethod
+    @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32) # Ensure receieved inputs are float32
     def forward(
         ctx,
         colors_feat,
@@ -285,6 +288,7 @@ class _RasterizerSubsequent(torch.autograd.Function):
         return rendered_color_feat
 
     @staticmethod
+    @torch.cuda.amp.custom_bwd # Ensure receieved inputs are of same precision as fwd
     def backward(
         ctx,
         grad_rendered_color_feat,  # Image rendering loss

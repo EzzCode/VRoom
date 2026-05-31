@@ -415,7 +415,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             // Compute aux outputs
             // 1. Compute distortion loss and depth moments
             float alpha_acc = 1.f - transmittance;
-            float normalized_depth = FAR_PLANE / (FAR_PLANE - NEAR_PLANE) * (1 - NEAR_PLANE / depth); // OPTIMIZE LATER? or is it precomputed?
+            float normalized_depth = DEPTH_NORM_SCALE * (1 - NEAR_PLANE / depth); // OPTIMIZE LATER? or is it precomputed?
             distortion_acc += blending_weight * (normalized_depth * normalized_depth * alpha_acc +
                                                  m2_acc - 2 * normalized_depth * m1_acc);
             m1_acc += normalized_depth * blending_weight;
@@ -438,7 +438,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 #endif
             // Finally, compute rendered colors and features
             for (int ch = 0; ch < CHANNELS; ch++)
-                color_feat_acc[ch] += __ldg(&colors_feat[surfel_idx_batch[batch_surf_idx] * CHANNELS + ch]) * blending_weight;
+                // Fused Multiply-Add (FMA). Could be replaced with -O3 compiler option.
+                color_feat_acc[ch] = __fmaf_rn(__ldg(&colors_feat[surfel_idx_batch[batch_surf_idx] * CHANNELS + ch]), blending_weight, color_feat_acc[ch]);
 
             // Update transmittance
             transmittance = next_transmittance;

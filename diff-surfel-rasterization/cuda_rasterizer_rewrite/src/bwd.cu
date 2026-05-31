@@ -312,11 +312,14 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             float2 grad_projected_centers = {0.f, 0.f};
             float grad_opacity = 0.f;
 
+            // Precomputations
+            float inv_one_minus_alpha = __fdividef(1.f, 1.f - alpha);
+
             // Compute gradients for valid surfels
             if (valid_surfel)
             {
                 // Recover transmittance before blending with the current surfel
-                transmittance = transmittance / (1.f - alpha); // OPTIMIZATION LATER
+                transmittance = transmittance * inv_one_minus_alpha; // OPTIMIZATION LATER
 
                 // Blending weight for surfel.
                 // It is also rendered color/feat loss w.r.t. surfel's color/feat.
@@ -366,7 +369,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
                 // 4. Distortion loss gradients
                 {
-                    const float normalized_depth = FAR_PLANE / (FAR_PLANE - NEAR_PLANE) *
+                    const float normalized_depth = DEPTH_NORM_SCALE *
                                                    (1 - NEAR_PLANE / depth); // OPTIMIZE LATER? or is it precomputed?
                     const float final_alpha_acc = 1.f - final_transmittance;
                     const float grad_distortion_acc = grad_pixel_distortion *
@@ -380,7 +383,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 #endif
                 // Path C: Accumulate gradients from background.
                 grad_alpha *= transmittance;
-                grad_alpha += (-final_transmittance / (1.f - alpha)) * bg_dot_pixel_grad; // OPTIMIZATION LATER
+                grad_alpha += (-final_transmittance * inv_one_minus_alpha) * bg_dot_pixel_grad; // OPTIMIZATION LATER
 
                 // Update previous alpha
                 prev_alpha = alpha;

@@ -157,7 +157,7 @@ __forceinline__ __device__ float3 grad_norm_vec_vjp(const float3 vec, const floa
     if (norm_sq < 1e-12f)
         return {0.0f, 0.0f, 0.0f};
 
-    float inv_norm_cube = 1.0f / sqrt(norm_sq * norm_sq * norm_sq); // OPTIMIZATION LATER: USE rsqrtf
+    float inv_norm_cube = rsqrtf(norm_sq * norm_sq * norm_sq);
 
     // VJP
     return {
@@ -177,7 +177,7 @@ __forceinline__ __device__ float4 grad_norm_vec_vjp(const float4 vec, const floa
     if (norm_sq < 1e-12f)
         return {0.0f, 0.0f, 0.0f, 0.0f};
 
-    float inv_norm_cube = 1.0f / sqrt(norm_sq * norm_sq * norm_sq); // OPTIMIZATION LATER: USE rsqrtf
+    float inv_norm_cube = rsqrtf(norm_sq * norm_sq * norm_sq);
 
     float4 vec_grad_norm = {vec.x * grad_norm.x, vec.y * grad_norm.y,
                             vec.z * grad_norm.z, vec.w * grad_norm.w};
@@ -203,7 +203,7 @@ __forceinline__ __device__ float grad_norm_vecz_vjp(const float3 vec, const floa
     if (norm_sq < 1e-12f)
         return 0.0f;
 
-    float inv_norm_cube = 1.0f / sqrt(norm_sq * norm_sq * norm_sq); // OPTIMIZATION LATER: USE rsqrtf
+    float inv_norm_cube = rsqrtf(norm_sq * norm_sq * norm_sq);
 
     // VJP
     return (-vec.z * vec.x * grad_norm.x - vec.z * vec.y * grad_norm.y +

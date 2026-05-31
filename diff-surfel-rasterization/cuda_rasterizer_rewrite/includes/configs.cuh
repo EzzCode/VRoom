@@ -10,6 +10,7 @@
 // Culling boundaries and distortion normalizers
 __device__ constexpr float NEAR_PLANE = 0.2f;
 __device__ constexpr float FAR_PLANE = 100.0f;
+constexpr float DEPTH_NORM_SCALE = FAR_PLANE / (FAR_PLANE - NEAR_PLANE);
 
 // Feature toggles
 #define OPACITY_SCALED_CUTOFF 0 // If 1, scale surfel's cutoff radius by opacity (minor speed gain)
