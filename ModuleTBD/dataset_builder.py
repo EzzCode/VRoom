@@ -336,7 +336,7 @@ def build_real_views(extraction_index_path, scope, *,
             continue
 
         cam_p     = scope.cameras[cam_index]
-        rgba_path = _resolve_path(fr["out_rgba_path"],
+        rgba_path = _resolve_path(fr["rgba_path"],
                                   manifest_dir=extraction_index_path.parent)
         if not rgba_path.exists():
             logger.warning("Missing real RGBA %s; skipping.", rgba_path)
@@ -371,7 +371,7 @@ def build_real_views(extraction_index_path, scope, *,
             width  = side
             height = side
 
-        az = float(cam_p.get("azimuth_deg", fr.get("azimuth_deg", 0.0)))
+        az = float(cam_p.get("azimuth_deg", fr.get("azimuth", 0.0)))
         el = float(cam_p.get("elevation_deg", 0.0))
 
         views.append({

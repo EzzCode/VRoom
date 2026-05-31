@@ -54,9 +54,8 @@ def run(
     iterations=1200,
     # Extraction
     tau_alpha=0.4,
-    min_pixels=64,
-    seg_map_dir="auto",
-    seg_label=None,
+    tracked_id_map_dir="auto",
+    tracked_object_id=None,
     # Frame scoring
     top_k=5,
     # Novel views
@@ -136,8 +135,8 @@ def run(
     try:
         scene_p = Path(scene_dir)
         images_dir = scene_p / "images"
-        resolved_seg_map_dir = None
-        if str(seg_map_dir).lower() == "auto":
+        resolved_tracked_id_map_dir = None
+        if str(tracked_id_map_dir).lower() == "auto":
             for candidate in (
                 scene_p / "tracked" / "id_maps",
                 scene_p / "semantic_instance",
@@ -145,38 +144,38 @@ def run(
                 scene_p / "object_mask_deva",
             ):
                 if candidate.exists() and any(candidate.iterdir()):
-                    resolved_seg_map_dir = candidate
+                    resolved_tracked_id_map_dir = candidate
                     break
-        elif str(seg_map_dir).lower() not in ("none", "null", ""):
-            resolved_seg_map_dir = Path(seg_map_dir)
+        elif str(tracked_id_map_dir).lower() not in ("none", "null", ""):
+            resolved_tracked_id_map_dir = Path(tracked_id_map_dir)
 
-        if resolved_seg_map_dir is None:
+        if resolved_tracked_id_map_dir is None:
             raise RuntimeError(
-                "No seg_map_dir found. Pass --seg_map_dir explicitly or ensure one of the "
-                "auto-discovery paths (tracked/id_maps, semantic_instance, object_mask, "
-                "object_mask_deva) exists and is non-empty under the scene directory."
+                "No tracked id-map directory found. Pass --tracked_id_map_dir explicitly "
+                "or ensure one of the auto-discovery paths (tracked/id_maps, "
+                "semantic_instance, object_mask, object_mask_deva) exists and is non-empty "
+                "under the scene directory."
             )
 
-        # TODO(label-alignment): replace this entire block with `seg_label = object_label_id`
-        #   once Module1 and ObjectGS share the same label namespace; delete vote_seg_label() too.
-        if seg_label is None:
-            from ModuleTBD.utils.helpers import vote_seg_label
-            seg_label = vote_seg_label(
-                scope, gaussians, pipe_config, resolved_seg_map_dir, tau_alpha=tau_alpha
+        # TODO(label-alignment): replace this entire block with `tracked_object_id = object_label_id`
+        #   once Module1 and ObjectGS share the same label namespace; delete vote_tracked_object_id() too.
+        if tracked_object_id is None:
+            from ModuleTBD.utils.helpers import vote_tracked_object_id
+            tracked_object_id = vote_tracked_object_id(
+                scope, gaussians, pipe_config, resolved_tracked_id_map_dir, tau_alpha=tau_alpha
             )
-            if seg_label is None:
+            if tracked_object_id is None:
                 raise RuntimeError(
-                    "vote_seg_label could not match any seg map label to the GS model silhouette. "
-                    "Pass --seg_label explicitly."
+                    "vote_tracked_object_id could not match any tracked id-map label to the GS "
+                    "model silhouette. Pass --tracked_object_id explicitly."
                 )
 
         extraction_manifest = run_extraction(
             scope=scope,
             images_dir=images_dir,
             output_dir=obj_dir / "01_extraction",
-            seg_map_dir=resolved_seg_map_dir,
-            seg_label=seg_label,
-            min_pixels=min_pixels,
+            tracked_id_map_dir=resolved_tracked_id_map_dir,
+            tracked_object_id=tracked_object_id,
         )
         summary["phases"]["extraction"] = extraction_manifest
         logger.info("✓ Extraction: %d frames extracted", len(extraction_manifest.get("frames", [])))
@@ -201,7 +200,7 @@ def run(
         top1 = scores_manifest.get("top_k", [{}])[0] if scores_manifest.get("top_k") else {}
         logger.info("✓ Frame scoring: best score = %.3f  cam=%s  az=%.1f°",
                     top1.get("score", 0.0), top1.get("cam_index", "?"),
-                    top1.get("azimuth_deg", 0.0))
+                    top1.get("azimuth", 0.0))
     except Exception as exc:
         logger.exception("✗ Frame scoring failed: %s", exc)
         summary["phases"]["frame_scoring"] = {"error": str(exc)}
@@ -362,11 +361,12 @@ def _parse_args():
 
     # Extraction
     p.add_argument("--tau_alpha", type=float, default=0.4)
-    p.add_argument("--min_pixels", type=int, default=64)
-    p.add_argument("--seg_map_dir", default="auto",
-                   help="'auto', 'none', or path to Module1 per-frame segmentation map directory")
-    p.add_argument("--seg_label", type=int, default=None,
-                   help="Instance label from Module1 segmentation maps (same label in the labeled COLMAP PLY); auto-voted if omitted")
+    p.add_argument("--tracked_id_map_dir", default="auto",
+                   help="'auto', 'none', or path to the per-frame tracked id-map directory "
+                        "(Module1 object_tracker output, e.g. <scene>/tracked/id_maps)")
+    p.add_argument("--tracked_object_id", type=int, default=None,
+                   help="Instance label from the tracked id-maps (same integer label that "
+                        "vote.py writes into the labeled COLMAP PLY); auto-voted if omitted")
 
     # Frame scoring
     p.add_argument("--top_k", type=int, default=5)
@@ -408,11 +408,10 @@ def main():
         output_root=args.output_root,
         object_id=args.object_id,
         ply_path=args.ply_path,
-        seg_map_dir=args.seg_map_dir,
-        seg_label=args.seg_label,
+        tracked_id_map_dir=args.tracked_id_map_dir,
+        tracked_object_id=args.tracked_object_id,
         iterations=args.iterations,
         tau_alpha=args.tau_alpha,
-        min_pixels=args.min_pixels,
         top_k=args.top_k,
         fov_y_deg=args.fov_y_deg,
         reuse_sv3d=args.reuse_sv3d,

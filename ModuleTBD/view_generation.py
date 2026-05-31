@@ -190,14 +190,14 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *, scores, output_di
         raise RuntimeError("scores object has no top_k")
 
     top = scores["top_k"][0]
-    rgba_path = Path(top["out_rgba_path"])
+    rgba_path = Path(top["rgba_path"])
     if not rgba_path.exists():
         raise FileNotFoundError(
             f"input RGBA not found at {rgba_path}.")
 
     top_cam_idx = int(top["cam_index"])
-    top_azimuth = float(top["azimuth_deg"])
-    top_elevation = float(top["elevation_deg"])
+    top_azimuth = float(top["azimuth"])
+    top_elevation = float(top["elevation"])
     if not math.isfinite(top_azimuth):
         logger.warning("Conditioning azimuth is not finite: %s.", top_azimuth)
         top_azimuth = 0.0

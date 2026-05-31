@@ -66,7 +66,7 @@ def _make_scatter(ranking, *, out_path, width=900, height=500, pad=50,
                   highlight_image_names=None):
     if not ranking:
         return
-    az = np.array([r.get("azimuth_deg", 0.0) for r in ranking], np.float32)
+    az = np.array([r.get("azimuth", 0.0) for r in ranking], np.float32)
     sc = np.array([r.get("score", 0.0) for r in ranking], np.float32)
     img = np.full((height, width, 3), 250, np.uint8)
     cv2.rectangle(img, (pad, pad), (width - pad, height - pad), (200, 200, 200), 1)
@@ -81,7 +81,7 @@ def _make_scatter(ranking, *, out_path, width=900, height=500, pad=50,
 
     highlight = set(highlight_image_names or [])
     for r in ranking:
-        x, y = to_px(r.get("azimuth_deg", 0.0), r.get("score", 0.0))
+        x, y = to_px(r.get("azimuth", 0.0), r.get("score", 0.0))
         if r.get("image_name") in highlight:
             cv2.circle(img, (x, y), 6, (0, 80, 220), -1)
         else:
@@ -127,7 +127,7 @@ def _make_components(top_entries, *, out_path, width=1000, row_h=36, pad=12):
         x = label_w
         lab = (f"#{i+1} cam={e.get('cam_index', '?')} "
                f"{str(e.get('image_name', ''))[:24]:<24} "
-               f"az={e.get('azimuth_deg', 0.0):+6.1f} "
+               f"az={e.get('azimuth', 0.0):+6.1f} "
                f"total={e.get('score', 0.0):+.3f}")
         cv2.putText(img, lab, (pad, y + row_h // 2 + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (30, 30, 30), 1, cv2.LINE_AA)
@@ -162,13 +162,13 @@ def _read_thumb(path, max_h=160):
 def _make_topk_strip(top_entries, *, out_path, max_h=180):
     thumbs = []
     for e in top_entries:
-        t = _read_thumb(e.get("out_rgba_path"), max_h=max_h)
+        t = _read_thumb(e.get("rgba_path"), max_h=max_h)
         if t is None:
             continue
         h, w = t.shape[:2]
         head_h = 26
         head = np.full((head_h, w, 3), 240, np.uint8)
-        cv2.putText(head, f"cam={e.get('cam_index')} az={e.get('azimuth_deg', 0):+.1f} "
+        cv2.putText(head, f"cam={e.get('cam_index')} az={e.get('azimuth', 0):+.1f} "
                           f"score={e.get('score', 0):+.3f}",
                     (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
                     (30, 30, 30), 1, cv2.LINE_AA)

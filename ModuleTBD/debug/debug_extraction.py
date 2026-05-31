@@ -122,14 +122,14 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
     for f in frames_for_triptych:
         rgb_src = _imread_rgb(images_dir / f.get("image_name", "")) \
             if (images_dir / f.get("image_name", "")).exists() else None
-        rgba = cv2.imread(f.get("out_rgba_path", ""), cv2.IMREAD_UNCHANGED)
+        rgba = cv2.imread(f.get("rgba_path", ""), cv2.IMREAD_UNCHANGED)
         mask_hybrid = (rgba[..., -1] > 127).astype(np.uint8) * 255 if rgba is not None and rgba.ndim == 3 else None
         if rgb_src is None or mask_hybrid is None:
             continue
 
         label = (f"cam={f.get('cam_index')} | {f.get('image_name','?')} | "
-                 f"az={f.get('azimuth_deg', 0.0):+.1f} | "
-                 f"fg={f.get('fg_fraction', 0.0):.3f}")
+                 f"az={f.get('azimuth', 0.0):+.1f} | "
+                 f"fg={f.get('object_coverage', 0.0):.3f}")
         trip = _make_triptych(rgb_src, mask_hybrid, label)
         out_path = debug_dir / "triptych" / f"cam_{f.get('cam_index'):03d}.png"
         cv2.imwrite(str(out_path), cv2.cvtColor(trip, cv2.COLOR_RGB2BGR))
@@ -140,7 +140,7 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
             if (images_dir / f.get("image_name", "")).exists() else None
         if rgb_src is None:
             continue
-        rgba = cv2.imread(f.get("out_rgba_path", ""), cv2.IMREAD_UNCHANGED)
+        rgba = cv2.imread(f.get("rgba_path", ""), cv2.IMREAD_UNCHANGED)
         if rgba is not None and rgba.ndim == 3 and rgba.shape[-1] == 4:
             mask = (rgba[..., -1] > 127).astype(np.uint8) * 255
         else:
@@ -148,7 +148,7 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
         if mask is None:
             continue
         sheet_items.append((rgb_src, mask,
-                            f"cam={f.get('cam_index')} fg={f.get('fg_fraction', 0):.2f}"))
+                            f"cam={f.get('cam_index')} fg={f.get('object_coverage', 0):.2f}"))
 
     sheet = _make_contact_sheet(sheet_items)
     if sheet is not None:
@@ -157,9 +157,9 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
 
     summary = {
         "n_frames": n_total,
-        "fg_fraction_mean": float(np.mean([f.get("fg_fraction", 0.0) for f in frames])) if frames else 0.0,
-        "fg_fraction_min": float(np.min([f.get("fg_fraction", 0.0) for f in frames])) if frames else 0.0,
-        "fg_fraction_max": float(np.max([f.get("fg_fraction", 0.0) for f in frames])) if frames else 0.0,
+        "object_coverage_mean": float(np.mean([f.get("object_coverage", 0.0) for f in frames])) if frames else 0.0,
+        "object_coverage_min": float(np.min([f.get("object_coverage", 0.0) for f in frames])) if frames else 0.0,
+        "object_coverage_max": float(np.max([f.get("object_coverage", 0.0) for f in frames])) if frames else 0.0,
     }
     with open(debug_dir / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
