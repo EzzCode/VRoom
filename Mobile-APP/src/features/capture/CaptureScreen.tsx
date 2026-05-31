@@ -9,6 +9,7 @@ import {
 import { useRunOnJS } from 'react-native-worklets-core';
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import { processBlur } from './gates/BlurGate';
+import { useDeviceMotionPose } from './hooks/useDeviceMotionPose';
 import { CAPTURE_CONFIG } from './config/captureConfig';
 import { saveCapturedPhoto } from './services/captureStorage';
 import { useSession, SessionProvider } from '../../providers/SessionProvider';
@@ -45,8 +46,11 @@ function CaptureScreenInner({ navigation }: Props) {
 
   const captureIntervalMs = 1200;
 
-  const { isRecording, startSession, stopSession, keyframes, addKeyframe, extractor, currentPose, coveragePercent } =
+  const { isRecording, startSession, stopSession, keyframes, addKeyframe, extractor, currentPose, setCurrentPose, coveragePercent } =
     useSession();
+
+  // Feed phone IMU into SessionProvider so AngleGate has rotation data.
+  useDeviceMotionPose({ onPose: setCurrentPose, enabled: isRecording });
 
   const isRecordingRef = useRef(false);
   const isBlurryRef = useRef(false);
