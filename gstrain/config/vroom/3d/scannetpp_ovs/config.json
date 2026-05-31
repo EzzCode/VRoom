@@ -1,0 +1,82 @@
+{
+    "experiment": {
+        "dataset_name": "scannetpp",
+        "save_dir": "3d_crossentropy_loss_0.1_colmap_ply",
+        "dataset_path": "/home/hussein_essam/gs-workspace/scannetpp_ovs",
+        "frames": "images",
+        "masks": "masks",
+        "resolution": 1,
+        "resolution_scales": [
+            1.0
+        ],
+        "dataset_storage_device": "cpu",
+        "eval": true,
+        "pc_downsampling_ratio": 1,
+        "add_mask": false,
+        "llffhold": 8,
+        "pretrained_checkpoint": "",
+        "camera_center": [
+            0.0,
+            0.0,
+            0.0
+        ],
+        "camera_scale": 1.0
+    },
+    "model": {
+        "name": "Neural_Gaussians_Model",
+        "gaussian_type": "3D",
+        "feat_dim": 32,
+        "view_dim": 3,
+        "gs_per_anchor": 10,
+        "voxel_size": 0.001,
+        "render_mode": "RGB+ED",
+        "tile_size_2dgs": 8
+    },
+    "pipeline": {
+        "save_iterations": [
+            7000,
+            30000
+        ],
+        "visualization_interval": 1000
+    },
+    "optimization": {
+        "num_iterations": 30000,
+        "max_grad_norm": 1.0,
+        "anchor_pos_lr_init": 0.0,
+        "anchor_pos_lr_final": 0.0,
+        "anchor_pos_lr_delay_mult": 0.01,
+        "anchor_pos_lr_max_steps": 30000,
+        "gaussian_offset_lr_init": 0.01,
+        "gaussian_offset_lr_final": 0.0001,
+        "gaussian_offset_lr_delay_mult": 0.01,
+        "gaussian_offset_lr_max_steps": 30000,
+        "anchor_feat_lr": 0.0075,
+        "anchor_scale_lr": 0.007,
+        "anchor_rot_lr": 0.002,
+        "decoder_opacity_lr_init": 0.002,
+        "decoder_opacity_lr_final": 2e-05,
+        "decoder_opacity_lr_delay_mult": 0.01,
+        "decoder_opacity_lr_max_steps": 30000,
+        "decoder_cov_lr_init": 0.004,
+        "decoder_cov_lr_final": 0.004,
+        "decoder_cov_lr_delay_mult": 0.01,
+        "decoder_cov_lr_max_steps": 30000,
+        "decoder_color_lr_init": 0.008,
+        "decoder_color_lr_final": 5e-05,
+        "decoder_color_lr_delay_mult": 0.01,
+        "decoder_color_lr_max_steps": 30000,
+        "ssim_weight": 0.2,
+        "semantic_loss_weight": 0.1,
+        "volume_reg_weight": 0.01,
+        "ssim_window_size": 11,
+        "ssim_padding": 5,
+        "ssim_luminance_stabilizer": 0.0001,
+        "ssim_contrast_stabilizer": 0.0009
+    },
+    "densifier": {
+        "desification_start": 1500,
+        "desification_end": 30000,
+        "densification_interval": 100,
+        "min_opacity": 0.005
+    }
+}

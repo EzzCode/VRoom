@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 import yaml
-from gstrain.vroom_core import GaussianModel
-from gstrain.vroom_core.models.semantics import SemanticCodec
+from gstrain.vroom_core.core.model.facade import GaussianModel
+from gstrain.vroom_core.core.model.semantics import SemanticCodec
 from .helpers import normalize
 import logging
 logger = logging.getLogger(__name__)

@@ -26,10 +26,10 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-from gstrain.vroom_core.models.facade import GaussianModel
-from gstrain.vroom_core.models.semantics import SemanticCodec
-from gstrain.vroom_core.training.orchestration import PipelineConfig
-from gstrain.vroom_core.utils.checkpoints import CheckpointManager
+from gstrain.vroom_core.core.model.facade import GaussianModel
+from gstrain.vroom_core.core.model.semantics import SemanticCodec
+from gstrain.vroom_core.core.training.orchestration import PipelineConfig
+from gstrain.vroom_core.utilities.utils.checkpoints import CheckpointManager
 
 
 # ── Data containers ───────────────────────────────────────────────────────────────

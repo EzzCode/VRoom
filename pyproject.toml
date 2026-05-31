@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vroom"
 version = "0.1.0"
-requires-python = ">=3.9"
+requires-python = ">=3.8"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Map top-level import names whose folder names are not valid Python identifiers.
@@ -13,7 +13,6 @@ requires-python = ">=3.9"
 # ──────────────────────────────────────────────────────────────────────────────
 [tool.setuptools.package-dir]
 "module1"          = "Module1"
-"module2"          = "Module2"
 
 
 # Explicit list of every importable package (folder with __init__.py).
@@ -22,21 +21,18 @@ requires-python = ">=3.9"
 packages = [
     # gstrain  →  import gstrain ...
     "gstrain",
-    "gstrain.gaussian_renderer",
     "gstrain.vroom_core",
-    "gstrain.vroom_core.data",
-    "gstrain.vroom_core.export",
-    "gstrain.vroom_core.models",
-    "gstrain.vroom_core.training",
-    "gstrain.vroom_core.utils",
-    "gstrain.vroom_core.viewer",
+    "gstrain.vroom_core.core",
+    "gstrain.vroom_core.core.model",
+    "gstrain.vroom_core.core.training",
+    "gstrain.vroom_core.utilities",
+    "gstrain.vroom_core.utilities.data_utils",
+    "gstrain.vroom_core.utilities.gaussian_renderer",
+    "gstrain.vroom_core.utilities.training",
+    "gstrain.vroom_core.utilities.utils",
 
     # Module1  →  import module1 ...
     "module1",
-
-    # Module-2  →  import module2 ...
-    "module2",
-    "module2.utils",
 
     # object_isolation  →  import object_isolation ...
     "object_isolation",
