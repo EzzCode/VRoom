@@ -69,14 +69,14 @@ class LossEngine:
         model_guess = render_pkg.get("render_semantics")
 
         scales = render_pkg["scaling"]
-        ssim_weight = optimizer_configs.ssim_weight
-        semantic_loss_weight = optimizer_configs.semantic_loss_weight
-        volume_reg_weight = optimizer_configs.volume_reg_weight
+        ssim_weight = getattr(optimizer_configs, "ssim_weight")
+        semantic_loss_weight = getattr(optimizer_configs, "semantic_loss_weight")
+        volume_reg_weight = getattr(optimizer_configs, "volume_reg_weight")
 
-        ssim_window_size = optimizer_configs.ssim_window_size
-        ssim_padding = optimizer_configs.ssim_padding
-        ssim_luminance_stabilizer = optimizer_configs.ssim_luminance_stabilizer
-        ssim_contrast_stabilizer = optimizer_configs.ssim_contrast_stabilizer
+        ssim_window_size = getattr(optimizer_configs, "ssim_window_size")
+        ssim_padding = getattr(optimizer_configs, "ssim_padding")
+        ssim_luminance_stabilizer = getattr(optimizer_configs, "ssim_luminance_stabilizer")
+        ssim_contrast_stabilizer = getattr(optimizer_configs, "ssim_contrast_stabilizer")
 
         l1_loss = self.calc_l1_loss(render, real_image)
         ssim_loss = self.calc_ssim_loss(
