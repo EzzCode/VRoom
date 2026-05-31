@@ -7,7 +7,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from gstrain.vroom_core.utilities.utils import PointCloudSample, compute_anchors_scale_and_rotation, estimate_voxel_size, SemanticsManager
+from gstrain.vroom_core.utilities.utils import (
+    PointCloudSample,
+    compute_anchors_scale_and_rotation,
+    estimate_voxel_size,
+    SemanticsManager,
+)
 
 
 @dataclass
@@ -79,10 +84,16 @@ class AnchorCloud(nn.Module):
 
     def initialize_anchors(self, point_cloud_sampled):
         if hasattr(point_cloud_sampled, "points"):
-            points = torch.from_numpy(point_cloud_sampled.points).float().to(self.device)
-            labels = torch.from_numpy(point_cloud_sampled.label_ids).long().to(self.device) if getattr(point_cloud_sampled, "label_ids", None) is not None else None
+            points = (
+                torch.from_numpy(point_cloud_sampled.points).float().to(self.device)
+            )
+            labels = (
+                torch.from_numpy(point_cloud_sampled.label_ids).long().to(self.device)
+                if getattr(point_cloud_sampled, "label_ids", None) is not None
+                else None
+            )
         else:
-            raise("no points in point cloud")
+            raise ("no points in point cloud")
 
         anchor_cloud = self._generate_anchors(points, labels)
         self.set_anchors_cloud(anchor_cloud)
@@ -126,7 +137,11 @@ class AnchorCloud(nn.Module):
             )
         )
 
-        self.semantic_manager = SemanticsManager(torch.unique(self.anchor_labels)) if self.anchor_labels is not None else None
+        self.semantic_manager = (
+            SemanticsManager(torch.unique(self.anchor_labels))
+            if self.anchor_labels is not None
+            else None
+        )
 
         self.gaussians_offsets = nn.Parameter(
             torch.zeros(
@@ -149,8 +164,6 @@ class AnchorCloud(nn.Module):
             voxel_size=self.voxel_size,
         )
 
-
-
     def _knn(self, point_cloud, k, chunk_size=2048):
         """finds the k nearest neighbors of each point in the point cloud"""
         with torch.no_grad():
@@ -160,7 +173,7 @@ class AnchorCloud(nn.Module):
                 chunk = point_cloud[i:end]
                 diff = chunk.unsqueeze(1) - point_cloud.unsqueeze(0)
                 dist_matrix = torch.norm(diff, dim=-1)
-                chunk_distances= torch.topk(dist_matrix, k + 1, largest=False).values
+                chunk_distances = torch.topk(dist_matrix, k + 1, largest=False).values
                 final_distances[i:end] = chunk_distances[:, 1:]
         return final_distances
 
@@ -193,8 +206,6 @@ class AnchorCloud(nn.Module):
                 anchor_labels[voxel_index] = torch.argmax(counts)
         return anchor_labels
 
-
-
     def set_anchors_cloud(self, data: AnchorCloudData) -> None:
         """set the anchor cloud"""
         self.anchors_positions = nn.Parameter(
@@ -207,7 +218,10 @@ class AnchorCloud(nn.Module):
             data.anchor_features.clone().detach().to(self.device).requires_grad_(True)
         )
         self.anchors_log_scales = nn.Parameter(
-            data.anchors_log_scales.clone().detach().to(self.device).requires_grad_(True)
+            data.anchors_log_scales.clone()
+            .detach()
+            .to(self.device)
+            .requires_grad_(True)
         )
         self.anchors_rotations = nn.Parameter(
             data.anchors_rotations.clone().detach().to(self.device), requires_grad=False
@@ -268,10 +282,16 @@ class AnchorCloud(nn.Module):
                 else torch.cat([self.semantic_labels.view(-1), labels.view(-1)], dim=0)
             )
             if self.semantic_manager is None:
-                self.semantic_manager = SemanticsManager(torch.unique(self.semantic_labels.view(-1)))
+                self.semantic_manager = SemanticsManager(
+                    torch.unique(self.semantic_labels.view(-1))
+                )
             else:
-                self.semantic_manager.update_current_num_classes(self.semantic_labels.view(-1))
-                self.semantic_manager.label_ids, _ = torch.sort(torch.unique(self.semantic_labels.view(-1)))
+                self.semantic_manager.update_current_num_classes(
+                    self.semantic_labels.view(-1)
+                )
+                self.semantic_manager.label_ids, _ = torch.sort(
+                    torch.unique(self.semantic_labels.view(-1))
+                )
 
     def prune(self, prune_mask: torch.Tensor) -> None:
         """Prunes the anchor cloud after pruning process"""
@@ -297,8 +317,12 @@ class AnchorCloud(nn.Module):
         if self.semantic_labels is not None:
             self.semantic_labels = self.semantic_labels[keep]
             if self.semantic_manager is not None:
-                self.semantic_manager.update_current_num_classes(self.semantic_labels.view(-1))
-                self.semantic_manager.label_ids, _ = torch.sort(torch.unique(self.semantic_labels.view(-1)))
+                self.semantic_manager.update_current_num_classes(
+                    self.semantic_labels.view(-1)
+                )
+                self.semantic_manager.label_ids, _ = torch.sort(
+                    torch.unique(self.semantic_labels.view(-1))
+                )
 
     def instantiate_gaussian_positions(self, visible_mask, negative_opacity_filter):
         """Calculate the positions of the visible Gaussians"""
@@ -307,7 +331,13 @@ class AnchorCloud(nn.Module):
         gaussian_offsets = self.gaussians_offsets[visible_mask]
         anchor_scales = torch.exp(self.anchors_log_scales[visible_mask])
 
-        valid_scales = anchor_scales.unsqueeze(1).expand(-1, self.gaussians_per_anchor, -1)[negative_opacity_filter][:, :3]
-        valid_offsets = gaussian_offsets.view(num_visible, self.gaussians_per_anchor, 3)[negative_opacity_filter]
-        valid_anchors = anchor_positions.unsqueeze(1).expand(-1, self.gaussians_per_anchor, -1)[negative_opacity_filter]
+        valid_scales = anchor_scales.unsqueeze(1).expand(
+            -1, self.gaussians_per_anchor, -1
+        )[negative_opacity_filter][:, :3]
+        valid_offsets = gaussian_offsets.view(
+            num_visible, self.gaussians_per_anchor, 3
+        )[negative_opacity_filter]
+        valid_anchors = anchor_positions.unsqueeze(1).expand(
+            -1, self.gaussians_per_anchor, -1
+        )[negative_opacity_filter]
         return valid_anchors + (valid_offsets * valid_scales)

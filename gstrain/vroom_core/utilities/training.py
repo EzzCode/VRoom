@@ -91,24 +91,81 @@ class Optimizer:
         decoder = self.opt_configs["decoder"]
 
         groups = [
-            {"params": [anchor_cloud.anchors_positions], "lr": args.anchor_pos_lr_init * spatial_lr_scale, "name": "anchors_positions"},
-            {"params": [anchor_cloud.gaussians_offsets], "lr": args.gaussian_offset_lr_init * spatial_lr_scale, "name": "gaussians_offsets"},
-            {"params": [anchor_cloud.anchor_features], "lr": args.anchor_feat_lr, "name": "anchor_features"},
-            {"params": [anchor_cloud.anchors_log_scales], "lr": args.anchor_scale_lr, "name": "anchors_log_scales"},
-            {"params": [anchor_cloud.anchors_rotations], "lr": args.anchor_rot_lr, "name": "anchors_rotations"},
-            {"params": decoder.opacity_network.parameters(), "lr": args.decoder_opacity_lr_init, "name": "opacity_head"},
-            {"params": decoder.covariance_network.parameters(), "lr": args.decoder_cov_lr_init, "name": "covariance_head"},
-            {"params": decoder.color_network.parameters(), "lr": args.decoder_color_lr_init, "name": "color_head"},
+            {
+                "params": [anchor_cloud.anchors_positions],
+                "lr": args.anchor_pos_lr_init * spatial_lr_scale,
+                "name": "anchors_positions",
+            },
+            {
+                "params": [anchor_cloud.gaussians_offsets],
+                "lr": args.gaussian_offset_lr_init * spatial_lr_scale,
+                "name": "gaussians_offsets",
+            },
+            {
+                "params": [anchor_cloud.anchor_features],
+                "lr": args.anchor_feat_lr,
+                "name": "anchor_features",
+            },
+            {
+                "params": [anchor_cloud.anchors_log_scales],
+                "lr": args.anchor_scale_lr,
+                "name": "anchors_log_scales",
+            },
+            {
+                "params": [anchor_cloud.anchors_rotations],
+                "lr": args.anchor_rot_lr,
+                "name": "anchors_rotations",
+            },
+            {
+                "params": decoder.opacity_network.parameters(),
+                "lr": args.decoder_opacity_lr_init,
+                "name": "opacity_head",
+            },
+            {
+                "params": decoder.covariance_network.parameters(),
+                "lr": args.decoder_cov_lr_init,
+                "name": "covariance_head",
+            },
+            {
+                "params": decoder.color_network.parameters(),
+                "lr": args.decoder_color_lr_init,
+                "name": "color_head",
+            },
         ]
 
         self.optimizer = torch.optim.Adam(groups, lr=0.0, eps=1e-15)
 
         self._lr_schedulers = {
-            "anchors_positions": exponential_lr_schedule(args.anchor_pos_lr_init * spatial_lr_scale, args.anchor_pos_lr_final * spatial_lr_scale, lr_delay_mult=args.anchor_pos_lr_delay_mult, max_steps=args.anchor_pos_lr_max_steps),
-            "gaussians_offsets": exponential_lr_schedule(args.gaussian_offset_lr_init * spatial_lr_scale, args.gaussian_offset_lr_final * spatial_lr_scale, lr_delay_mult=args.gaussian_offset_lr_delay_mult, max_steps=args.gaussian_offset_lr_max_steps),
-            "opacity_head": exponential_lr_schedule(args.decoder_opacity_lr_init, args.decoder_opacity_lr_final, lr_delay_mult=args.decoder_opacity_lr_delay_mult, max_steps=args.decoder_opacity_lr_max_steps),
-            "covariance_head": exponential_lr_schedule(args.decoder_cov_lr_init, args.decoder_cov_lr_final, lr_delay_mult=args.decoder_cov_lr_delay_mult, max_steps=args.decoder_cov_lr_max_steps),
-            "color_head": exponential_lr_schedule(args.decoder_color_lr_init, args.decoder_color_lr_final, lr_delay_mult=args.decoder_color_lr_delay_mult, max_steps=args.decoder_color_lr_max_steps),
+            "anchors_positions": exponential_lr_schedule(
+                args.anchor_pos_lr_init * spatial_lr_scale,
+                args.anchor_pos_lr_final * spatial_lr_scale,
+                lr_delay_mult=args.anchor_pos_lr_delay_mult,
+                max_steps=args.anchor_pos_lr_max_steps,
+            ),
+            "gaussians_offsets": exponential_lr_schedule(
+                args.gaussian_offset_lr_init * spatial_lr_scale,
+                args.gaussian_offset_lr_final * spatial_lr_scale,
+                lr_delay_mult=args.gaussian_offset_lr_delay_mult,
+                max_steps=args.gaussian_offset_lr_max_steps,
+            ),
+            "opacity_head": exponential_lr_schedule(
+                args.decoder_opacity_lr_init,
+                args.decoder_opacity_lr_final,
+                lr_delay_mult=args.decoder_opacity_lr_delay_mult,
+                max_steps=args.decoder_opacity_lr_max_steps,
+            ),
+            "covariance_head": exponential_lr_schedule(
+                args.decoder_cov_lr_init,
+                args.decoder_cov_lr_final,
+                lr_delay_mult=args.decoder_cov_lr_delay_mult,
+                max_steps=args.decoder_cov_lr_max_steps,
+            ),
+            "color_head": exponential_lr_schedule(
+                args.decoder_color_lr_init,
+                args.decoder_color_lr_final,
+                lr_delay_mult=args.decoder_color_lr_delay_mult,
+                max_steps=args.decoder_color_lr_max_steps,
+            ),
         }
 
         self.densifier.reset_state()
@@ -140,7 +197,14 @@ class Optimizer:
         return self.optimizer.state
 
 
-def state_snapshot(anchor_cloud, spatial_lr_scale, optimizer, opacity_network, covariance_network, color_network) -> dict:
+def state_snapshot(
+    anchor_cloud,
+    spatial_lr_scale,
+    optimizer,
+    opacity_network,
+    covariance_network,
+    color_network,
+) -> dict:
     """
     Captures a snapshot of all trainable state for checkpointing.
     """
@@ -171,7 +235,9 @@ def visualize(step_output, iteration, camera_view, output_dir):
     grid = torchvision.utils.make_grid([real_image, rendered_image], nrow=2)
     vis_dir = os.path.join(output_dir, "visualization")
     os.makedirs(vis_dir, exist_ok=True)
-    torchvision.utils.save_image(grid, os.path.join(vis_dir, f"iteration_{iteration}.png"))
+    torchvision.utils.save_image(
+        grid, os.path.join(vis_dir, f"iteration_{iteration}.png")
+    )
 
 
 def save_checkpoint(
@@ -208,7 +274,14 @@ def save_checkpoint(
         tile_size_2dgs=tile_size_2dgs,
     )
     torch.save(
-        state_snapshot(anchor_cloud, spatial_lr_scale, optimizer, opacity_network, covariance_network, color_network),
+        state_snapshot(
+            anchor_cloud,
+            spatial_lr_scale,
+            optimizer,
+            opacity_network,
+            covariance_network,
+            color_network,
+        ),
         os.path.join(iter_dir, "state.pth"),
     )
 
@@ -222,12 +295,12 @@ def get_progress_bar(num_iterations: int) -> tqdm:
     )
 
 
-def update_progress_bar(progress_bar: tqdm, step_output: dict, num_anchors: int) -> None:
+def update_progress_bar(
+    progress_bar: tqdm, step_output: dict, num_anchors: int
+) -> None:
     """Updates the postfix metrics on the tqdm progress bar."""
     total_loss = step_output["total_loss"]
     psnr = step_output["psnr"]
-    progress_bar.set_postfix({
-        "Loss": f"{total_loss:.4f}",
-        "PSNR": f"{psnr:.2f}",
-        "Anchors": num_anchors
-    })
+    progress_bar.set_postfix(
+        {"Loss": f"{total_loss:.4f}", "PSNR": f"{psnr:.2f}", "Anchors": num_anchors}
+    )

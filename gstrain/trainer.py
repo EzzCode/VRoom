@@ -59,9 +59,16 @@ def _configure_logging() -> logging.Logger:
 
 def main():
     parser = ArgumentParser(description="VRoom training parameters")
-    parser.add_argument("--config", type=str, required=True, help="Training config file path")
+    parser.add_argument(
+        "--config", type=str, required=True, help="Training config file path"
+    )
     parser.add_argument("--gpu", type=str, default="-1")
-    parser.add_argument("--no_vis", action="store_true", default=False, help="Disable visualization saving")
+    parser.add_argument(
+        "--no_vis",
+        action="store_true",
+        default=False,
+        help="Disable visualization saving",
+    )
     parser.add_argument("--start_checkpoint", type=str, default=None)
     args = parser.parse_args()
 
@@ -75,8 +82,9 @@ def main():
         if os.path.exists(cwd_path):
             source_path = cwd_path
         else:
-            source_path = os.path.abspath(os.path.join(os.path.dirname(__file__), source_path))
-
+            source_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), source_path)
+            )
 
     if args.gpu != "-1":
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -88,7 +96,9 @@ def main():
     seed_everything(quiet=False)
 
     dataset_name = model_params.get("dataset_name", "")
-    exp_name = model_params.get("save_dir", os.path.basename(args.config).replace(".json", ""))
+    exp_name = model_params.get(
+        "save_dir", os.path.basename(args.config).replace(".json", "")
+    )
     run_dir = os.path.join(
         "output", dataset_name, exp_name, datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     )
@@ -109,7 +119,6 @@ def main():
     ).to(anchor_cloud.device)
 
     logger = _configure_logging()
-    logger.info("Optimizing " + run_dir)
 
     dataset_args = _build_dataset_args(model_params, source_path, run_dir)
     scene = TrainingScene(

@@ -4,7 +4,17 @@ from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_
 from diff_surfel_rasterization import rasterization_2dgs_inria_wrapper
 
 
-def render(viewpoint_camera, decoded_output, gaussian_positions, normalized_rotations, bg_color, gaussian_type="3D", render_mode="RGB+ED", tile_size_2dgs=8, semantics=None):
+def render(
+    viewpoint_camera,
+    decoded_output,
+    gaussian_positions,
+    normalized_rotations,
+    bg_color,
+    gaussian_type="3D",
+    render_mode="RGB+ED",
+    tile_size_2dgs=8,
+    semantics=None,
+):
     xyz = gaussian_positions
     color = decoded_output["color"]
     opacity = decoded_output["opacity"]
@@ -22,7 +32,9 @@ def render(viewpoint_camera, decoded_output, gaussian_positions, normalized_rota
         dtype=torch.float32,
         device=render_device,
     )
-    viewmat = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()
+    viewmat = (
+        viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()
+    )
 
     if gaussian_type == "3D":
         render_colors, render_alphas, render_semantics, info = gsplat.rasterization(
@@ -121,9 +133,14 @@ def render(viewpoint_camera, decoded_output, gaussian_positions, normalized_rota
 def apply_frustum_culling(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
     """Project visible anchors and return a tightened visibility mask."""
     means = anchor_cloud.anchors_positions[anchor_cloud.visibility_mask]
-    scales = torch.exp(anchor_cloud.anchors_log_scales[anchor_cloud.visibility_mask])[:, :3]
+    scales = torch.exp(anchor_cloud.anchors_log_scales[anchor_cloud.visibility_mask])[
+        :, :3
+    ]
     import torch.nn.functional as F
-    quats = F.normalize(anchor_cloud.anchors_rotations[anchor_cloud.visibility_mask], dim=-1)
+
+    quats = F.normalize(
+        anchor_cloud.anchors_rotations[anchor_cloud.visibility_mask], dim=-1
+    )
     render_device = means.device
 
     Ks = torch.tensor(
@@ -135,7 +152,11 @@ def apply_frustum_culling(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
         dtype=torch.float32,
         device=render_device,
     )[None]
-    viewmats = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()[None]
+    viewmats = (
+        viewpoint_camera.world_view_transform.transpose(0, 1)
+        .to(render_device)
+        .float()[None]
+    )
 
     if gaussian_type == "3D":
         proj_results = fully_fused_projection(

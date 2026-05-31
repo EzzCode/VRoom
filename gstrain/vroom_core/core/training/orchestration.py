@@ -1,9 +1,18 @@
 import torch
 from gstrain.vroom_core.core.model.density import DensifcationController
 from gstrain.vroom_core.utilities.render import apply_frustum_culling, render
-from gstrain.vroom_core.utilities.training import Optimizer, state_snapshot, visualize, save_checkpoint as _save_checkpoint_util, get_progress_bar, update_progress_bar
+from gstrain.vroom_core.utilities.training import (
+    Optimizer,
+    visualize,
+    save_checkpoint as _save_checkpoint_util,
+    get_progress_bar,
+    update_progress_bar,
+)
 from gstrain.vroom_core.core.training.loss_engine import LossEngine
-from gstrain.vroom_core.utilities.utils import exponential_lr_schedule, CheckpointManager, compute_psnr
+from gstrain.vroom_core.utilities.utils import (
+    CheckpointManager,
+    compute_psnr,
+)
 
 
 def prepare_gaussian_space_props(
@@ -15,10 +24,27 @@ def prepare_gaussian_space_props(
     """Calculate the positions of the gaussians and normalize their rotations"""
     gaussian_positions = anchor_cloud.instantiate_gaussian_positions(
         visible_mask=visible_anchors_mask,
-        negative_opacity_filter=negative_opacity_filter
+        negative_opacity_filter=negative_opacity_filter,
     )
     normalized_rotations = torch.nn.functional.normalize(rotations_pred, dim=-1)
     return gaussian_positions, normalized_rotations
+
+
+def instantiate_semantics(
+    semantic_manager,
+    semantic_labels,
+    visible_anchors_mask,
+    negative_opacity_filter,
+    gaussians_per_anchor,
+):
+    """
+    Map visible anchor labels to one hot encodings for visible Gaussians
+    """
+    visible_labels = semantic_labels[visible_anchors_mask]
+    visible_label_indices = semantic_manager.build_lookup_table(visible_labels)
+    visible_one_hot = semantic_manager.one_hot_encode(visible_label_indices).float()
+    expanded_one_hot = visible_one_hot.unsqueeze(1).expand(-1, gaussians_per_anchor, -1)
+    return expanded_one_hot[negative_opacity_filter]
 
 
 class TrainingOrchestrator:
@@ -31,12 +57,14 @@ class TrainingOrchestrator:
 
         self.anchor_cloud = self.optmizer_configs["anchor_cloud"]
         self.decoder = self.optmizer_configs["decoder"]
-        self.gaussian_type = self.rendering_configs.get("gaussian_type", "3D")
+        self.gaussian_type = self.rendering_configs.get("gaussian_type", "2D")
         self.render_mode = self.rendering_configs.get("render_mode", "RGB+ED")
-        self.tile_size_2dgs = self.rendering_configs.get("tile_size_2dgs", 8)
+        self.tile_size_2dgs = self.rendering_configs.get("tile_size_2dgs")
         self.bg_color = self.pipeline_configs.get("bg_color")
         self.dataloader = scene.getTrainCameras()
-        self.visualization_interval = self.pipeline_configs.get("visualization_interval", 500)
+        self.visualization_interval = self.pipeline_configs.get(
+            "visualization_interval", 500
+        )
         self.logger = logger
         self.spatial_lr_scale = scene.cameras_extent
 
@@ -45,7 +73,6 @@ class TrainingOrchestrator:
         self.color_network = self.decoder.color_network
         self.CheckPointManager = CheckpointManager(self.anchor_cloud, self.decoder)
 
-  
         self.densifier = DensifcationController(
             voxel_size=self.anchor_cloud.voxel_size,
             anchor_cloud=self.anchor_cloud,
@@ -64,8 +91,13 @@ class TrainingOrchestrator:
     def train_step(self, camera_view, iteration, width, height):
         self.optimizer.zero_grad()
         self.optimizer.step_learning_rate(iteration)
-
-        visible_anchors_mask = apply_frustum_culling(camera_view, self.anchor_cloud, self.gaussian_type)
+        within_densification_range = (
+            iteration >= self.densifier_configs["desification_start"]
+            and iteration <= self.densifier_configs["desification_end"]
+        )
+        visible_anchors_mask = apply_frustum_culling(
+            camera_view, self.anchor_cloud, self.gaussian_type
+        )
         decoded_output = self.decoder.forward_pass(
             anchor_cloud=self.anchor_cloud,
             visible_anchors_mask=visible_anchors_mask,
@@ -80,8 +112,12 @@ class TrainingOrchestrator:
         )
 
         semantics_pred = None
-        if self.anchor_cloud.semantic_labels is not None and self.anchor_cloud.semantic_manager is not None:
-            semantics_pred = self.anchor_cloud.semantic_manager.instantiate_semantics(
+        if (
+            self.anchor_cloud.semantic_labels is not None
+            and self.anchor_cloud.semantic_manager is not None
+        ):
+            semantics_pred = instantiate_semantics(
+                semantic_manager=self.anchor_cloud.semantic_manager,
                 semantic_labels=self.anchor_cloud.semantic_labels,
                 visible_anchors_mask=visible_anchors_mask,
                 negative_opacity_filter=decoded_output["negative_opacity_filter"],
@@ -100,7 +136,9 @@ class TrainingOrchestrator:
             semantics=semantics_pred,
         )
         rasterizer_output["visible_anchors_mask"] = visible_anchors_mask
-        rasterizer_output["negative_opacity_filter"] = decoded_output["negative_opacity_filter"]
+        rasterizer_output["negative_opacity_filter"] = decoded_output[
+            "negative_opacity_filter"
+        ]
         loss_engine = LossEngine(self.anchor_cloud.semantic_manager)
         losses = loss_engine.compute_total_losses(
             render_pkg=rasterizer_output,
@@ -115,7 +153,7 @@ class TrainingOrchestrator:
         self._clip_gradients()
         self.optimizer.step()
 
-        # Read the 2D points gradients after backward 
+        # Read the 2D points gradients after backward
         # and detach so we don't keep the full graph in memory
         rendered_2d_points = rasterizer_output["rendered_2d_points"]
         if rendered_2d_points is not None and rendered_2d_points.grad is not None:
@@ -123,10 +161,7 @@ class TrainingOrchestrator:
         else:
             points_grad_detached = None
         # densification
-        if (
-            iteration >= self.densifier_configs["desification_start"]
-            and iteration <= self.densifier_configs["desification_end"]
-        ):
+        if within_densification_range:
             self.densifier.update_densification_state(
                 visible_anchors_mask,
                 rasterizer_output["negative_opacity_filter"],
@@ -137,7 +172,9 @@ class TrainingOrchestrator:
             )
             if iteration % self.densifier_configs["densification_interval"] == 0:
                 self.densifier.growing_operation()
-                self.densifier.pruning_operation(opacity_threshold=self.densifier_configs.get("min_opacity", 0.005))
+                self.densifier.pruning_operation(
+                    opacity_threshold=self.densifier_configs.get("min_opacity", 0.005)
+                )
                 self.densifier.reset_state()
         else:
             self.densifier.reset_state()
@@ -149,10 +186,8 @@ class TrainingOrchestrator:
         # Detach rendered image for visualisation
         rendered_image_detached = rasterizer_output["render"].detach()
         total_loss_value = losses["total"].item()
-        losses_copy = {k: v.item() for k, v in losses.items()}
 
         return {
-            "losses": losses_copy,
             "total_loss": total_loss_value,
             "psnr": psnr,
             "rendered_image": rendered_image_detached,
@@ -182,7 +217,9 @@ class TrainingOrchestrator:
             step_output = self.train_step(camera_view, iteration, width, height)
 
             if iteration % 10 == 0:
-                update_progress_bar(progress_bar, step_output, self.anchor_cloud.num_anchors)
+                update_progress_bar(
+                    progress_bar, step_output, self.anchor_cloud.num_anchors
+                )
 
             if iteration % self.visualization_interval == 0:
                 visualize(step_output, iteration, camera_view, self.output_dir)
@@ -208,4 +245,3 @@ class TrainingOrchestrator:
 
             del step_output
             torch.cuda.empty_cache()
-

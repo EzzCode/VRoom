@@ -82,11 +82,25 @@ class RenderCamera(nn.Module):
         self.invdepthmap = None
         self.depth_mask = None
 
-        translation = np.zeros(3, dtype=np.float32) if scene_translation is None else np.asarray(scene_translation, dtype=np.float32)
-        world_view = world_to_view_matrix(self.R, self.T, translation, float(scene_scale))
-        self.world_view_transform = torch.tensor(world_view, dtype=torch.float32, device=self.data_device).transpose(0, 1)
-        self.projection_matrix = projection_matrix(self.znear, self.zfar, self.FoVx, self.FoVy).transpose(0, 1).to(self.data_device)
-        self.full_proj_transform = (self.world_view_transform.unsqueeze(0) @ self.projection_matrix.unsqueeze(0)).squeeze(0)
+        translation = (
+            np.zeros(3, dtype=np.float32)
+            if scene_translation is None
+            else np.asarray(scene_translation, dtype=np.float32)
+        )
+        world_view = world_to_view_matrix(
+            self.R, self.T, translation, float(scene_scale)
+        )
+        self.world_view_transform = torch.tensor(
+            world_view, dtype=torch.float32, device=self.data_device
+        ).transpose(0, 1)
+        self.projection_matrix = (
+            projection_matrix(self.znear, self.zfar, self.FoVx, self.FoVy)
+            .transpose(0, 1)
+            .to(self.data_device)
+        )
+        self.full_proj_transform = (
+            self.world_view_transform.unsqueeze(0) @ self.projection_matrix.unsqueeze(0)
+        ).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
 
         self.cx = record.cx * resolution[0] / record.image.size[0]
@@ -96,9 +110,13 @@ class RenderCamera(nn.Module):
         self.c2w = self.world_view_transform.transpose(0, 1).inverse()
         self.object_mask = self._load_object_mask(resolution)
 
-    def _resolve_alpha_mask(self, record: FrameRecord, resolution: tuple[int, int], rgba: torch.Tensor) -> torch.Tensor:
+    def _resolve_alpha_mask(
+        self, record: FrameRecord, resolution: tuple[int, int], rgba: torch.Tensor
+    ) -> torch.Tensor:
         if record.alpha_mask is not None:
-            return pil_image_to_tensor(record.alpha_mask, resolution).to(self.data_device)
+            return pil_image_to_tensor(record.alpha_mask, resolution).to(
+                self.data_device
+            )
         if rgba.shape[0] == 4:
             return rgba[3:4]
         return torch.ones_like(rgba[:1])
@@ -194,7 +212,9 @@ def read_intrinsics_text(path: str) -> dict[int, ColmapCamera]:
                 model=fields[1],
                 width=int(fields[2]),
                 height=int(fields[3]),
-                params=np.asarray([float(value) for value in fields[4:]], dtype=np.float64),
+                params=np.asarray(
+                    [float(value) for value in fields[4:]], dtype=np.float64
+                ),
             )
     return cameras
 
@@ -217,11 +237,19 @@ def read_extrinsics_text(path: str) -> dict[int, ColmapImage]:
             if feature_line:
                 xys = np.column_stack(
                     [
-                        np.asarray([float(value) for value in feature_line[0::3]], dtype=np.float64),
-                        np.asarray([float(value) for value in feature_line[1::3]], dtype=np.float64),
+                        np.asarray(
+                            [float(value) for value in feature_line[0::3]],
+                            dtype=np.float64,
+                        ),
+                        np.asarray(
+                            [float(value) for value in feature_line[1::3]],
+                            dtype=np.float64,
+                        ),
                     ]
                 )
-                point_ids = np.asarray([int(value) for value in feature_line[2::3]], dtype=np.int64)
+                point_ids = np.asarray(
+                    [int(value) for value in feature_line[2::3]], dtype=np.int64
+                )
             else:
                 xys = np.zeros((0, 2), dtype=np.float64)
                 point_ids = np.zeros((0,), dtype=np.int64)
@@ -245,7 +273,9 @@ def read_intrinsics_binary(path: str) -> dict[int, ColmapCamera]:
             camera_id, model_id, width, height = _unpack(handle, "iiQQ")
             model_name, param_count = CAMERA_MODEL_SPECS[model_id]
             params = np.asarray(_unpack(handle, "d" * param_count), dtype=np.float64)
-            cameras[camera_id] = ColmapCamera(camera_id, model_name, width, height, params)
+            cameras[camera_id] = ColmapCamera(
+                camera_id, model_name, width, height, params
+            )
     return cameras
 
 
@@ -312,7 +342,9 @@ class SceneBundle:
     ply_path: str
 
 
-def discover_colmap_scene(root: str, images: str, depths: str, masks: str, add_mask: bool, add_depth: bool) -> SceneLayout:
+def discover_colmap_scene(
+    root: str, images: str, depths: str, masks: str, add_mask: bool, add_depth: bool
+) -> SceneLayout:
     base = Path(root)
     image_dir = base / images
     mask_dir = (base / masks) if add_mask else None
@@ -333,11 +365,17 @@ def discover_colmap_scene(root: str, images: str, depths: str, masks: str, add_m
     binary = True
     for candidate_image, candidate_camera, is_binary in metadata_candidates:
         if candidate_image.exists() and candidate_camera.exists():
-            image_file, camera_file, binary = candidate_image, candidate_camera, is_binary
+            image_file, camera_file, binary = (
+                candidate_image,
+                candidate_camera,
+                is_binary,
+            )
             break
     if image_file is None or camera_file is None:
         raise FileNotFoundError(f"No COLMAP camera files found under {root}")
-    point_cloud_file = next((candidate for candidate in point_cloud_candidates if candidate.exists()), None)
+    point_cloud_file = next(
+        (candidate for candidate in point_cloud_candidates if candidate.exists()), None
+    )
     if point_cloud_file is None:
         raise FileNotFoundError(f"No supported point cloud file found under {root}")
     depth_param_file = None
@@ -371,7 +409,10 @@ def load_point_cloud(path: str) -> PointCloudSample:
     vertex = ply["vertex"]
     points = np.stack([vertex["x"], vertex["y"], vertex["z"]], axis=1)
     colors = (
-        np.stack([vertex["red"], vertex["green"], vertex["blue"]], axis=1).astype(np.float32) / 255.0
+        np.stack([vertex["red"], vertex["green"], vertex["blue"]], axis=1).astype(
+            np.float32
+        )
+        / 255.0
         if {"red", "green", "blue"}.issubset(vertex.data.dtype.names)
         else np.zeros_like(points, dtype=np.float32)
     )
@@ -380,18 +421,35 @@ def load_point_cloud(path: str) -> PointCloudSample:
         if {"nx", "ny", "nz"}.issubset(vertex.data.dtype.names)
         else np.zeros_like(points, dtype=np.float32)
     )
-    labels = np.asarray(vertex["label"]).astype(np.uint8) if "label" in vertex.data.dtype.names else np.zeros(points.shape[0], dtype=np.uint8)
-    return PointCloudSample(points=points, colors=colors, normals=normals, label_ids=labels)
+    labels = (
+        np.asarray(vertex["label"]).astype(np.uint8)
+        if "label" in vertex.data.dtype.names
+        else np.zeros(points.shape[0], dtype=np.uint8)
+    )
+    return PointCloudSample(
+        points=points, colors=colors, normals=normals, label_ids=labels
+    )
 
 
-def write_point_cloud(path: str, points: np.ndarray, colors: np.ndarray, labels: np.ndarray) -> None:
+def write_point_cloud(
+    path: str, points: np.ndarray, colors: np.ndarray, labels: np.ndarray
+) -> None:
     labels = labels.reshape(-1, 1)
     normals = np.zeros_like(points)
-    rgb = np.clip(colors * 255.0 if colors.dtype.kind == "f" else colors, 0, 255).astype(np.uint8)
+    rgb = np.clip(
+        colors * 255.0 if colors.dtype.kind == "f" else colors, 0, 255
+    ).astype(np.uint8)
     dtype = [
-        ("x", "f4"), ("y", "f4"), ("z", "f4"),
-        ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),
-        ("red", "u1"), ("green", "u1"), ("blue", "u1"), ("label", "u1"),
+        ("x", "f4"),
+        ("y", "f4"),
+        ("z", "f4"),
+        ("nx", "f4"),
+        ("ny", "f4"),
+        ("nz", "f4"),
+        ("red", "u1"),
+        ("green", "u1"),
+        ("blue", "u1"),
+        ("label", "u1"),
     ]
     packed = np.concatenate([points, normals, rgb, labels], axis=1)
     structured = np.empty(points.shape[0], dtype=dtype)
@@ -405,8 +463,16 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
         with open(layout.depth_param_file, "r", encoding="utf-8") as handle:
             depth_params = json.load(handle)
 
-    extrinsics = read_extrinsics_binary(str(layout.image_file)) if layout.binary else read_extrinsics_text(str(layout.image_file))
-    intrinsics = read_intrinsics_binary(str(layout.camera_file)) if layout.binary else read_intrinsics_text(str(layout.camera_file))
+    extrinsics = (
+        read_extrinsics_binary(str(layout.image_file))
+        if layout.binary
+        else read_extrinsics_text(str(layout.image_file))
+    )
+    intrinsics = (
+        read_intrinsics_binary(str(layout.camera_file))
+        if layout.binary
+        else read_intrinsics_text(str(layout.camera_file))
+    )
 
     def build_record(extrinsic):
         intr = intrinsics[extrinsic.camera_id]
@@ -422,12 +488,21 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
         if not image_path.exists():
             return None
         image_name = image_path.stem
-        alpha_mask = Image.open(layout.mask_dir / extrinsic.name) if layout.mask_dir is not None and (layout.mask_dir / extrinsic.name).exists() else None
+        alpha_mask = (
+            Image.open(layout.mask_dir / extrinsic.name)
+            if layout.mask_dir is not None
+            and (layout.mask_dir / extrinsic.name).exists()
+            else None
+        )
         depth = None
         if layout.depth_dir is not None:
-            depth_path = layout.depth_dir / extrinsic.name.replace(".JPG", ".png").replace(".jpg", ".png")
+            depth_path = layout.depth_dir / extrinsic.name.replace(
+                ".JPG", ".png"
+            ).replace(".jpg", ".png")
             if depth_path.exists():
-                depth = cv2.imread(str(depth_path), -1).astype(np.float32) / float(2**16)
+                depth = cv2.imread(str(depth_path), -1).astype(np.float32) / float(
+                    2**16
+                )
         params = depth_params.get(image_name) if depth_params is not None else None
         return FrameRecord(
             uid=intr.id,
@@ -448,11 +523,17 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
         )
 
     with concurrent.futures.ThreadPoolExecutor() as pool:
-        records = [record for record in pool.map(build_record, extrinsics.values()) if record is not None]
+        records = [
+            record
+            for record in pool.map(build_record, extrinsics.values())
+            if record is not None
+        ]
     return sorted(records, key=lambda record: record.image_path)
 
 
-def split_records(records: list[FrameRecord], eval_mode: bool, llffhold: int) -> tuple[list[FrameRecord], list[FrameRecord]]:
+def split_records(
+    records: list[FrameRecord], eval_mode: bool, llffhold: int
+) -> tuple[list[FrameRecord], list[FrameRecord]]:
     if eval_mode:
         return (
             [record for index, record in enumerate(records) if index % llffhold != 0],
@@ -464,7 +545,16 @@ def split_records(records: list[FrameRecord], eval_mode: bool, llffhold: int) ->
     )
 
 
-def load_colmap_bundle(root: str, eval_mode: bool, images: str, depths: str, masks: str, add_mask: bool, add_depth: bool, llffhold: int = 32) -> SceneBundle:
+def load_colmap_bundle(
+    root: str,
+    eval_mode: bool,
+    images: str,
+    depths: str,
+    masks: str,
+    add_mask: bool,
+    add_depth: bool,
+    llffhold: int = 32,
+) -> SceneBundle:
     layout = discover_colmap_scene(root, images, depths, masks, add_mask, add_depth)
     records = read_camera_records(layout)
     train_records, test_records = split_records(records, eval_mode, llffhold)
@@ -480,7 +570,10 @@ def load_colmap_bundle(root: str, eval_mode: bool, images: str, depths: str, mas
 def build_camera(record: FrameRecord, uid: int, resolution_scale, args):
     original_width, original_height = record.image.size
     if args.resolution in [1, 2, 4, 8]:
-        resolution = round(original_width / (resolution_scale * args.resolution)), round(original_height / (resolution_scale * args.resolution))
+        resolution = (
+            round(original_width / (resolution_scale * args.resolution)),
+            round(original_height / (resolution_scale * args.resolution)),
+        )
     else:
         if args.resolution == -1 and original_width > 1600:
             downsample = original_width / 1600
@@ -518,11 +611,16 @@ def build_camera(record: FrameRecord, uid: int, resolution_scale, args):
 
 
 def build_camera_list(records, resolution_scale, args):
-    return [build_camera(record, index, resolution_scale, args) for index, record in enumerate(records)]
+    return [
+        build_camera(record, index, resolution_scale, args)
+        for index, record in enumerate(records)
+    ]
 
 
 def camera_to_json(index, record: FrameRecord):
-    camera_to_world = np.linalg.inv(world_to_view_matrix(record.rotation, record.translation))
+    camera_to_world = np.linalg.inv(
+        world_to_view_matrix(record.rotation, record.translation)
+    )
     return {
         "id": index,
         "img_name": record.image_name,
@@ -536,7 +634,16 @@ def camera_to_json(index, record: FrameRecord):
 
 
 class TrainingScene:
-    def __init__(self, args, anchor_cloud, decoder, load_iteration=None, shuffle=True, logger=None, weed_ratio=0.0):
+    def __init__(
+        self,
+        args,
+        anchor_cloud,
+        decoder,
+        load_iteration=None,
+        shuffle=True,
+        logger=None,
+        weed_ratio=0.0,
+    ):
         self.model_path = args.model_path
         self.resolution_scales = args.resolution_scales
         self.anchor_cloud = anchor_cloud
@@ -545,9 +652,20 @@ class TrainingScene:
         self.background = self._background_from_args(args)
 
         if args.data_format != "colmap":
-            raise NotImplementedError("VRoom core currently supports COLMAP datasets only.")
+            raise NotImplementedError(
+                "VRoom core currently supports COLMAP datasets only."
+            )
 
-        bundle = load_colmap_bundle(args.dataset_path, args.eval, args.frames, args.depths, args.masks, args.add_mask, args.add_depth, args.llffhold)
+        bundle = load_colmap_bundle(
+            args.dataset_path,
+            args.eval,
+            args.frames,
+            args.depths,
+            args.masks,
+            args.add_mask,
+            args.add_depth,
+            args.llffhold,
+        )
         if shuffle:
             rng = np.random.default_rng(0)
             rng.shuffle(bundle.train_records)
@@ -559,8 +677,12 @@ class TrainingScene:
 
         if load_iteration:
             checkpoints = CheckpointManager(self.anchor_cloud, self.decoder)
-            iteration_dir = os.path.join(self.model_path, "point_cloud", f"iteration_{load_iteration}")
-            payload = checkpoints.load_anchor_field(os.path.join(iteration_dir, "point_cloud.ply"))
+            iteration_dir = os.path.join(
+                self.model_path, "point_cloud", f"iteration_{load_iteration}"
+            )
+            payload = checkpoints.load_anchor_field(
+                os.path.join(iteration_dir, "point_cloud.ply")
+            )
 
             seeds = AnchorCloudData(
                 anchors_positions=payload["anchor"],
@@ -569,21 +691,43 @@ class TrainingScene:
                 anchors_log_scales=payload["log_scaling"],
                 anchors_rotations=payload["rotation"],
                 labels=payload["labels"],
-                semantic_manager=None if payload["labels"] is None else SemanticsManager(torch.unique(payload["labels"].view(-1))),
-                voxel_size=float(torch.exp(payload["log_scaling"][:, :3]).mean().item()) if payload["log_scaling"].numel() > 0 else 1.0,
+                semantic_manager=None
+                if payload["labels"] is None
+                else SemanticsManager(torch.unique(payload["labels"].view(-1))),
+                voxel_size=float(torch.exp(payload["log_scaling"][:, :3]).mean().item())
+                if payload["log_scaling"].numel() > 0
+                else 1.0,
             )
             self.anchor_cloud.set_anchors_cloud(seeds)
             checkpoints.load_decoder(Path(iteration_dir))
         else:
-            sampled = self.save_input_point_cloud(bundle.point_cloud, args.pc_downsampling_ratio, os.path.join(self.model_path, "input.ply"))
-            with open(os.path.join(self.model_path, "cameras.json"), "w", encoding="utf-8") as handle:
-                json.dump([camera_to_json(index, record) for index, record in enumerate(bundle.test_records + bundle.train_records)], handle)
+            sampled = self.save_input_point_cloud(
+                bundle.point_cloud,
+                args.pc_downsampling_ratio,
+                os.path.join(self.model_path, "input.ply"),
+            )
+            with open(
+                os.path.join(self.model_path, "cameras.json"), "w", encoding="utf-8"
+            ) as handle:
+                json.dump(
+                    [
+                        camera_to_json(index, record)
+                        for index, record in enumerate(
+                            bundle.test_records + bundle.train_records
+                        )
+                    ],
+                    handle,
+                )
 
             self.anchor_cloud.initialize_anchors(sampled)
 
         for scale in self.resolution_scales:
-            self.train_cameras[scale] = build_camera_list(bundle.train_records, scale, args)
-            self.test_cameras[scale] = build_camera_list(bundle.test_records, scale, args)
+            self.train_cameras[scale] = build_camera_list(
+                bundle.train_records, scale, args
+            )
+            self.test_cameras[scale] = build_camera_list(
+                bundle.test_records, scale, args
+            )
 
     def _background_from_args(self, args):
         if args.random_background:
@@ -592,7 +736,9 @@ class TrainingScene:
             return torch.ones(3, dtype=torch.float32, device=self.anchor_cloud.device)
         return torch.zeros(3, dtype=torch.float32, device=self.anchor_cloud.device)
 
-    def save_input_point_cloud(self, point_cloud: PointCloudSample, ratio: int, path: str) -> PointCloudSample:
+    def save_input_point_cloud(
+        self, point_cloud: PointCloudSample, ratio: int, path: str
+    ) -> PointCloudSample:
         stride = max(int(ratio), 1)
         sampled = PointCloudSample(
             points=point_cloud.points[::stride],
