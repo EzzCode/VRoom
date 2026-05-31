@@ -12,6 +12,7 @@ export type RootStackParamList = {
     isBundled: boolean;
   };
   Export: undefined;
+  ReconstructionStatus: { jobId: string };
   CoverageDemo: undefined;
 };
 

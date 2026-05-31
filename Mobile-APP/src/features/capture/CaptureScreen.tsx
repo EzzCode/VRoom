@@ -181,6 +181,10 @@ function CaptureScreenInner({ navigation }: Props) {
     if (isRecording) {
       stopSession();
       isRecordingRef.current = false;
+      // Jump to summary so the user can review + upload.
+      if (keyframes.length > 0) {
+        navigation.navigate('Export');
+      }
     } else {
       startSession();
       isRecordingRef.current = true;

@@ -127,36 +127,38 @@ The active capture session (saved camera poses, voxel matrix memory, frame count
 - Guided prompts ("Move to uncovered area", "Look upward", etc.)
 - Coverage % bar in HUD
 
-### Build 4: Session Export + Backend Upload  ← **NEXT**
+### Build 4: Session Export + Backend Upload  ← **client-side DONE, backend TODO**
 
 Goal: close the capture → server loop so a finished session can actually produce a mesh.
 
-**4a. Session summary screen** (`features/capture/SessionSummaryScreen.tsx`)
-- Shown when `stopSession()` fires
+**4a. Session summary screen** ✅ `features/export/ExportScreen.tsx`
+- Auto-opened when `stopSession()` fires (if any keyframes captured)
 - Stats: keyframe count, coverage %, duration, total MB on disk
-- Thumbnail grid of captured keyframes (tap to inspect / delete bad ones)
-- Buttons: "Upload to server" / "Discard session"
+- Thumbnail grid of all captured keyframes
+- Buttons: **Upload & Reconstruct** / **Discard** (with confirm)
 
-**4b. Session packaging** (`features/export/sessionPackager.ts`)
-- Build `session.json` with `{ sessionId, startedAt, endedAt, deviceInfo, coveragePercent, keyframes: [{ filename, pose, blurScore, timestamp }] }`
-- Zip all captured JPGs + `session.json` into one archive in the cache dir
-- Use `react-native-zip-archive` (works with Expo dev build)
+**4b. Session packaging** ✅ `features/export/sessionPackager.ts`
+- Builds `session.json` with `{ sessionId, startedAt, endedAt, deviceInfo, coveragePercent, keyframes: [{ index, filename, pose, blurScore }] }`
+- No zip dep — manifest goes as a string field, images as multipart file parts
+- `deleteSessionFiles()` cleanup helper called after successful upload
 
-**4c. Backend upload** (`features/export/uploadService.ts`)
-- POST multipart to `${API_BASE_URL}/sessions` with the zip
-- Show progress (XHR upload progress events, since `fetch` doesn't expose them)
-- Returns `{ sessionId, jobId }` — poll `/jobs/:jobId` for reconstruction status
-- Configurable server URL in `.env` / app settings (default to LAN IP for dev)
+**4c. Backend upload** ✅ `features/export/uploadService.ts`
+- `uploadSession()` — XHR multipart POST to `${API_BASE_URL}/sessions`, reports upload progress (0..1)
+- Returns `{ sessionId, jobId }`
+- `fetchJobStatus()` / `pollJobUntilComplete()` — 2.5 s poll interval, abortable
+- `getJobResultUrl()` — URL to download the finished GLB
+- Server URL in `features/export/config.ts` — defaults to `http://127.0.0.1:8000` (use `adb reverse tcp:8000 tcp:8000`)
 
-**4d. Reconstruction status screen**
-- Poll job state: `queued` → `colmap` → `gaussian-training` → `mesh-extraction` → `done`
-- When done: fetch resulting `.glb`, save via `meshStorage`, route to AR viewer with the new mesh pre-selected
+**4d. Reconstruction status screen** ✅ `features/export/ReconstructionStatusScreen.tsx`
+- Polls `/jobs/:id`, shows progress bar + stage checklist (queued → COLMAP → gaussian-training → mesh-extraction → done)
+- On `done`: downloads GLB to `documentDirectory/meshes/`, deletes the uploaded JPGs, navigates to `ARView` with the new mesh
+- On `failed`: shows error, lets user go back
 
-**4e. Backend endpoints** (minimal FastAPI server, separate task)
-- `POST /sessions` — receive zip, unpack, enqueue job, return `jobId`
-- `GET /jobs/:id` — return status + progress
-- `GET /jobs/:id/result` — return final GLB
-- Worker: run `object_isolation/run_pipeline.py` → `gstrain/trainer.py` → `Module4/extract_object_meshes.py`
+**4e. Backend endpoints** ❌ TODO (separate FastAPI task)
+- `POST /sessions` — multipart: `sessionJson` (string), `images` (multiple). Unpack to `runs/<sessionId>/images/`, write `session.json`, enqueue job, return `{ sessionId, jobId }`
+- `GET /jobs/:id` → `{ jobId, state, progress?, message? }`
+- `GET /jobs/:id/result` → the GLB binary
+- Worker: `object_isolation/run_pipeline.py` → `gstrain/trainer.py` → `Module4/extract_object_meshes.py`
 
 ### Build 5: AR Polish (after Build 4 is solid)
 - **Multi-mesh placement** — currently only one mesh can be placed. Lift `meshSource`/`isMeshPlaced` into an array `placedMeshes: PlacedMesh[]` so users can stage a whole room
