@@ -44,7 +44,11 @@ setup(
                 "nvcc": [
                     "-O3",
                     "--use_fast_math",
-                    # Turing (RTX 2000 series, T4)
+                    # Pascal (P100 - Kaggle)
+                    "-gencode=arch=compute_60,code=sm_60",
+                    # Volta (V100 - Colab)
+                    "-gencode=arch=compute_70,code=sm_70",
+                    # Turing (GTX series, RTX 2000 series, T4 - Kaggle)
                     "-gencode=arch=compute_75,code=sm_75",
                     # Ampere (RTX 3000 series, A100)
                     "-gencode=arch=compute_80,code=sm_80",
@@ -55,10 +59,11 @@ setup(
                     "-gencode=arch=compute_90,code=sm_90",
                     # Embed PTX for future architectures
                     "-gencode=arch=compute_90,code=compute_90",
-                    # May help GLM inline more aggressively,
+                    # May help GLM inline more aggressively
                     "--expt-relaxed-constexpr",
                     # Inject source lines into Nsight Compute
                     "-lineinfo",
+                    # Include thrid party libraries (currently GLM)
                     "-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")
                 ],
                 "cxx": ["-O3"]
