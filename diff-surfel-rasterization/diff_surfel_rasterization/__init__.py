@@ -579,40 +579,6 @@ def _get_projection_matrix(znear, zfar, fovX, fovY, device):
     P[2, 3] = -(zfar * znear) / (zfar - znear)
     return P
 
-def _depth_to_normal(depth, viewmats_inv, Ks):
-    """Compute surface normals from depth map via finite differences."""
-    # depth: [1, H, W, 1], viewmats_inv: [1, 4, 4], Ks: [1, 3, 3]
-    H, W = depth.shape[1], depth.shape[2]
-    K = Ks[0]
-    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-    
-    d = depth[0, :, :, 0]  # [H, W]
-    
-    # Create pixel grid
-    u = torch.arange(W, device=depth.device, dtype=depth.dtype)
-    v = torch.arange(H, device=depth.device, dtype=depth.dtype)
-    u, v = torch.meshgrid(u, v, indexing='xy')
-    
-    # Unproject to camera space
-    x = (u - cx) / fx * d
-    y = (v - cy) / fy * d
-    pts = torch.stack([x, y, d], dim=-1)  # [H, W, 3]
-    
-    # Finite differences
-    dx = pts[1:-1, 2:] - pts[1:-1, :-2]  # horizontal
-    dy = pts[2:, 1:-1] - pts[:-2, 1:-1]  # vertical
-    normal = torch.cross(dx, dy, dim=-1)
-    normal = F.normalize(normal, dim=-1)
-    
-    # Pad back to full size
-    normal = F.pad(normal, (0, 0, 1, 1, 1, 1), mode='constant', value=0)
-    
-    # Transform to world space
-    R_inv = viewmats_inv[0, :3, :3]
-    normal = torch.einsum('ij,hwj->hwi', R_inv, normal)
-    
-    return normal.unsqueeze(0)  # [1, H, W, 3]
-
 def depth_to_points(
     depths: Tensor, camtoworlds: Tensor, Ks: Tensor, z_depth: bool = True
 ) -> Tensor:

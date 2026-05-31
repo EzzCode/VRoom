@@ -12,7 +12,7 @@ clean:
 	cd ./diff-surfel-rasterization && rm -rf build diff_surfel_rasterization.egg-info/
 
 build:
-	cd ./diff-surfel-rasterization && CC=gcc-11 CXX=g++-11 pip install -e .
+	cd ./diff-surfel-rasterization && CC=gcc-11 CXX=g++-11 pip install -e . 2>&1 | tee build.log
 
 run_train:
 	python -m gstrain.trainer --config $(CONFIG) --scene_name $(SCENE) --gpu $(GPU)
