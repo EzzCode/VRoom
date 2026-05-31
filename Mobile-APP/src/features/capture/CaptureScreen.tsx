@@ -55,11 +55,16 @@ function CaptureScreenInner({ navigation }: Props) {
   const isRecordingRef = useRef(false);
   const isBlurryRef = useRef(false);
   const blurScoreRef = useRef(0);
+  const currentPoseRef = useRef(currentPose);
+  useEffect(() => {
+    currentPoseRef.current = currentPose;
+  }, [currentPose]);
 
   const handleCapture = useCallback(async () => {
     if (!camera.current || !isRecordingRef.current) return;
 
-    const { shouldCapture, results } = extractor.evaluate(currentPose);
+    const pose = currentPoseRef.current;
+    const { shouldCapture, results } = extractor.evaluate(pose);
 
     if (!shouldCapture) {
       const failed = results.find((r) => !r.result.passed);
@@ -75,7 +80,7 @@ function CaptureScreenInner({ navigation }: Props) {
 
       addKeyframe({
         imagePath: savedPath,
-        pose: currentPose ?? {
+        pose: pose ?? {
           position: [0, 0, 0],
           rotation: [0, 0, 0],
           forward: [0, 0, -1],
@@ -88,7 +93,7 @@ function CaptureScreenInner({ navigation }: Props) {
     } catch (e) {
       console.error('Failed to save frame:', e);
     }
-  }, [extractor, currentPose, addKeyframe, keyframes.length]);
+  }, [extractor, addKeyframe, keyframes.length]);
 
   useEffect(() => {
     if (!isRecording) {

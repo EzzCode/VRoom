@@ -18,8 +18,8 @@ export const CAPTURE_CONFIG = {
   angleDiversity: {
     /** Minimum Euclidean distance (metres) to allow a new capture */
     minDistance: 0.10,
-    /** Max cosine similarity (above this = "same direction") */
-    maxSimilarity: 0.95,
+    /** Max cosine similarity (above this = "same direction"). 0.98 ≈ 11° */
+    maxSimilarity: 0.98,
   },
 
   /** Coverage voxel grid configuration (Build 3) */
