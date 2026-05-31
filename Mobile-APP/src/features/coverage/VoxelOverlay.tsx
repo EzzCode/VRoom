@@ -31,12 +31,13 @@ export interface VoxelOverlayProps {
   maxRender?: number;
 }
 
-const VoxelOverlay: React.FC<VoxelOverlayProps> = ({ voxels, voxelSize, maxRender = 400 }) => {
+const VoxelOverlay: React.FC<VoxelOverlayProps> = ({ voxels, voxelSize, maxRender = 800 }) => {
   // Slightly smaller than the voxel cell so adjacent voxels don't z-fight.
   const renderSize = voxelSize * 0.85;
 
+  // Keep the most recently touched voxels so new sweeps stay visible.
   const limited = useMemo(
-    () => (voxels.length > maxRender ? voxels.slice(0, maxRender) : voxels),
+    () => (voxels.length > maxRender ? voxels.slice(-maxRender) : voxels),
     [voxels, maxRender],
   );
 

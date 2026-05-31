@@ -45,7 +45,7 @@ export default function CoverageDemoScreen({ navigation }: Props) {
   const observeIntervalMs = 800;
   const lastObserveRef = useRef(0);
   // Require at least this much movement (metres) before accumulating an observation.
-  const MIN_MOVE_M = 0.04;
+  const MIN_MOVE_M = 0.1;
   const lastPositionRef = useRef<[number, number, number] | null>(null);
 
   const handlePose = useCallback(
