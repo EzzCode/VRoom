@@ -247,7 +247,8 @@ def run_pipeline(
         raise RuntimeError(f"No supervision views produced for obj {obj_id}.")
 
     if debug:
-        save_supervision_manifest(supervision_views, obj_dir / "04_supervision_manifest.json")
+        (obj_dir / "04_supervision").mkdir(parents=True, exist_ok=True)
+        save_supervision_manifest(supervision_views, obj_dir / "04_supervision" / "supervision_manifest.json")
 
     n_real = sum(1 for v in supervision_views if v.get("source") == "real")
     n_hall = len(supervision_views) - n_real

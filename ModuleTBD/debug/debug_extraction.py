@@ -2,8 +2,8 @@
 
 Outputs under ``<obj_dir>/01_extraction/debug/``::
 
-    triptych/                    per-frame [src | objgs_mask | hybrid_mask] grids
-    contact_sheet.png            12-frame thumbnail grid (objgs vs hybrid)
+    triptych/                    per-frame [source | used mask] grids
+    contact_sheet.png            12-frame thumbnail grid
     summary.json                 numeric snapshot of the manifest
 
 Run standalone::
@@ -40,15 +40,6 @@ def _imread_rgb(path):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-def _read_mask_u8(path):
-    m = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-    if m is None:
-        return None
-    if m.ndim == 3:
-        m = m[..., -1] if m.shape[-1] == 4 else cv2.cvtColor(m, cv2.COLOR_BGR2GRAY)
-    return (m > 127).astype(np.uint8) * 255
-
-
 def _resize_pair(rgb, mask, max_h=320):
     h, w = rgb.shape[:2]
     s = min(1.0, max_h / max(h, 1))
@@ -72,27 +63,13 @@ def _label(img, text, color=(255, 255, 255)):
     return out
 
 
-def _draw_bbox(img, bbox_xywh, color=(255, 255, 0)):
-    if not bbox_xywh:
-        return img
-    x, y, w, h = [int(round(v)) for v in bbox_xywh]
-    out = img.copy()
-    cv2.rectangle(out, (x, y), (x + w, y + h), color, 2)
-    return out
-
-
-def _make_triptych(rgb, mask_hybrid, mask_objgs, bbox, frame_label):
-    rgb, mask_hybrid = _resize_pair(rgb, mask_hybrid)
-    mask_objgs = cv2.resize(mask_objgs, (rgb.shape[1], rgb.shape[0]), cv2.INTER_NEAREST) \
-        if mask_objgs is not None else np.zeros(rgb.shape[:2], np.uint8)
-
-    panel_src = _draw_bbox(_label(rgb, "source"), bbox)
-    panel_objgs = _label(_overlay_mask(rgb, mask_objgs, (60, 60, 220)),
-                         "ObjectGS mask (raw)", (220, 220, 255))
-    panel_hyb = _label(_overlay_mask(rgb, mask_hybrid, (0, 200, 0)),
-                       "hybrid mask (used)", (220, 255, 220))
+def _make_triptych(rgb, mask, frame_label):
+    rgb, mask = _resize_pair(rgb, mask)
+    panel_src = _label(rgb, "source")
+    panel_mask = _label(_overlay_mask(rgb, mask, (0, 200, 0)),
+                        "mask used", (220, 255, 220))
     gap = np.full((panel_src.shape[0], 4, 3), 240, np.uint8)
-    row = np.hstack([panel_src, gap, panel_objgs, gap, panel_hyb])
+    row = np.hstack([panel_src, gap, panel_mask])
 
     header_h = 28
     header = np.full((header_h, row.shape[1], 3), 245, np.uint8)
@@ -145,24 +122,15 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
     for f in frames_for_triptych:
         rgb_src = _imread_rgb(images_dir / f.get("image_name", "")) \
             if (images_dir / f.get("image_name", "")).exists() else None
-        if rgb_src is None and f.get("image_path"):
-            rgb_src = _imread_rgb(f["image_path"])
         rgba = cv2.imread(f.get("out_rgba_path", ""), cv2.IMREAD_UNCHANGED)
         mask_hybrid = (rgba[..., -1] > 127).astype(np.uint8) * 255 if rgba is not None and rgba.ndim == 3 else None
-        if mask_hybrid is None:
-            mask_hybrid = _read_mask_u8(f.get("out_mask_path", ""))
         if rgb_src is None or mask_hybrid is None:
             continue
-
-        # ObjectGS-only mask: not stored separately; approximate as the hybrid mask
-        # but greyed where Module1 added pixels (we don't have a separate file).
-        mask_objgs = mask_hybrid  # placeholder; manifest does not separate them
 
         label = (f"cam={f.get('cam_index')} | {f.get('image_name','?')} | "
                  f"az={f.get('azimuth_deg', 0.0):+.1f} | "
                  f"fg={f.get('fg_fraction', 0.0):.3f}")
-        trip = _make_triptych(rgb_src, mask_hybrid, mask_objgs,
-                              f.get("bbox_xywh"), label)
+        trip = _make_triptych(rgb_src, mask_hybrid, label)
         out_path = debug_dir / "triptych" / f"cam_{f.get('cam_index'):03d}.png"
         cv2.imwrite(str(out_path), cv2.cvtColor(trip, cv2.COLOR_RGB2BGR))
 
@@ -170,15 +138,13 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
     for f in frames[:contact_sheet_size]:
         rgb_src = _imread_rgb(images_dir / f.get("image_name", "")) \
             if (images_dir / f.get("image_name", "")).exists() else None
-        if rgb_src is None and f.get("image_path"):
-            rgb_src = _imread_rgb(f["image_path"])
         if rgb_src is None:
             continue
         rgba = cv2.imread(f.get("out_rgba_path", ""), cv2.IMREAD_UNCHANGED)
         if rgba is not None and rgba.ndim == 3 and rgba.shape[-1] == 4:
             mask = (rgba[..., -1] > 127).astype(np.uint8) * 255
         else:
-            mask = _read_mask_u8(f.get("out_mask_path", ""))
+            mask = None
         if mask is None:
             continue
         sheet_items.append((rgb_src, mask,
@@ -191,7 +157,6 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
 
     summary = {
         "n_frames": n_total,
-        "object_id": manifest.get("object_id"),
         "fg_fraction_mean": float(np.mean([f.get("fg_fraction", 0.0) for f in frames])) if frames else 0.0,
         "fg_fraction_min": float(np.min([f.get("fg_fraction", 0.0) for f in frames])) if frames else 0.0,
         "fg_fraction_max": float(np.max([f.get("fg_fraction", 0.0) for f in frames])) if frames else 0.0,

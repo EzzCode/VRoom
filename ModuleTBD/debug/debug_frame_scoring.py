@@ -4,7 +4,7 @@ Outputs under ``<obj_dir>/02_frame_scoring/debug/``::
 
     bar_top10.png            top-10 frames bar chart of total score
     scatter_az_score.png     azimuth vs total score for all candidates
-    components_top10.png     stacked component breakdown (front/cover/sharp/expose/occl)
+    components_top10.png     stacked component breakdown (front/cover/sharp/expose)
     topk_strip.png           horizontal strip of the chosen top-K thumbnails
     summary.json             ranking + selected indices
 
@@ -28,13 +28,12 @@ if str(_VROOM_ROOT) not in sys.path:
 logger = logging.getLogger(__name__)
 
 
-_COMPONENTS = ("front", "cover", "sharp", "expose", "occl")
+_COMPONENTS = ("front", "cover", "sharp", "expose")
 _COMP_COLORS = {
     "front":  (120, 200, 255),
     "cover":  (130, 200, 130),
     "sharp":  (180, 140, 230),
     "expose": (210, 180, 90),
-    "occl":   (220, 120, 120),
 }
 
 
@@ -196,8 +195,6 @@ def generate_debug_artifacts(*, scores, debug_dir):
 
     ranking = scores.get("ranking", [])
     top_k = scores.get("top_k", [])
-    weights = scores.get("weights", {})
-
     top10 = ranking[:10]
     if top10:
         labels = [f"cam={e.get('cam_index', '?')} {str(e.get('image_name', ''))[:24]}"
@@ -213,7 +210,6 @@ def generate_debug_artifacts(*, scores, debug_dir):
     _make_topk_strip(top_k, out_path=debug_dir / "topk_strip.png")
 
     summary = {
-        "weights": weights,
         "n_frames": int(scores.get("n_frames", len(ranking))),
         "n_top_k": len(top_k),
         "top_k_image_names": [e.get("image_name") for e in top_k],

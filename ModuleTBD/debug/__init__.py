@@ -43,7 +43,7 @@ def generate_all_debug_artifacts(
     obj_dir.mkdir(parents=True, exist_ok=True)
     results = {}
 
-    # ── Scope (00_scope_debug) ────────────────────────────────────────────
+    # ── Scope (00_scope/debug) ──────────────────────────────────────────────
     try:
         from .debug_scope import generate_debug_artifacts as _scope
         results["scope"] = _scope(
@@ -54,7 +54,7 @@ def generate_all_debug_artifacts(
     except Exception as exc:  # noqa: BLE001
         logger.warning("debug_scope failed: %s", exc)
 
-    # ── Extraction (01_extraction_debug) ──────────────────────────────────
+    # ── Extraction (01_extraction/debug) ─────────────────────────────────
     if extraction_manifest is not None and images_dir is not None:
         try:
             from .debug_extraction import generate_debug_artifacts as _extr
@@ -67,7 +67,7 @@ def generate_all_debug_artifacts(
         except Exception as exc:  # noqa: BLE001
             logger.warning("debug_extraction failed: %s", exc)
 
-    # ── Frame scoring (02_frame_scoring_debug) ────────────────────────────
+    # ── Frame scoring (02_frame_scoring/debug) ────────────────────────────
     if scores_manifest is not None:
         try:
             from .debug_frame_scoring import generate_debug_artifacts as _fs
@@ -78,7 +78,7 @@ def generate_all_debug_artifacts(
         except Exception as exc:  # noqa: BLE001
             logger.warning("debug_frame_scoring failed: %s", exc)
 
-    # ── Novel views (03_novel_views_debug) ────────────────────────────────
+    # ── Novel views (03_novel_views/debug) ────────────────────────────────
     if halluc_manifest is not None:
         try:
             from .debug_novel_views import generate_debug_artifacts as _nv
@@ -90,7 +90,7 @@ def generate_all_debug_artifacts(
         except Exception as exc:  # noqa: BLE001
             logger.warning("debug_novel_views failed: %s", exc)
 
-    # ── Supervision & training (04_supervision_debug) ─────────────────────
+    # ── Supervision & training (04_supervision/debug) ─────────────────────
     try:
         from .debug_supervision import generate_debug_artifacts as _sv
         results["supervision"] = _sv(
@@ -106,7 +106,7 @@ def generate_all_debug_artifacts(
     except Exception as exc:  # noqa: BLE001
         logger.warning("debug_supervision failed: %s", exc)
 
-    # ── Audit (05_supervision_audit + 06_projection_audit) ───────────────
+    # ── Audit (04_supervision/debug/supervision_audit + /projection_audit) ──
     try:
         from .debug_audit import generate_debug_artifacts as _audit
         audit_results = _audit(

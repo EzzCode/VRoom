@@ -55,6 +55,8 @@ def run(
     # Extraction
     tau_alpha=0.4,
     min_pixels=64,
+    seg_map_dir="auto",
+    seg_label=None,
     # Frame scoring
     top_k=5,
     # Novel views
@@ -134,16 +136,48 @@ def run(
     try:
         scene_p = Path(scene_dir)
         images_dir = scene_p / "images"
+        resolved_seg_map_dir = None
+        if str(seg_map_dir).lower() == "auto":
+            for candidate in (
+                scene_p / "tracked" / "id_maps",
+                scene_p / "semantic_instance",
+                scene_p / "object_mask",
+                scene_p / "object_mask_deva",
+            ):
+                if candidate.exists() and any(candidate.iterdir()):
+                    resolved_seg_map_dir = candidate
+                    break
+        elif str(seg_map_dir).lower() not in ("none", "null", ""):
+            resolved_seg_map_dir = Path(seg_map_dir)
+
+        if resolved_seg_map_dir is None:
+            raise RuntimeError(
+                "No seg_map_dir found. Pass --seg_map_dir explicitly or ensure one of the "
+                "auto-discovery paths (tracked/id_maps, semantic_instance, object_mask, "
+                "object_mask_deva) exists and is non-empty under the scene directory."
+            )
+
+        if seg_label is None:
+            from ModuleTBD.utils.helpers import vote_seg_label
+            seg_label = vote_seg_label(
+                scope, gaussians, pipe_config, resolved_seg_map_dir, tau_alpha=tau_alpha
+            )
+            if seg_label is None:
+                raise RuntimeError(
+                    "vote_seg_label could not match any seg map label to the GS model silhouette. "
+                    "Pass --seg_label explicitly."
+                )
 
         extraction_manifest = run_extraction(
             scope=scope,
-            gaussians=gaussians,
-            pipe_config=pipe_config,
             images_dir=images_dir,
             output_dir=obj_dir / "01_extraction",
+            seg_map_dir=resolved_seg_map_dir,
+            seg_label=seg_label,
+            min_pixels=min_pixels,
         )
         summary["phases"]["extraction"] = extraction_manifest
-        logger.info("✓ Extraction: %d frames extracted", extraction_manifest["n_extracted"])
+        logger.info("✓ Extraction: %d frames extracted", len(extraction_manifest.get("frames", [])))
     except Exception as exc:
         logger.exception("✗ Extraction failed: %s", exc)
         summary["phases"]["extraction"] = {"error": str(exc)}
@@ -288,7 +322,7 @@ def run(
     # ── Save summary ──────────────────────────────────────────────────────────
     logger.info("\n" + "=" * 80)
     logger.info("PIPELINE COMPLETE — object %d", obj_id)
-    logger.info("  extraction : %d frames", summary["phases"].get("extraction", {}).get("n_extracted", 0))
+    logger.info("  extraction : %d frames", len(summary["phases"].get("extraction", {}).get("frames", [])))
     logger.info("  novel views: %d kept", summary["phases"].get("novel_views", {}).get("n_kept", 0))
     logger.info("  output dir : %s", obj_dir)
     logger.info("=" * 80 + "\n")
@@ -327,6 +361,10 @@ def _parse_args():
     # Extraction
     p.add_argument("--tau_alpha", type=float, default=0.4)
     p.add_argument("--min_pixels", type=int, default=64)
+    p.add_argument("--seg_map_dir", default="auto",
+                   help="'auto', 'none', or path to Module1 per-frame segmentation map directory")
+    p.add_argument("--seg_label", type=int, default=None,
+                   help="Instance label from Module1 segmentation maps (same label in the labeled COLMAP PLY); auto-voted if omitted")
 
     # Frame scoring
     p.add_argument("--top_k", type=int, default=5)
@@ -368,6 +406,8 @@ def main():
         output_root=args.output_root,
         object_id=args.object_id,
         ply_path=args.ply_path,
+        seg_map_dir=args.seg_map_dir,
+        seg_label=args.seg_label,
         iterations=args.iterations,
         tau_alpha=args.tau_alpha,
         min_pixels=args.min_pixels,

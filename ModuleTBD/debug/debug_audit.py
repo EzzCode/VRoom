@@ -86,10 +86,10 @@ def _signed_angle_delta_deg(a, b):
 
 
 def _load_manifest(obj_dir):
-    path = Path(obj_dir) / "04_supervision_manifest.json"
+    path = Path(obj_dir) / "04_supervision" / "supervision_manifest.json"
     if not path.exists():
         raise FileNotFoundError(
-            f"04_supervision_manifest.json not found under {obj_dir}. "
+            f"04_supervision/supervision_manifest.json not found under {obj_dir}. "
             "Run pipeline with --debug to generate it."
         )
     with open(path) as f:
@@ -573,9 +573,8 @@ def _run_supervision_audit(obj_dir, scope, frame, model_path, object_id, debug_d
     return report
 
 
-def _run_projection_audit(obj_dir, model_path, object_id, debug_dir):
+def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None, frame=None):
     """Run the stage-06 projection audit (rebuilds views from scratch)."""
-    from ModuleTBD.utils.scene_analysis import compute_object_scope
     from ModuleTBD.utils.colmap_init import load_colmap_object_point_cloud
     from ModuleTBD.dataset_builder import build_supervision_views
 
@@ -589,8 +588,12 @@ def _run_projection_audit(obj_dir, model_path, object_id, debug_dir):
 
     test_halluc_manifest(halluc_index)
 
-    logger.info("Loading scope for object %s ...", object_id)
-    scope, frame, _pipe_config = compute_object_scope(model_path, int(object_id))
+    if scope is None or frame is None:
+        from ModuleTBD.utils.scene_analysis import compute_object_scope
+        logger.info("Loading scope for object %s ...", object_id)
+        scope, frame, _pipe_config = compute_object_scope(model_path, int(object_id))
+    else:
+        logger.info("Using pre-loaded scope for object %s.", object_id)
 
     logger.info("Loading COLMAP seed points ...")
     pcd, metadata = load_colmap_object_point_cloud(
@@ -686,7 +689,7 @@ def generate_debug_artifacts(
             frame=frame,
             model_path=model_path,
             object_id=object_id,
-            debug_dir=obj_dir / "05_supervision_audit" / "debug",
+            debug_dir=obj_dir / "04_supervision" / "debug" / "supervision_audit",
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("supervision_audit failed: %s", exc)
@@ -699,10 +702,12 @@ def generate_debug_artifacts(
                 obj_dir=obj_dir,
                 model_path=model_path,
                 object_id=object_id,
-                debug_dir=obj_dir / "06_projection_audit" / "debug",
+                debug_dir=obj_dir / "04_supervision" / "debug" / "projection_audit",
+                scope=scope,
+                frame=frame,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("projection_audit failed: %s", exc)
+            logger.exception("projection_audit failed: %s", exc)
             results["projection"] = {"error": str(exc)}
 
     return results
@@ -754,7 +759,7 @@ if __name__ == "__main__":
             logger.warning("Could not load scope: %s — projection check will be skipped", exc)
 
     if args.mode == "supervision":
-        debug_dir = Path(obj_dir) / "05_supervision_audit" / "debug"
+        debug_dir = Path(obj_dir) / "04_supervision" / "debug" / "supervision_audit"
         _run_supervision_audit(
             obj_dir=obj_dir, scope=scope, frame=frame_obj,
             model_path=args.model_path, object_id=args.object_id,
@@ -763,10 +768,11 @@ if __name__ == "__main__":
     elif args.mode == "projection":
         if args.model_path is None or args.object_id is None:
             raise SystemExit("--model_path and --object_id are required for projection mode.")
-        debug_dir = Path(obj_dir) / "06_projection_audit" / "debug"
+        debug_dir = Path(obj_dir) / "04_supervision" / "debug" / "projection_audit"
         _run_projection_audit(
             obj_dir=obj_dir, model_path=args.model_path,
             object_id=args.object_id, debug_dir=debug_dir,
+            scope=scope, frame=frame_obj,
         )
     else:  # both
         generate_debug_artifacts(

@@ -1,50 +1,75 @@
 import json
 import logging
 import math
-from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from .utils.gstrain_wrapper import make_camera, render_rgba
-from .utils.helpers import find_image, find_id_map, auto_resolve_module1_id
+from .utils.helpers import find_image, find_seg_map
 
 logger = logging.getLogger(__name__)
 
 WEIGHTS = {
-    "front":  0.35, # prefer front-facing views
-    "cover":  0.20, # how big the object is in frame max is COVER_TARGET
+    "front":  0.40, # prefer front-facing views
+    "cover":  0.25, # how big the object is in frame max is COVER_TARGET
     "sharp":  0.20, # rank-normalized masked Laplacian variance
-    "expose": 0.10, 
-    "occl":   0.15, # higher fraction of trained model pixels kept in hybrid mask
+    "expose": 0.15,
 }
 
 COVER_TARGET = 0.30
 COVER_FLOOR  = 0.02
 COVER_CEIL   = 0.85
 
-@dataclass
-class ExtractedFrame:
-    cam_index: int
-    image_name: str
-    image_path: str
-    n_pixels_objgs: int
-    n_pixels_hybrid: int
-    bbox_xywh: list
-    fg_fraction: float
-    azimuth_deg: float
-    elevation_deg: float
-    out_rgba_path: str
-    out_mask_path: str
-    used_real_mask: bool
+MIN_MASK_PIXELS  = 64     # frames with fewer foreground pixels are discarded
+EXPOSURE_CLAMP   = 5.0    # penalty scale for blown-out / blacked-out pixels
 
 
-def extract_frame(scope, gaussians, pipe_config, cam_index, images_dir,
-                  id_map_dir, module1_obj_id, out_rgba_dir, out_mask_dir):
+def _largest_cc(mask, min_pixels=MIN_MASK_PIXELS):
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=4)
+    if n_labels < 2:
+        return np.zeros_like(mask, dtype=bool)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    k = int(np.argmax(areas)) + 1
+    if stats[k, cv2.CC_STAT_AREA] < int(min_pixels):
+        return np.zeros_like(mask, dtype=bool)
+    return labels == k
 
-    alpha_thresh = 0.4
-    min_pixels = 64
+
+def _close_and_fill(mask):
+    if not np.any(mask):
+        return np.zeros_like(mask, dtype=bool)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    closed = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+    h, w = closed.shape
+    flood = closed.copy()
+    ff = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    cv2.floodFill(flood, ff, (0, 0), 1)
+    holes = flood == 0
+    return (closed.astype(bool) | holes)
+
+
+def _load_seg_mask(seg_map_dir, image_name, seg_label, shape):
+    """Return a boolean mask for `seg_label` read from Module1's per-frame segmentation map."""
+    if seg_map_dir is None or seg_label is None:
+        return None
+    seg_map_path = find_seg_map(Path(seg_map_dir), image_name)
+    if seg_map_path is None:
+        return None
+    seg_map = cv2.imread(str(seg_map_path), cv2.IMREAD_UNCHANGED)
+    if seg_map is None:
+        return None
+    if seg_map.ndim == 3:
+        seg_map = seg_map[..., 0]
+    height, width = shape
+    if seg_map.shape[:2] != (height, width):
+        seg_map = cv2.resize(seg_map, (width, height), interpolation=cv2.INTER_NEAREST)
+    return seg_map == int(seg_label)
+
+
+def extract_frame(scope, cam_index, images_dir, out_rgba_dir,
+                  seg_map_dir, seg_label,
+                  min_pixels=MIN_MASK_PIXELS):
 
     camera = scope.cameras[cam_index]
     image_name = camera["image_name"]
@@ -62,112 +87,72 @@ def extract_frame(scope, gaussians, pipe_config, cam_index, images_dir,
     height, width = img.shape[:2]
     img = img[:, :, ::-1]  # BGR to RGB
 
-    v_camera = make_camera(camera["R"], camera["T"], camera["K"], camera["width"], camera["height"])
-    alpha = render_rgba(gaussians, v_camera, pipe_config, object_label_id=scope.object_label_id)
-    alpha = alpha["alpha"].detach().cpu().numpy()
+    raw_mask = _load_seg_mask(seg_map_dir, image_name, seg_label, (height, width))
+    if raw_mask is None:
+        raise RuntimeError(
+            f"cam {cam_index} ({image_name}): seg map not found under {seg_map_dir} "
+            f"for seg_label={seg_label}. Ensure Module1 seg maps cover all visible cameras."
+        )
 
-    mask_model = (alpha[0] if alpha.ndim == 3 else alpha) > alpha_thresh
-    if mask_model.shape != (height, width):
-        mask_model = cv2.resize(mask_model.astype(np.uint8), (width, height),
-                                interpolation=cv2.INTER_NEAREST).astype(bool)
+    mask = _largest_cc(_close_and_fill(raw_mask), min_pixels=min_pixels)
 
-    used_real = False
-    mask_hybrid = mask_model
-
-    id_map_path = find_id_map(id_map_dir, image_name)
-    if id_map_path is not None:
-        id_map = cv2.imread(str(id_map_path), cv2.IMREAD_UNCHANGED)
-        if id_map is not None:
-            if id_map.shape[:2] != (height, width):
-                id_map = cv2.resize(id_map, (width, height), interpolation=cv2.INTER_NEAREST)
-            mask_hybrid = np.logical_and(mask_model, id_map == module1_obj_id)
-            used_real = True
-
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_hybrid.astype(np.uint8), connectivity=4)
-    if n_labels < 0:
-        mask_hybrid = np.zeros_like(mask_hybrid, dtype=bool)
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    k = int(np.argmax(areas)) + 1
-    if stats[k, cv2.CC_STAT_AREA] < min_pixels:
-        mask_hybrid = np.zeros_like(mask_hybrid, dtype=bool)
-    else:
-        mask_hybrid = labels == k
-
-    n_pixels_hybrid = int(mask_hybrid.sum())
-    if n_pixels_hybrid < min_pixels:
-        logger.warning("cam %d: mask too small (%d px) — skipping", cam_index, n_pixels_hybrid)
+    n_pixels = int(mask.sum())
+    if n_pixels < int(min_pixels):
+        logger.warning("cam %d: mask too small (%d px) — skipping", cam_index, n_pixels)
         return None
 
-    alpha_u8 = mask_hybrid.astype(np.uint8) * 255
+    alpha_u8 = mask.astype(np.uint8) * 255
     rgba = np.concatenate([img, alpha_u8[..., None]], axis=-1)
-    ys, xs = np.where(mask_hybrid)
-    bbox = [int(xs.min()), int(ys.min()), int(xs.max()) - int(xs.min()) + 1,
-            int(ys.max()) - int(ys.min()) + 1]
-
     out_rgba_dir.mkdir(parents=True, exist_ok=True)
-    out_mask_dir.mkdir(parents=True, exist_ok=True)
     rgba_path = out_rgba_dir / f"{cam_index:03d}__{image_name}.png"
-    mask_path = out_mask_dir / f"{cam_index:03d}__{image_name}_mask.png"
     cv2.imwrite(str(rgba_path), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
-    cv2.imwrite(str(mask_path), alpha_u8)
 
-    return ExtractedFrame(
-        cam_index=cam_index,
-        image_name=image_name,
-        image_path=str(images_path),
-        n_pixels_objgs=int(mask_model.sum()),
-        n_pixels_hybrid=n_pixels_hybrid,
-        bbox_xywh=bbox,
-        fg_fraction=n_pixels_hybrid / (height * width),
-        azimuth_deg=float(camera.get("azimuth_deg", float("nan"))),
-        elevation_deg=float(camera.get("elevation_deg", float("nan"))),
-        out_rgba_path=str(rgba_path),
-        out_mask_path=str(mask_path),
-        used_real_mask=used_real,
-    )
+    return {
+        "cam_index": cam_index,
+        "image_name": image_name,
+        "fg_fraction": n_pixels / (height * width),
+        "azimuth_deg": float(camera.get("azimuth_deg", float("nan"))),
+        "elevation_deg": float(camera.get("elevation_deg", float("nan"))),
+        "out_rgba_path": str(rgba_path),
+        "sharpness": _sharp_metric(img, mask),
+        "exposure": _exposure_score(img, mask),
+    }
 
 
-def run_extraction(scope, gaussians, pipe_config, images_dir, output_dir,
-                   id_map_dir=None, module1_obj_id=None):
- 
+def run_extraction(scope, images_dir, output_dir,
+                   seg_map_dir, seg_label,
+                   min_pixels=MIN_MASK_PIXELS):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    id_map_dir = Path(id_map_dir) if id_map_dir else None
 
-    if id_map_dir is not None and module1_obj_id is None:
-        module1_obj_id = auto_resolve_module1_id(scope, gaussians, pipe_config, id_map_dir)
-    else:
-        logger.warning("Could not resolve Module1 id — falling back to ObjectGS mask only.")
+    seg_map_dir = Path(seg_map_dir)
 
-    views = []
+    frames = []
     for ci in scope.visible_cam_indices:
         try:
-            v = extract_frame(scope, gaussians, pipe_config, ci,
-                              Path(images_dir), id_map_dir, module1_obj_id,
-                              output_dir / "extracted", output_dir / "masks")
-            if v is not None:
-                views.append(v)
+            frame = extract_frame(
+                scope, ci,
+                Path(images_dir),
+                output_dir / "extracted",
+                seg_map_dir=seg_map_dir,
+                seg_label=seg_label,
+                min_pixels=min_pixels,
+            )
+            if frame is not None:
+                frames.append(frame)
         except Exception as e:
             logger.exception("cam %d failed: %s", ci, e)
 
-    n_real = sum(1 for v in views if v.used_real_mask)
-    manifest = {
-        "object_id": int(scope.object_label_id),
-        "module1_obj_id": int(module1_obj_id) if module1_obj_id is not None else None,
-        "n_visible_cams": len(scope.visible_cam_indices),
-        "n_extracted": len(views),
-        "n_used_real_mask": n_real,
-        "frames": [asdict(v) for v in views],
-    }
+    manifest = {"frames": frames}
     with open(output_dir / "extraction_index.json", "w") as f:
         json.dump(manifest, f, indent=2)
-    logger.info("Extracted %d/%d frames (%d with real mask)",
-                len(views), len(scope.visible_cam_indices), n_real)
+    logger.info("Extracted %d/%d frames", len(frames), len(scope.visible_cam_indices))
     return manifest
 
 
 def _front_score(az_deg, el_deg):
     if not math.isfinite(az_deg) or not math.isfinite(el_deg):
+        logger.debug("Non-finite azimuth or elevation")
         return 0.0
     s_az = (1.0 + math.cos(math.radians(az_deg))) * 0.5
     s_el = max(0.0, math.cos(math.radians(el_deg)))
@@ -176,6 +161,7 @@ def _front_score(az_deg, el_deg):
 
 def _cover_score(fg_fraction):
     if fg_fraction <= COVER_FLOOR or fg_fraction >= COVER_CEIL:
+        logger.debug("Foreground fraction %.3f outside of [%f, %f]", fg_fraction, COVER_FLOOR, COVER_CEIL)
         return 0.0
     if fg_fraction <= COVER_TARGET:
         return (fg_fraction - COVER_FLOOR) / max(COVER_TARGET - COVER_FLOOR, 1e-6)
@@ -183,8 +169,6 @@ def _cover_score(fg_fraction):
 
 
 def _sharp_metric(rgb, mask):
-    if mask.sum() < 32:
-        return 0.0
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     lap = cv2.Laplacian(gray, cv2.CV_32F)
     vals = lap[mask]
@@ -206,17 +190,10 @@ def _rank_normalize(values):
 
 
 def _exposure_score(rgb, mask):
-    if mask.sum() < 32:
-        return 0.0
     pix = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)[mask] / 255.0
     luma = max(0.0, 1.0 - 2.0 * abs(float(np.mean(pix)) - 0.5))
-    return float(luma * (1.0 - min(1.0, float(np.mean(pix > 0.98)) * 5.0))
-                      * (1.0 - min(1.0, float(np.mean(pix < 0.02)) * 5.0)))
-
-
-def _occlusion_score(n_hybrid, n_objgs):
-    return float(min(1.0, n_hybrid / max(n_objgs, 1)))
-
+    return float(luma * (1.0 - min(1.0, float(np.mean(pix > 0.98)) * EXPOSURE_CLAMP))
+                      * (1.0 - min(1.0, float(np.mean(pix < 0.02)) * EXPOSURE_CLAMP)))
 
 
 def run_scoring(extraction_index_path, top_k=5):
@@ -224,34 +201,27 @@ def run_scoring(extraction_index_path, top_k=5):
     with open(extraction_index_path) as f:
         frames = json.load(f)["frames"]
     if not frames:
-        return {"weights": weights, "frames": [], "ranking": [], "top_k": []}
+        return {"ranking": [], "top_k": []}
 
     collected = []
     for fr in frames:
-        img = cv2.imread(fr["image_path"], cv2.IMREAD_COLOR)
-        mask_u8 = cv2.imread(fr["out_mask_path"], cv2.IMREAD_GRAYSCALE)
-        if img is None or mask_u8 is None:
-            continue
-        img = img[:, :, ::-1]  # BGR → RGB
-        mask = mask_u8 > 127
         az = float(fr.get("azimuth_deg", float("nan")))
         if math.isfinite(az):
             az = ((az + 180.0) % 360.0) - 180.0
         el = float(fr.get("elevation_deg", 0.0))
         if not math.isfinite(el):
             el = 0.0
-        collected.append((fr, img, mask, az, el, _sharp_metric(img, mask)))
+        collected.append((fr, az, el, float(fr["sharpness"]), float(fr["exposure"])))
 
-    sharp_norm = _rank_normalize([item[5] for item in collected])
+    sharp_norm = _rank_normalize([item[3] for item in collected])
 
     results = []
-    for (fr, img, mask, az, el, sharp_raw), sharp in zip(collected, sharp_norm):
+    for (fr, az, el, sharp_raw, exposure), sharp in zip(collected, sharp_norm):
         comp = {
             "front":  _front_score(az, el),
             "cover":  _cover_score(float(fr["fg_fraction"])),
             "sharp":  float(sharp),
-            "expose": _exposure_score(img, mask),
-            "occl":   _occlusion_score(int(fr["n_pixels_hybrid"]), int(fr["n_pixels_objgs"])),
+            "expose": exposure,
         }
         results.append({
             "cam_index": fr["cam_index"],
@@ -260,9 +230,7 @@ def run_scoring(extraction_index_path, top_k=5):
             "azimuth_deg": az,
             "elevation_deg": el,
             "fg_fraction": float(fr["fg_fraction"]),
-            "n_pixels_hybrid": int(fr["n_pixels_hybrid"]),
-            "n_pixels_objgs": int(fr["n_pixels_objgs"]),
-            "sharpness_raw": float(sharp_raw),
+            "sharpness": float(sharp_raw),
             "components": comp,
             "score": sum(weights[k] * comp[k] for k in weights),
         })
@@ -272,9 +240,7 @@ def run_scoring(extraction_index_path, top_k=5):
         r["rank"] = i + 1
     
     result = {
-        "weights": weights,
-        "n_frames": len(results),
-        "ranking": results,
+        "ranking": results,  # for debug generation
         "top_k": results[:top_k],
     }
     

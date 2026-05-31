@@ -60,7 +60,7 @@ def _resize_h(img, h):
 
 def make_supervision_contact_sheet(obj_dir, debug_dir, n_cols=4, thumb_h=180,
                                    max_views=20):
-    manifest_path = Path(obj_dir) / "04_supervision_manifest.json"
+    manifest_path = Path(obj_dir) / "04_supervision" / "supervision_manifest.json"
     if not manifest_path.exists():
         logger.info("Skipping supervision contact sheet: %s missing", manifest_path)
         return False
