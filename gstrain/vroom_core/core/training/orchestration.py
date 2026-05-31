@@ -1,13 +1,9 @@
-import os
 import torch
-import torchvision
-from tqdm import tqdm
 from gstrain.vroom_core.core.model.density import DensifcationController
-from gstrain.vroom_core.utilities.gaussian_renderer.render import apply_frustum_culling, render
-from gstrain.vroom_core.utilities.training.optimizer import Optimizer
+from gstrain.vroom_core.utilities.render import apply_frustum_culling, render
+from gstrain.vroom_core.utilities.training import Optimizer, state_snapshot, visualize, save_checkpoint as _save_checkpoint_util, get_progress_bar, update_progress_bar
 from gstrain.vroom_core.core.training.loss_engine import LossEngine
-from gstrain.vroom_core.utilities.utils.runtime import exponential_lr_schedule
-from gstrain.vroom_core.utilities.utils.checkpoints import CheckpointManager
+from gstrain.vroom_core.utilities.utils import exponential_lr_schedule, CheckpointManager, compute_psnr
 
 
 def prepare_gaussian_space_props(
@@ -110,7 +106,7 @@ class TrainingOrchestrator:
             render_pkg=rasterizer_output,
             viewpoint_cam=camera_view,
             anchor_cloud=self.anchor_cloud,
-            opt=self.optmizer_configs["args"],
+            optimizer_configs=self.optmizer_configs["args"],
             iteration=iteration,
         )
         total_loss = sum(losses.values())
@@ -148,7 +144,7 @@ class TrainingOrchestrator:
             torch.cuda.empty_cache()
 
         with torch.no_grad():
-            psnr = self.compute_psnr(rasterizer_output, camera_view.original_image)
+            psnr = compute_psnr(rasterizer_output["render"], camera_view.original_image)
 
         # Detach rendered image for visualisation
         rendered_image_detached = rasterizer_output["render"].detach()
@@ -162,14 +158,6 @@ class TrainingOrchestrator:
             "rendered_image": rendered_image_detached,
         }
 
-    def compute_psnr(self, rasterizer_output, original_image):
-        prediction = rasterizer_output["render"]
-        target = original_image.to(prediction.device)
-        mse = torch.mean((prediction - target) ** 2)
-        if mse == 0:
-            return float("inf")
-        return 20 * torch.log10(1.0 / torch.sqrt(mse))
-
     def train(self, cameras):
         width, height = (
             cameras[0].image_width,
@@ -180,11 +168,7 @@ class TrainingOrchestrator:
         cameras_iterator = iter(self.dataloader)
 
         num_iterations = self.optmizer_configs["args"].num_iterations
-        progress_bar = tqdm(
-            range(1, num_iterations + 1),
-            desc="Training progress",
-            dynamic_ncols=True,
-        )
+        progress_bar = get_progress_bar(num_iterations)
 
         for iteration in progress_bar:
             try:
@@ -198,73 +182,30 @@ class TrainingOrchestrator:
             step_output = self.train_step(camera_view, iteration, width, height)
 
             if iteration % 10 == 0:
-                total_loss = step_output["total_loss"]
-                psnr = step_output["psnr"]
-                num_anchors = self.anchor_cloud.num_anchors
-                progress_bar.set_postfix({
-                    "Loss": f"{total_loss:.4f}",
-                    "PSNR": f"{psnr:.2f}",
-                    "Anchors": num_anchors
-                })
+                update_progress_bar(progress_bar, step_output, self.anchor_cloud.num_anchors)
 
             if iteration % self.visualization_interval == 0:
-                self._visualize(step_output, iteration, camera_view)
+                visualize(step_output, iteration, camera_view, self.output_dir)
 
             if iteration in self.pipeline_configs["save_iterations"]:
-                self._save_checkpoint(step_output, iteration, camera_view)
+                _save_checkpoint_util(
+                    step_output=step_output,
+                    iteration=iteration,
+                    camera_view=camera_view,
+                    output_dir=self.output_dir,
+                    checkpoint_manager=self.CheckPointManager,
+                    logger=self.logger,
+                    anchor_cloud=self.anchor_cloud,
+                    spatial_lr_scale=self.spatial_lr_scale,
+                    optimizer=self.optimizer,
+                    opacity_network=self.opacity_network,
+                    covariance_network=self.covariance_network,
+                    color_network=self.color_network,
+                    gaussian_type=self.gaussian_type,
+                    render_mode=self.render_mode,
+                    tile_size_2dgs=self.tile_size_2dgs,
+                )
 
             del step_output
             torch.cuda.empty_cache()
 
-
-    def _state_snapshot(self):
-        state = {
-            "anchor_postions": self.anchor_cloud.anchors_positions.detach(),
-            "gaussian_offsests": self.anchor_cloud.gaussians_offsets.detach(),
-            "anchor_feature": self.anchor_cloud.anchor_features.detach(),
-            "anchor_log_scales": self.anchor_cloud.anchors_log_scales.detach(),
-            "anchor_rotation": self.anchor_cloud.anchors_rotations.detach(),
-            "semantic_labels": self.anchor_cloud.semantic_labels,
-            "spatial_lr_scale": self.spatial_lr_scale,
-            "optimizer_state": self.optimizer.state_dict(),
-            "opacity_network": self.opacity_network.state_dict(),
-            "covariance_network": self.covariance_network.state_dict(),
-            "color_network": self.color_network.state_dict(),
-        }
-        return state
-
-    def _visualize(self, step_output, iteration, camera_view):
-        """
-        Visualizes the real image agianst the rendered image from the rasterizer side by side
-        """
-        rendered_image = step_output["rendered_image"]
-        real_image = camera_view.original_image.to(
-            rendered_image.device
-        )  # two images have to be on the same device or torch will crash
-
-
-        grid = torchvision.utils.make_grid([real_image, rendered_image], nrow=2)
-        vis_dir = os.path.join(self.output_dir, "visualization")
-        os.makedirs(vis_dir, exist_ok=True)
-        torchvision.utils.save_image(grid, os.path.join(vis_dir, f"iteration_{iteration}.png"))
-
-    def _save_checkpoint(self, step_output, iteration, camera_view):
-        """
-        Saves a checkpoint for a given iteration.
-        Each call creates its own subdirectory (iter_<N>) so that successive
-        checkpoints don't overwrite each other's MLP .pt files.
-        """
-        self.logger.info(f"Saving checkpoint at iteration {iteration}")
-        # Per iteration directory
-        iter_dir = os.path.join(self.output_dir, "checkpoints", f"iter_{iteration}")
-        os.makedirs(iter_dir, exist_ok=True)
-        self.CheckPointManager.save_anchor_cloud(
-            path=os.path.join(iter_dir, "anchor_cloud.ply")
-        )
-        self.CheckPointManager.save_decoder(
-            path=iter_dir,
-            gaussian_type=self.gaussian_type,
-            render_mode=self.render_mode,
-            tile_size_2dgs=self.tile_size_2dgs,
-        )
-        torch.save(self._state_snapshot(), os.path.join(iter_dir, "state.pth"))

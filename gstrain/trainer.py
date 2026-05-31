@@ -9,12 +9,11 @@ from datetime import datetime
 from types import SimpleNamespace
 import torch
 from gstrain.vroom_core.core.model.anchor_field import AnchorCloud
-from gstrain.vroom_core.core.model.decoder import GaussianDecoder
+from gstrain.vroom_core.utilities.gaussian_decoder import GaussianDecoder
 from gstrain.vroom_core.core.training.orchestration import TrainingOrchestrator
-from gstrain.vroom_core.utilities.utils.runtime import seed_everything
-from gstrain.vroom_core.utilities.data_utils.scene_pipeline import TrainingScene
-from gstrain.vroom_core.utilities.utils.config import load_vroom_config
-from gstrain.vroom_core.utilities.utils.checkpoints import CheckpointManager
+from gstrain.vroom_core.utilities.utils import seed_everything, CheckpointManager
+from gstrain.vroom_core.utilities.data_utils import TrainingScene
+from gstrain.vroom_core.config import load_vroom_config
 
 
 def _build_dataset_args(model_params: dict, dataset_path: str, run_dir: str):

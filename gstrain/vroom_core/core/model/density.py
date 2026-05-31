@@ -1,14 +1,6 @@
 import torch
-import torch.nn as nn
 
-# Optimizer group names
-_FIELD_GROUPS = {
-    "anchors_positions",
-    "gaussians_offsets",
-    "anchor_features",
-    "anchors_log_scales",
-    "anchors_rotations",
-}
+from gstrain.vroom_core.utilities.training import extend_optimizer, prune_optimizer
 
 
 class DensifcationController:
@@ -278,11 +270,11 @@ class DensifcationController:
             ) # sets an id to the correct bucket for voxels that we will add a new anchor to,else its a -1
 
             # For each Gaussian, which slot does it belong to? if it maps to -1 its none
-            # inverse_gaussian_voxel_indices: knows gaussian -> voxel
-            # voxel_to_new_anchor: knows voxel -> new anchor id
+            # inverse_gaussian_voxel_indices: knows gaussian to voxel
+            # voxel_to_new_anchor: knows voxel to new anchor id
             gauss_to_slot = voxel_to_new_anchor[
                 inverse_gaussian_voxel_indices
-            ] # gauss_to_slot now knows: gaussian -> new anchor id , size is number of gaussians
+            ] # gauss_to_slot now knows: gaussian to new anchor id , size is number of gaussians
             contributes = gauss_to_slot >= 0
             contributing_slot = gauss_to_slot[contributes] # which anchor are we computing feature/label for
 
@@ -313,7 +305,7 @@ class DensifcationController:
                 # flatten contributing_labels for scatter add
                 flat_idx = (
                     contributing_slot * n_classes + contributing_labels
-                ) # slot * number of classes + label , Ex: slot:0 * number of classes:3 + label:1 = bucket:1 -> (row * width) + col
+                ) # slot * number of classes + label , Ex: slot:0 * number of classes:3 + label:1 = bucket:1 : (row * width) + col
                 class_counts = torch.zeros(n_new * n_classes, device=device)
                 class_counts.scatter_add_(
                     0, flat_idx, torch.ones(contributing_slot.shape[0], device=device)
@@ -348,7 +340,7 @@ class DensifcationController:
             }
 
             # update optimizer and the anchor cloud data
-            self._extend_optimizer(extension_dict)
+            extend_optimizer(self.optimizer, self.anchor_cloud, extension_dict)
 
             if parent_to_gaussian_labels is not None:
                 existing_labels = self.anchor_cloud.semantic_labels
@@ -387,7 +379,7 @@ class DensifcationController:
         keep_mask = ~prune_them_anchors_mask
 
         # update optimizer and the anchor cloud data
-        self._prune_optimizer(keep_mask)
+        prune_optimizer(self.optimizer, self.anchor_cloud, keep_mask)
 
         # update semantic labels
         if self.anchor_cloud.semantic_labels is not None:
@@ -404,63 +396,6 @@ class DensifcationController:
         # trim accumulators to surviving anchors
         self._prune_state(keep_mask)
 
-    def _extend_optimizer(self, extension_dict):
-        """
-        For each anchor cloud optimizer group:
-          1. Extend Adam state buffers (exp_avg, exp_avg_sq) with zeros for new entries
-          2. Concatenate old param with extension to form a new Parameter
-          3. Replace group["params"][0] with the new Parameter
-          4. Mirror the new Parameter onto the AnchorCloud attribute
-        """
-        for group in self.optimizer.param_groups:
-            name = group.get("name")
-            if name not in extension_dict:
-                continue
-            ext = extension_dict[name].to(dtype=group["params"][0].dtype)
-            old_param = group["params"][0]
-            state = self.optimizer.state.pop(old_param, {})
-
-            for key in ("exp_avg", "exp_avg_sq"):
-                if key in state:
-                    state[key] = torch.cat([state[key], torch.zeros_like(ext)], dim=0)
-
-            new_param = nn.Parameter(
-                torch.cat([old_param.detach(), ext], dim=0),
-                requires_grad=(name != "anchors_rotations"),
-            )
-            group["params"][0] = new_param
-            if state:
-                self.optimizer.state[new_param] = state
-
-            setattr(self.anchor_cloud, name, new_param)
-
-    def _prune_optimizer(self, keep_mask):
-        """
-        For each anchor cloud optimizer group:
-          1. Slice Adam state buffers to surviving rows
-          2. Create new Parameter from surviving rows
-          3. Replace group["params"][0] and the AnchorCloud attribute
-        """
-        for group in self.optimizer.param_groups:
-            name = group.get("name")
-            if name not in _FIELD_GROUPS:
-                continue
-            old_param = group["params"][0]
-            state = self.optimizer.state.pop(old_param, {})
-
-            for key in ("exp_avg", "exp_avg_sq"):
-                if key in state:
-                    state[key] = state[key][keep_mask]
-
-            new_param = nn.Parameter(
-                old_param[keep_mask].detach().clone(),
-                requires_grad=(name != "anchors_rotations"),
-            )
-            group["params"][0] = new_param
-            if state:
-                self.optimizer.state[new_param] = state
-
-            setattr(self.anchor_cloud, name, new_param)
 
     def _quantize(self, quantization_size, gaussian_gradients):
         """

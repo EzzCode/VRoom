@@ -68,7 +68,11 @@
         "decoder_color_lr_max_steps": 30000,
         "ssim_weight": 0.2,
         "semantic_loss_weight": 0.01,
-        "volume_reg_weight": 0.01
+        "volume_reg_weight": 0.01,
+        "ssim_window_size": 11,
+        "ssim_padding": 5,
+        "ssim_luminance_stabilizer": 0.0001,
+        "ssim_contrast_stabilizer": 0.0009
     },
     "densifier": {
         "desification_start": 1500,

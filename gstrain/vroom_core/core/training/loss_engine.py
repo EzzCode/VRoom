@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from gstrain.vroom_core.utilities.utils import calc_volumetric_loss
 
 class LossEngine:
     def __init__(self, semantic_manager):
@@ -8,10 +9,15 @@ class LossEngine:
     def calc_l1_loss(self, render, real_image):
         return torch.mean(torch.abs(render - real_image))
 
-    def calc_ssim_loss(self, render, real_image):
-        window_size = 11
-        padding = window_size // 2
-
+    def calc_ssim_loss(
+        self,
+        render,
+        real_image,
+        window_size,
+        padding,
+        luminance_stabilizer,
+        contrast_stabilizer,
+    ):
         # because avg_pool2d requires 4D inputs (Num of batches, color Channels, Height, Width)
         render_4d = render.unsqueeze(0) if render.dim() == 3 else render
         real_image_4d = real_image.unsqueeze(0) if real_image.dim() == 3 else real_image
@@ -37,12 +43,10 @@ class LossEngine:
         # covariance = E(xy) - mu_x * mu_y
         covariance = real_and_render_avg - mean_product
 
-        C1 = 0.01 ** 2
-        C2 = 0.03 ** 2
-
+       
         # numerator uses 2 * mu_x * mu_y, not 2 * (mu_x^2 * mu_y^2)
-        numerator = (2 * mean_product + C1) * (2 * covariance + C2)
-        denominator = (mean_filter_render_squared + mean_filter_real_squared + C1) * (variance_real_image + variance_render_image + C2)
+        numerator = (2 * mean_product + luminance_stabilizer) * (2 * covariance + contrast_stabilizer)
+        denominator = (mean_filter_render_squared + mean_filter_real_squared + luminance_stabilizer) * (variance_real_image + variance_render_image + contrast_stabilizer)
 
         return 1 - (numerator / denominator).mean()
 
@@ -52,11 +56,7 @@ class LossEngine:
         mask_label_idx = mask_label_idx.unsqueeze(0)
         return F.cross_entropy(model_guess, mask_label_idx, ignore_index=0, reduction="mean")
 
-    def calc_volumetric_loss(self, scales, volume_lambda):
-        volumes = torch.prod(scales, dim=1)  # multiply the x, y and z scales to get the volumes of each gaussian
-        return torch.mean(volumes) * volume_lambda
-
-    def compute_total_losses(self, render_pkg, viewpoint_cam, anchor_cloud, opt, iteration):
+    def compute_total_losses(self, render_pkg, viewpoint_cam, anchor_cloud, optimizer_configs, iteration):
         render = render_pkg["render"]
         real_image = viewpoint_cam.original_image.to(render.device)
 
@@ -69,12 +69,24 @@ class LossEngine:
         model_guess = render_pkg.get("render_semantics")
 
         scales = render_pkg["scaling"]
-        ssim_weight = getattr(opt, "ssim_weight", 0.2)
-        semantic_loss_weight = getattr(opt, "semantic_loss_weight", 0.1)
-        volume_reg_weight = getattr(opt, "volume_reg_weight", 0.01)
+        ssim_weight = optimizer_configs.ssim_weight
+        semantic_loss_weight = optimizer_configs.semantic_loss_weight
+        volume_reg_weight = optimizer_configs.volume_reg_weight
+
+        ssim_window_size = optimizer_configs.ssim_window_size
+        ssim_padding = optimizer_configs.ssim_padding
+        ssim_luminance_stabilizer = optimizer_configs.ssim_luminance_stabilizer
+        ssim_contrast_stabilizer = optimizer_configs.ssim_contrast_stabilizer
 
         l1_loss = self.calc_l1_loss(render, real_image)
-        ssim_loss = self.calc_ssim_loss(render, real_image)
+        ssim_loss = self.calc_ssim_loss(
+            render,
+            real_image,
+            window_size=ssim_window_size,
+            padding=ssim_padding,
+            luminance_stabilizer=ssim_luminance_stabilizer,
+            contrast_stabilizer=ssim_contrast_stabilizer,
+        )
  
         rgb_loss = (1.0 - ssim_weight) * l1_loss + ssim_weight * ssim_loss
 
@@ -83,7 +95,7 @@ class LossEngine:
             semantic_loss = self.calc_semantic_loss(mask, model_guess) * semantic_loss_weight
         else:
             semantic_loss = torch.zeros(1, device=render.device).squeeze()
-        volumetric_loss = self.calc_volumetric_loss(scales, volume_reg_weight)
+        volumetric_loss = calc_volumetric_loss(scales, volume_reg_weight)
 
         return {
             "rgb_loss": rgb_loss,

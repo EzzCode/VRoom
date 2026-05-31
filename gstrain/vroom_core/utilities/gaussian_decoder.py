@@ -10,25 +10,25 @@ class GaussianDecoder(nn.Module):
 
         self.number_gaussians_per_anchor = anchor_cloud.gaussians_per_anchor
         self.feature_dim = feature_dim
-        number_gaussians_per_anchor = self.number_gaussians_per_anchor
 
         self.color_network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, number_gaussians_per_anchor * 3),
+            nn.Linear(hidden_dim, self.number_gaussians_per_anchor * 3),
             nn.Sigmoid(),
         )
         self.covariance_network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, number_gaussians_per_anchor * 7), # 3 for scale and 4 for rotation
+            nn.Linear(hidden_dim, self.number_gaussians_per_anchor * 7),  # 3 for scale and 4 for rotation
         )
         self.opacity_network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, number_gaussians_per_anchor),
+            nn.Linear(hidden_dim, self.number_gaussians_per_anchor),
             nn.Tanh(),
         )
+
 
     def forward_pass(self, anchor_cloud, visible_anchors_mask, camera):
         visible_anchors = anchor_cloud.anchors_positions[visible_anchors_mask]

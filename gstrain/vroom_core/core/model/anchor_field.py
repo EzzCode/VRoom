@@ -6,10 +6,8 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.neighbors import NearestNeighbors
 
-from gstrain.vroom_core.utilities.utils.geometry import PointCloudSample
-from gstrain.vroom_core.core.model.semantics import SemanticsManager
+from gstrain.vroom_core.utilities.utils import PointCloudSample, compute_anchors_scale_and_rotation, estimate_voxel_size, SemanticsManager
 
 
 @dataclass
@@ -31,11 +29,11 @@ class AnchorCloud(nn.Module):
 
     def __init__(
         self,
+        gaussians_per_anchor,
+        feature_dim,
         point_cloud=None,
         voxel_size=None,
         density_mode=False,
-        gaussians_per_anchor=5,
-        feature_dim=32,
         semantic_manager=None,
         device="cuda",
     ):
@@ -95,7 +93,8 @@ class AnchorCloud(nn.Module):
         """
 
         if self.voxel_size is None:
-            self.voxel_size = self._estimate_voxel_size(point_cloud)
+            distances = self._knn(point_cloud, k=4)
+            self.voxel_size = estimate_voxel_size(distances)
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
@@ -112,7 +111,10 @@ class AnchorCloud(nn.Module):
         )
 
         # set scale and rotation for each anchor
-        log_scales, rotations = self._set_anchors_scale_and_rotation()
+        distances = self._knn(self.anchors_positions, k=4)
+        log_scales, rotations = compute_anchors_scale_and_rotation(
+            self.anchors_positions, distances, self.voxel_size, self.device
+        )
         self.anchors_log_scales = nn.Parameter(log_scales)
         self.anchors_rotations = nn.Parameter(rotations, requires_grad=False)
 
@@ -147,13 +149,7 @@ class AnchorCloud(nn.Module):
             voxel_size=self.voxel_size,
         )
 
-    def _estimate_voxel_size(self, point_cloud):
-        """
-        if density_mode mode is off we use knn to esitmate a voxel size for a uniform grid
-        """
-        distances = self._knn(point_cloud, k=4)
-        voxel_size = torch.median(distances[:, 1:]).item()
-        return max(voxel_size, 1e-6)
+
 
     def _knn(self, point_cloud, k, chunk_size=2048):
         """finds the k nearest neighbors of each point in the point cloud"""
@@ -167,7 +163,7 @@ class AnchorCloud(nn.Module):
                 chunk_distances= torch.topk(dist_matrix, k + 1, largest=False).values
                 final_distances[i:end] = chunk_distances[:, 1:]
         return final_distances
-        
+
     def _quantize_cloud(self, point_cloud, voxel_size):
         """
         Quantize the point cloud based on the voxel size
@@ -197,20 +193,7 @@ class AnchorCloud(nn.Module):
                 anchor_labels[voxel_index] = torch.argmax(counts)
         return anchor_labels
 
-    def _set_anchors_scale_and_rotation(self):
-        """Set scales for anchors and set its rotation to identity"""
-        distances = self._knn(self.anchors_positions, k=4)
-        area_of_effect = (
-            distances[:, 1:].mean(dim=-1).clamp(min=max(self.voxel_size, 1e-6))
-        )
-        log_scaling = torch.log(area_of_effect.sqrt()).unsqueeze(-1).repeat(1, 6)
-        rotations = torch.zeros(
-            (self.anchors_positions.shape[0], 4),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        rotations[:, 0] = 1.0  # identity quaternion
-        return log_scaling, rotations
+
 
     def set_anchors_cloud(self, data: AnchorCloudData) -> None:
         """set the anchor cloud"""
@@ -318,7 +301,7 @@ class AnchorCloud(nn.Module):
                 self.semantic_manager.label_ids, _ = torch.sort(torch.unique(self.semantic_labels.view(-1)))
 
     def instantiate_gaussian_positions(self, visible_mask, negative_opacity_filter):
-        """Compute the physical 3D positions of the visible Gaussians."""
+        """Calculate the positions of the visible Gaussians"""
         anchor_positions = self.anchors_positions[visible_mask]
         num_visible = anchor_positions.shape[0]
         gaussian_offsets = self.gaussians_offsets[visible_mask]
