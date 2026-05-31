@@ -127,11 +127,41 @@ The active capture session (saved camera poses, voxel matrix memory, frame count
 - Guided prompts ("Move to uncovered area", "Look upward", etc.)
 - Coverage % bar in HUD
 
-### Build 4: Integration + Export
-- Session management (start/stop/reset/review)
-- Export: images + `session.json` (poses, blur scores, coverage map)
-- Upload to backend for Module-1 pipeline (COLMAP/SAM)
-- Session summary screen (keyframe count, coverage %, time)
+### Build 4: Session Export + Backend Upload  ← **NEXT**
+
+Goal: close the capture → server loop so a finished session can actually produce a mesh.
+
+**4a. Session summary screen** (`features/capture/SessionSummaryScreen.tsx`)
+- Shown when `stopSession()` fires
+- Stats: keyframe count, coverage %, duration, total MB on disk
+- Thumbnail grid of captured keyframes (tap to inspect / delete bad ones)
+- Buttons: "Upload to server" / "Discard session"
+
+**4b. Session packaging** (`features/export/sessionPackager.ts`)
+- Build `session.json` with `{ sessionId, startedAt, endedAt, deviceInfo, coveragePercent, keyframes: [{ filename, pose, blurScore, timestamp }] }`
+- Zip all captured JPGs + `session.json` into one archive in the cache dir
+- Use `react-native-zip-archive` (works with Expo dev build)
+
+**4c. Backend upload** (`features/export/uploadService.ts`)
+- POST multipart to `${API_BASE_URL}/sessions` with the zip
+- Show progress (XHR upload progress events, since `fetch` doesn't expose them)
+- Returns `{ sessionId, jobId }` — poll `/jobs/:jobId` for reconstruction status
+- Configurable server URL in `.env` / app settings (default to LAN IP for dev)
+
+**4d. Reconstruction status screen**
+- Poll job state: `queued` → `colmap` → `gaussian-training` → `mesh-extraction` → `done`
+- When done: fetch resulting `.glb`, save via `meshStorage`, route to AR viewer with the new mesh pre-selected
+
+**4e. Backend endpoints** (minimal FastAPI server, separate task)
+- `POST /sessions` — receive zip, unpack, enqueue job, return `jobId`
+- `GET /jobs/:id` — return status + progress
+- `GET /jobs/:id/result` — return final GLB
+- Worker: run `object_isolation/run_pipeline.py` → `gstrain/trainer.py` → `Module4/extract_object_meshes.py`
+
+### Build 5: AR Polish (after Build 4 is solid)
+- **Multi-mesh placement** — currently only one mesh can be placed. Lift `meshSource`/`isMeshPlaced` into an array `placedMeshes: PlacedMesh[]` so users can stage a whole room
+- Per-mesh selection / deletion in AR
+- Save & restore AR scene layouts
 
 ---
 
@@ -142,4 +172,5 @@ The active capture session (saved camera poses, voxel matrix memory, frame count
 | 1 | Record while steady → frames saved. Shake phone → "Hold steady!" + no frames saved |
 | 2 | Stand still recording → stops saving after first frame. Walk sideways → resumes saving |
 | 3 | Walk around room → coverage % climbs. Red voxels disappear. Guidance prompts appear for uncovered areas |
-| 4 | Complete session → export folder has images + valid session.json with poses |
+| 4 | Complete session → summary screen shows stats. Tap upload → zip lands on server, job runs, GLB returns and opens in AR viewer |
+| 5 | Place 3 different meshes in one AR scene, move/rotate each independently |
