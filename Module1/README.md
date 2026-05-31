@@ -99,6 +99,7 @@ python Module1/object_tracker.py \
     --mask_dir data/room_scene/sam_output/masks \
     --output_dir data/room_scene/tracked
 ```
+The tracker emits stable object IDs only after a candidate has persisted for the confirmation window, which filters short-lived SAM fragments before 3D voting.
 **Output**: Creates `id_maps/` (16-bit PNGs where pixel values = object IDs, 0 = background) and `tracked_vis/` (debug tracking overlays).
 
 ### Step 4: 3D Point Cloud Voting

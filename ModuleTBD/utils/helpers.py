@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import re
 
+# TODO(label-alignment): remove this import once seg_label == object_label_id end-to-end
 from ModuleTBD.utils.gstrain_wrapper import make_camera, render_rgba, render_rgba
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ def find_seg_map(seg_map_dir, img_name):
                     return f
     return None
 
+# TODO(label-alignment): delete this entire function once seg_label == object_label_id end-to-end;
+#   caller in __main__.py passes seg_label=object_label_id directly and this is no longer needed.
 def vote_seg_label(scope, gaussians, pipe_config, seg_map_dir, n_probe=5, tau_alpha=0.4):
     """IoU-vote the GS alpha mask against Module1's per-frame segmentation maps to find
     the seg_label (instance label) that best matches the Gaussian model's silhouette.

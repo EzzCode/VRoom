@@ -157,6 +157,8 @@ def run(
                 "object_mask_deva) exists and is non-empty under the scene directory."
             )
 
+        # TODO(label-alignment): replace this entire block with `seg_label = object_label_id`
+        #   once Module1 and ObjectGS share the same label namespace; delete vote_seg_label() too.
         if seg_label is None:
             from ModuleTBD.utils.helpers import vote_seg_label
             seg_label = vote_seg_label(
