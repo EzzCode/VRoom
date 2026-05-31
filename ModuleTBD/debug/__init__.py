@@ -25,7 +25,6 @@ def generate_all_debug_artifacts(
     gaussians=None,
     pipe_config=None,
     images_dir=None,
-    id_map_dir=None,
     extraction_manifest=None,
     scores_manifest=None,
     halluc_manifest=None,
@@ -50,7 +49,7 @@ def generate_all_debug_artifacts(
         results["scope"] = _scope(
             scope=scope, frame=frame,
             gaussians=gaussians, pipe_config=pipe_config,
-            debug_dir=obj_dir / "00_scope_debug",
+            debug_dir=obj_dir / "00_scope" / "debug",
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("debug_scope failed: %s", exc)
@@ -63,8 +62,7 @@ def generate_all_debug_artifacts(
                 manifest=extraction_manifest,
                 scope=scope, gaussians=gaussians, pipe_config=pipe_config,
                 images_dir=Path(images_dir),
-                id_map_dir=Path(id_map_dir) if id_map_dir else None,
-                debug_dir=obj_dir / "01_extraction_debug",
+                debug_dir=obj_dir / "01_extraction" / "debug",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("debug_extraction failed: %s", exc)
@@ -75,7 +73,7 @@ def generate_all_debug_artifacts(
             from .debug_frame_scoring import generate_debug_artifacts as _fs
             results["frame_scoring"] = _fs(
                 scores=scores_manifest,
-                debug_dir=obj_dir / "02_frame_scoring_debug",
+                debug_dir=obj_dir / "02_frame_scoring" / "debug",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("debug_frame_scoring failed: %s", exc)
@@ -87,7 +85,7 @@ def generate_all_debug_artifacts(
             results["novel_views"] = _nv(
                 manifest=halluc_manifest,
                 scope_cameras=scope.cameras if scope is not None else [],
-                debug_dir=obj_dir / "03_novel_views_debug",
+                debug_dir=obj_dir / "03_novel_views" / "debug",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("debug_novel_views failed: %s", exc)
@@ -98,7 +96,7 @@ def generate_all_debug_artifacts(
         results["supervision"] = _sv(
             obj_dir=obj_dir,
             training_summary=training_summary,
-            debug_dir=obj_dir / "04_supervision_debug",
+            debug_dir=obj_dir / "04_supervision" / "debug",
             scope=scope, frame=frame,
             gaussians=gaussians, pipe_config=pipe_config,
             n_compare_views=n_compare_views,
@@ -108,19 +106,20 @@ def generate_all_debug_artifacts(
     except Exception as exc:  # noqa: BLE001
         logger.warning("debug_supervision failed: %s", exc)
 
-    # ── Supervision audit (05_supervision_audit) ──────────────────────────
+    # ── Audit (05_supervision_audit + 06_projection_audit) ───────────────
     try:
-        from .supervision_audit import generate_debug_artifacts as _sa
-        results["supervision_audit"] = _sa(
+        from .debug_audit import generate_debug_artifacts as _audit
+        audit_results = _audit(
             obj_dir=obj_dir,
             scope=scope,
             frame=frame,
             model_path=model_path,
             object_id=object_id,
-            debug_dir=obj_dir / "05_supervision_audit",
         )
+        results["supervision_audit"] = audit_results.get("supervision")
+        results["projection_audit"] = audit_results.get("projection")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("supervision_audit failed: %s", exc)
+        logger.warning("debug_audit failed: %s", exc)
 
     return results
 

@@ -14,7 +14,7 @@ from gstrain.vroom_core.models.facade import GaussianModel
 from gstrain.vroom_core.training.loss_engine import ssim_loss as _ssim_loss
 
 from .utils.gstrain_wrapper import make_camera
-from .colmap_init import load_colmap_object_point_cloud
+from .utils.colmap_init import load_colmap_object_point_cloud
 
 logger = logging.getLogger(__name__)
 
@@ -322,8 +322,6 @@ def train_object(
         "hallucination_rgb_scale": float(hallucination_rgb_scale),
         "depth_weight": float(depth_weight),
         "final_loss": float(np.mean(tail)) if tail else 0.0,
-        "loss_history": loss_hist,
-        "depth_loss_history": depth_hist,
         "model_dir": str(model_dir),
     }
     if debug:

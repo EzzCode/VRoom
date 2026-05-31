@@ -1,6 +1,6 @@
 """Visual Debug for Frame Scoring (ModuleTBD).
 
-Outputs under ``<obj_dir>/02_frame_scoring_debug/``::
+Outputs under ``<obj_dir>/02_frame_scoring/debug/``::
 
     bar_top10.png            top-10 frames bar chart of total score
     scatter_az_score.png     azimuth vs total score for all candidates

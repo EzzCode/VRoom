@@ -1,6 +1,6 @@
 """Visual Debug for Novel-View Synthesis (ModuleTBD).
 
-Outputs under ``<obj_dir>/03_novel_views_debug/``::
+Outputs under ``<obj_dir>/03_novel_views/debug/``::
 
     conditioning_panel.png   side-by-side: conditioning, alpha, alpha-on-bg
     sv3d_grid.png            grid of all SV3D outputs with IoU + accept/reject

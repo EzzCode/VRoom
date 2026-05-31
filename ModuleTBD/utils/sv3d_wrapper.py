@@ -45,17 +45,14 @@ def _add_sv3d_to_path():
 
 def _build_orbit_poses(num_frames, cond_elevation_deg):
     """Equi-azimuth orbit at fixed elevation. Matches chenguolin/sv3d-diffusers/infer.py."""
-    az_off_deg = (np.arange(1, num_frames + 1) * 360.0 / num_frames) % 360.0
-    elevations_deg = np.full(num_frames, float(cond_elevation_deg))
-    last = az_off_deg[-1]
-    polars_rad = [float(np.deg2rad(90.0 - e)) for e in elevations_deg]
-    azimuths_rad = [float(np.deg2rad((a - last) % 360.0)) for a in az_off_deg]
+    az_off_deg   = (np.arange(1, num_frames + 1) * 360.0 / num_frames) % 360.0
+    polar_rad    = float(np.deg2rad(90.0 - cond_elevation_deg))
+    polars_rad   = [polar_rad] * num_frames
+    azimuths_rad = [float(np.deg2rad(a)) for a in az_off_deg]
     return az_off_deg, polars_rad, azimuths_rad
 
 
 class SV3DBackend:
-    native_resolution = 576
-
     def __init__(self, num_inference_steps=25, safe_mode=False):
         if not torch.cuda.is_available():
             raise RuntimeError("SV3D requires CUDA; no GPU detected.")
@@ -68,6 +65,11 @@ class SV3DBackend:
         self._num_inference_steps = num_inference_steps
         self._hf_cache_dir = _setup_hf_cache()
         self._pipe = None
+
+    @property
+    def native_resolution(self):
+        """Actual inference resolution; respects safe_mode."""
+        return self._resolution
 
     def _load(self):
         if self._pipe is not None:
@@ -123,7 +125,8 @@ class SV3DBackend:
             self._pipe = None
             torch.cuda.empty_cache()
 
-    def hallucinate(self, conditioning_rgb, cond_elevation_deg, cond_azimuth_deg=0.0, seed=None):
+    def hallucinate(self, conditioning_rgb, cond_elevation_deg, cond_azimuth_deg=0.0,
+                    seed=None):
         """Run SV3D-p on a square uint8 RGB conditioning image. Returns list[HallucinatedView]."""
         self._load()
 
@@ -135,13 +138,14 @@ class SV3DBackend:
 
         pil = Image.fromarray(conditioning_rgb).resize(
             (self._resolution, self._resolution), Image.LANCZOS)
+
         az_off_deg, polars_rad, azimuths_rad = _build_orbit_poses(
             self._num_frames, cond_elevation_deg)
-        elevations_deg = np.full(self._num_frames, float(cond_elevation_deg))
+        el_out = [float(cond_elevation_deg)] * self._num_frames
 
         gen = torch.Generator(device="cpu").manual_seed(int(seed)) if seed is not None else None
 
-        logger.info("SV3D-p generating %d frames (steps=%d, cond_el=%.1f°)...",
+        logger.info("SV3D-p generating %d frames (steps=%d, cond_el=%.1f\u00b0)...",
                     self._num_frames, self._num_inference_steps, cond_elevation_deg)
 
         autocast_dtype = torch.float16 if self.dtype == torch.float16 else torch.float32
@@ -164,6 +168,6 @@ class SV3DBackend:
             views.append(HallucinatedView(
                 rgb=np.asarray(frame.convert("RGB")),
                 azimuth_deg=float(az_abs),
-                elevation_deg=float(elevations_deg[i]),
+                elevation_deg=el_out[i],
             ))
         return views

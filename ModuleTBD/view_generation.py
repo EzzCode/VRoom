@@ -7,18 +7,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .constants import ALPHA_THRESH, FOV_Y_DEG, SV3D_FILL_FRAC
 from .utils.gstrain_wrapper import make_camera, render_rgba
-from .utils.sv3d_prior import HallucinatedView, SV3DBackend
+from .utils.sv3d_wrapper import HallucinatedView, SV3DBackend
 from .utils.transforms import look_at
 
 logger = logging.getLogger(__name__)
 
-_ALPHA_THRESHOLD = 0.4
-_FOV_Y_DEG       = 50.0
-
 
 def _tight_crop_pad_resize(rgb, alpha, target_size):
-    fill_frac = 0.85
+    fill_frac = SV3D_FILL_FRAC
     bg_value  = 255
     if alpha.max() > 1.5:
         alpha = alpha.astype(np.float32) / 255.0
@@ -26,7 +24,7 @@ def _tight_crop_pad_resize(rgb, alpha, target_size):
     alpha = np.clip(alpha, 0.0, 1.0)
     
     
-    mask = alpha > _ALPHA_THRESHOLD
+    mask = alpha > ALPHA_THRESH
 
     labels_n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     if labels_n > 1:
@@ -128,7 +126,7 @@ def _load_cache(out_dir, cond_az, cond_el):
 
 def _render_reference(scope, frame, gaussians, pipe_config,
                        az_deg, el_deg, resolution, up_override=None):
-    fov_y = math.radians(_FOV_Y_DEG)
+    fov_y = math.radians(FOV_Y_DEG)
     fy    = 0.5 * resolution / math.tan(0.5 * fov_y)
     K = np.array([[fy, 0.0, resolution / 2.0],
                   [0.0, fy, resolution / 2.0],
@@ -246,7 +244,7 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *, scores, output_di
             up_override=top_cam_up,
         )
 
-        m_objgs = ref_alpha > _ALPHA_THRESHOLD
+        m_objgs = ref_alpha > ALPHA_THRESH
         m_sv3d  = _alpha_from_white_bg(view.rgb)
 
         if m_objgs.shape != m_sv3d.shape:
@@ -318,7 +316,7 @@ def run_hallucination(scope, frame, gaussians, pipe_config, *, scores, output_di
         "params": {
             "iou_threshold": iou_threshold,
             "min_objgs_pixels": min_objgs_pixels,
-            "fov_y_deg": _FOV_Y_DEG,
+            "fov_y_deg": FOV_Y_DEG,
             "resolution": int(res),
             "seed": 0,
         },

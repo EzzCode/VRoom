@@ -28,20 +28,20 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .constants import (
+    SV3D_FILL_FRAC,
+    SEED_DEPTH_MIN,
+    SEED_MIN_IN_FRONT,
+    SEED_PERCENTILE_LO,
+    SEED_PERCENTILE_HI,
+    WS_CLIP_MIN,
+    WS_CLIP_MAX,
+)
 from .utils.transforms import look_at
 
 logger = logging.getLogger(__name__)
 
 _VROOM_ROOT = Path(__file__).resolve().parents[1]
-
-# ── Seed-point projection constants ──────────────────────────────────────────
-_SV3D_FILL_FRAC      = 0.85   # must match hallucination.py
-_SEED_DEPTH_MIN      = 0.1
-_SEED_MIN_IN_FRONT   = 20
-_SEED_PERCENTILE_LO  = 2
-_SEED_PERCENTILE_HI  = 98
-_WS_CLIP_MIN         = 0.05
-_WS_CLIP_MAX         = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ def _compute_world_scale_px(seed_points_W, R_w2c, T_w2c, K, target_size):
     Returns ws — ratio of world object extent (in K_sv3d pixels) to the
     expected object extent in the SV3D image (fill_frac * target_size).
     K_view = K_sv3d / ws gives correct telephoto intrinsics so the object
-    spans exactly _SV3D_FILL_FRAC of the image.
+    spans exactly SV3D_FILL_FRAC of the image.
 
     Only focal lengths are scaled; cx/cy are unchanged because look_at()
     places scope.centroid on the optical axis, so centroid always projects
@@ -124,29 +124,29 @@ def _compute_world_scale_px(seed_points_W, R_w2c, T_w2c, K, target_size):
     fy  = float(K64[1, 1])
     cx  = float(K64[0, 2])
     cy  = float(K64[1, 2])
-    sv3d_px = _SV3D_FILL_FRAC * float(target_size)
+    sv3d_px = SV3D_FILL_FRAC * float(target_size)
 
     pts     = np.asarray(seed_points_W, np.float64)
     pts_c   = (R @ pts.T).T + T
-    in_front = pts_c[:, 2] > _SEED_DEPTH_MIN
+    in_front = pts_c[:, 2] > SEED_DEPTH_MIN
     n_in_front = int(in_front.sum())
 
-    if n_in_front < _SEED_MIN_IN_FRONT:
+    if n_in_front < SEED_MIN_IN_FRONT:
         raise RuntimeError(
             f"Only {n_in_front} / {len(pts)} COLMAP seed points are in front of this "
-            f"camera (depth > {_SEED_DEPTH_MIN}). Expected >= {_SEED_MIN_IN_FRONT}. "
+            f"camera (depth > {SEED_DEPTH_MIN}). Expected >= {SEED_MIN_IN_FRONT}. "
             "Check that seed_points_W and the camera share the same world frame."
         )
 
     pf  = pts_c[in_front]
     u   = pf[:, 0] / pf[:, 2] * fx + cx
     v   = pf[:, 1] / pf[:, 2] * fy + cy
-    u_lo = float(np.percentile(u, _SEED_PERCENTILE_LO))
-    u_hi = float(np.percentile(u, _SEED_PERCENTILE_HI))
-    v_lo = float(np.percentile(v, _SEED_PERCENTILE_LO))
-    v_hi = float(np.percentile(v, _SEED_PERCENTILE_HI))
+    u_lo = float(np.percentile(u, SEED_PERCENTILE_LO))
+    u_hi = float(np.percentile(u, SEED_PERCENTILE_HI))
+    v_lo = float(np.percentile(v, SEED_PERCENTILE_LO))
+    v_hi = float(np.percentile(v, SEED_PERCENTILE_HI))
     world_px = float(max(u_hi - u_lo, v_hi - v_lo))
-    return float(np.clip(world_px / max(sv3d_px, 1.0), _WS_CLIP_MIN, _WS_CLIP_MAX))
+    return float(np.clip(world_px / max(sv3d_px, 1.0), WS_CLIP_MIN, WS_CLIP_MAX))
 
 
 def _project_seed_bbox(seed_points_W, R_w2c, T_w2c, K, width, height):
@@ -155,22 +155,22 @@ def _project_seed_bbox(seed_points_W, R_w2c, T_w2c, K, width, height):
     K64 = np.asarray(K, np.float64)
     pts = np.asarray(seed_points_W, np.float64)
     pts_c = (R @ pts.T).T + T
-    in_front = pts_c[:, 2] > _SEED_DEPTH_MIN
-    if int(in_front.sum()) < _SEED_MIN_IN_FRONT:
+    in_front = pts_c[:, 2] > SEED_DEPTH_MIN
+    if int(in_front.sum()) < SEED_MIN_IN_FRONT:
         return None
     pts_f = pts_c[in_front]
     u = pts_f[:, 0] / pts_f[:, 2] * float(K64[0, 0]) + float(K64[0, 2])
     v = pts_f[:, 1] / pts_f[:, 2] * float(K64[1, 1]) + float(K64[1, 2])
     valid = (u >= 0) & (u < int(width)) & (v >= 0) & (v < int(height))
-    if int(valid.sum()) < _SEED_MIN_IN_FRONT:
+    if int(valid.sum()) < SEED_MIN_IN_FRONT:
         return None
     u = u[valid]
     v = v[valid]
     return (
-        float(np.percentile(u, _SEED_PERCENTILE_LO)),
-        float(np.percentile(v, _SEED_PERCENTILE_LO)),
-        float(np.percentile(u, _SEED_PERCENTILE_HI)),
-        float(np.percentile(v, _SEED_PERCENTILE_HI)),
+        float(np.percentile(u, SEED_PERCENTILE_LO)),
+        float(np.percentile(v, SEED_PERCENTILE_LO)),
+        float(np.percentile(u, SEED_PERCENTILE_HI)),
+        float(np.percentile(v, SEED_PERCENTILE_HI)),
     )
 
 
@@ -461,7 +461,7 @@ def write_projection_overlays(xyz_W, supervision_views, output_dir):
         el     = float(cam.get("elevation_offset_deg", 0.0))
 
         pts_c   = (R @ xyz.T).T + T
-        in_front = pts_c[:, 2] > _SEED_DEPTH_MIN
+        in_front = pts_c[:, 2] > SEED_DEPTH_MIN
         pts_f   = pts_c[in_front]
 
         rgb = np.asarray(view["rgb"], np.uint8)

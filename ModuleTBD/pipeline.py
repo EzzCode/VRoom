@@ -12,7 +12,7 @@ from .utils.gstrain_wrapper import make_camera, render_rgba
 from .utils.transforms import look_at, ObjectFrame
 from .utils.scene_analysis import compute_object_scope, load_gaussians
 from .trainer import train_object
-from .colmap_init import load_colmap_object_point_cloud
+from .utils.colmap_init import load_colmap_object_point_cloud
 
 logger = logging.getLogger(__name__)
 

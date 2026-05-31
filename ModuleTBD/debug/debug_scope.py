@@ -1,6 +1,6 @@
 """Visual Debug for Scope Discovery + Coordinate Frames (ModuleTBD).
 
-Outputs under ``<obj_dir>/00_scope_debug/``::
+Outputs under ``<obj_dir>/00_scope/debug/``::
 
     summary.json             numeric snapshot of the scope
     aabb_overlays/           AABB drawn on a subset of training images
@@ -313,7 +313,7 @@ def main():
         args.model_path, args.object_id, ply_path=args.ply_path,
     )
     gaussians, _ = load_gaussians(args.model_path, ply_path=args.ply_path)
-    out_dir = Path(args.output_root) / f"obj_{args.object_id}" / "00_scope_debug"
+    out_dir = Path(args.output_root) / f"obj_{args.object_id}" / "00_scope" / "debug"
     generate_debug_artifacts(
         scope=scope, frame=frame, debug_dir=out_dir,
         gaussians=gaussians, pipe_config=pipe_config,

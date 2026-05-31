@@ -53,8 +53,6 @@ def run(
     ply_path=None,
     iterations=1200,
     # Extraction
-    id_map_dir="auto",
-    module1_obj_id=None,
     tau_alpha=0.4,
     min_pixels=64,
     # Frame scoring
@@ -85,7 +83,7 @@ def run(
     from ModuleTBD.utils.scene_analysis import compute_object_scope, load_gaussians
     from ModuleTBD.utils.transforms import ObjectFrame
     from ModuleTBD.view_selection import run_extraction, run_scoring
-    from ModuleTBD.hallucination import run_hallucination
+    from ModuleTBD.view_generation import run_hallucination
     from ModuleTBD.pipeline import run_pipeline
 
     torch.backends.cudnn.benchmark = True
@@ -130,25 +128,12 @@ def run(
 
     # ── Extraction ───────────────────────────────────────────────────────────
     logger.info("\n" + "─" * 80)
-    logger.info("EXTRACTION: Hybrid Object Extraction")
+    logger.info("EXTRACTION: Object Extraction")
     logger.info("─" * 80)
 
     try:
         scene_p = Path(scene_dir)
         images_dir = scene_p / "images"
-
-        resolved_id_map_dir = None
-        if id_map_dir == "auto":
-            for candidate in [
-                scene_p / "tracked" / "id_maps",
-                scene_p / "semantic_instance",
-                scene_p / "object_mask",
-            ]:
-                if candidate.exists() and any(candidate.iterdir()):
-                    resolved_id_map_dir = candidate
-                    break
-        elif str(id_map_dir).lower() not in ("none", "null", ""):
-            resolved_id_map_dir = Path(id_map_dir)
 
         extraction_manifest = run_extraction(
             scope=scope,
@@ -156,9 +141,6 @@ def run(
             pipe_config=pipe_config,
             images_dir=images_dir,
             output_dir=obj_dir / "01_extraction",
-            id_map_dir=resolved_id_map_dir,
-            module1_obj_id=module1_obj_id,
-            auto_resolve=True,
         )
         summary["phases"]["extraction"] = extraction_manifest
         logger.info("✓ Extraction: %d frames extracted", extraction_manifest["n_extracted"])
@@ -290,7 +272,6 @@ def run(
                 gaussians=gaussians,
                 pipe_config=pipe_config,
                 images_dir=images_dir,
-                id_map_dir=resolved_id_map_dir,
                 extraction_manifest=extraction_manifest,
                 scores_manifest=scores_manifest,
                 halluc_manifest=halluc_manifest,
@@ -344,9 +325,6 @@ def _parse_args():
     p.add_argument("--iterations", type=int, default=1200)
 
     # Extraction
-    p.add_argument("--id_map_dir", default="auto",
-                   help="'auto' | 'none' | explicit path to Module1 id_maps")
-    p.add_argument("--module1_obj_id", type=int, default=None)
     p.add_argument("--tau_alpha", type=float, default=0.4)
     p.add_argument("--min_pixels", type=int, default=64)
 
@@ -391,8 +369,6 @@ def main():
         object_id=args.object_id,
         ply_path=args.ply_path,
         iterations=args.iterations,
-        id_map_dir=args.id_map_dir,
-        module1_obj_id=args.module1_obj_id,
         tau_alpha=args.tau_alpha,
         min_pixels=args.min_pixels,
         top_k=args.top_k,

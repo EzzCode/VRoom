@@ -1,6 +1,6 @@
 """Visual Debug for Supervision & Training (ModuleTBD).
 
-Outputs under ``<obj_dir>/04_supervision_debug/``::
+Outputs under ``<obj_dir>/04_supervision/debug/``::
 
     supervision_contact_sheet.png   first ~20 supervision views with source label
     loss_plot.png                   loss/depth-loss curves from 05_training_summary.json
@@ -220,7 +220,7 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
     obj_dir = Path(args.obj_dir)
-    debug_dir = Path(args.debug_dir) if args.debug_dir else obj_dir / "04_supervision_debug"
+    debug_dir = Path(args.debug_dir) if args.debug_dir else obj_dir / "04_supervision" / "debug"
     generate_debug_artifacts(obj_dir=obj_dir, debug_dir=debug_dir)
 
 

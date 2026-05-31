@@ -1,6 +1,6 @@
 """Visual Debug for Object View Extraction (ModuleTBD).
 
-Outputs under ``<obj_dir>/01_extraction_debug/``::
+Outputs under ``<obj_dir>/01_extraction/debug/``::
 
     triptych/                    per-frame [src | objgs_mask | hybrid_mask] grids
     contact_sheet.png            12-frame thumbnail grid (objgs vs hybrid)
@@ -130,7 +130,7 @@ def _make_contact_sheet(items, n_cols=4, thumb_h=160):
 
 def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
                              scope=None, gaussians=None, pipe_config=None,
-                             id_map_dir=None, max_triptychs=20,
+                             max_triptychs=20,
                              contact_sheet_size=12):
     images_dir = Path(images_dir)
     debug_dir = Path(debug_dir)
@@ -160,8 +160,7 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
 
         label = (f"cam={f.get('cam_index')} | {f.get('image_name','?')} | "
                  f"az={f.get('azimuth_deg', 0.0):+.1f} | "
-                 f"fg={f.get('fg_fraction', 0.0):.3f} | "
-                 f"real_mask={'y' if f.get('used_real_mask') else 'n'}")
+                 f"fg={f.get('fg_fraction', 0.0):.3f}")
         trip = _make_triptych(rgb_src, mask_hybrid, mask_objgs,
                               f.get("bbox_xywh"), label)
         out_path = debug_dir / "triptych" / f"cam_{f.get('cam_index'):03d}.png"
@@ -192,8 +191,6 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
 
     summary = {
         "n_frames": n_total,
-        "n_used_real_mask": int(manifest.get("n_used_real_mask", 0)),
-        "module1_obj_id": manifest.get("module1_obj_id"),
         "object_id": manifest.get("object_id"),
         "fg_fraction_mean": float(np.mean([f.get("fg_fraction", 0.0) for f in frames])) if frames else 0.0,
         "fg_fraction_min": float(np.min([f.get("fg_fraction", 0.0) for f in frames])) if frames else 0.0,
@@ -212,7 +209,7 @@ def main():
     parser.add_argument("--images_dir", required=True,
                         help="Directory containing source images (e.g. images_4)")
     parser.add_argument("--output_root", default=None,
-                        help="If given, writes to <output_root>/01_extraction_debug/")
+                        help="If given, writes to <output_root>/01_extraction/debug/")
     parser.add_argument("--max_triptychs", type=int, default=20)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
@@ -222,9 +219,9 @@ def main():
         manifest = json.load(f)
 
     if args.output_root:
-        debug_dir = Path(args.output_root) / "01_extraction_debug"
+        debug_dir = Path(args.output_root) / "01_extraction" / "debug"
     else:
-        debug_dir = Path(args.extraction_index).parent.parent / "01_extraction_debug"
+        debug_dir = Path(args.extraction_index).parent / "debug"
     generate_debug_artifacts(
         manifest=manifest,
         images_dir=args.images_dir,

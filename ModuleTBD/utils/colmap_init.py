@@ -18,7 +18,7 @@ from gstrain.vroom_core.utils.geometry import PointCloudSample
 
 logger = logging.getLogger(__name__)
 
-_VROOM_ROOT = Path(__file__).resolve().parents[1]
+_VROOM_ROOT = Path(__file__).resolve().parents[2]
 
 _SEED_DEPTH_MIN = 1e-4
 
@@ -51,21 +51,18 @@ def _read_source_path(model_path):
 
 
 def _read_extraction_manifest(extraction_index_path):
-    """Return (manifest_dict, module_label_int) or (None, None) on any failure."""
+    """Return manifest_dict or None on any failure."""
     if extraction_index_path is None:
-        return None, None
+        return None
     path = Path(extraction_index_path)
     if not path.exists():
-        return None, None
+        return None
     try:
         with open(path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-        value = manifest.get("module1_obj_id")
-        module_label = int(value) if value is not None else None
-        return manifest, module_label
+            return json.load(f)
     except Exception as exc:
         logger.warning("Could not read extraction manifest from %s: %s", path, exc)
-        return None, None
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +196,7 @@ def _project_points(points, cam, mask_shape):
 def _score_labels_against_extraction(xyz_all, labels_all, *, scope,
                                       extraction_index_path, min_points):
     """Return per-label projection score dict by comparing labels to extraction masks."""
-    manifest, _ = _read_extraction_manifest(extraction_index_path)
+    manifest = _read_extraction_manifest(extraction_index_path)
     if manifest is None or scope is None:
         return {}
 
@@ -232,10 +229,10 @@ def _score_labels_against_extraction(xyz_all, labels_all, *, scope,
         if cam_index < 0 or cam_index >= len(scope.cameras):
             continue
 
-        mask_value = frame.get("out_mask_path") or frame.get("out_rgba_path")
-        if not mask_value:
+        rgba_value = frame.get("out_rgba_path")
+        if not rgba_value:
             continue
-        mask_path = _resolve_path(mask_value, base_dir=manifest_dir)
+        mask_path = _resolve_path(rgba_value, base_dir=manifest_dir)
         if not mask_path.exists():
             continue
 
@@ -323,11 +320,7 @@ def load_colmap_object_point_cloud(*, model_path, object_id, scope,
         xyz_all[finite], colors_all[finite], labels_all[finite]
     )
 
-    _, module_label = _read_extraction_manifest(extraction_index_path)
-    label_priority = []
-    for v in (module_label, int(object_id)):
-        if v is not None and int(v) not in label_priority:
-            label_priority.append(int(v))
+    label_priority = [int(object_id)]
 
     label_counts = {
         int(lb): int((labels_all == lb).sum()) for lb in np.unique(labels_all)
@@ -369,11 +362,7 @@ def load_colmap_object_point_cloud(*, model_path, object_id, scope,
                 f"counts={label_counts}"
             )
         chosen_label = max(positive.items(), key=lambda item: item[1])[0]
-        logger.warning(
-            "No preferred COLMAP label for object %d (extraction=%s). "
-            "Falling back to largest label %d.",
-            int(object_id), module_label, int(chosen_label),
-        )
+
 
     lb_mask = labels_all == int(chosen_label)
     xyz     = xyz_all[lb_mask]
@@ -414,7 +403,6 @@ def load_colmap_object_point_cloud(*, model_path, object_id, scope,
         "init_source": "colmap_labeled_ply",
         "source_path": str(source_path),
         "colmap_ply_path": str(ply_path),
-        "extraction_module_label": int(module_label) if module_label is not None else None,
         "colmap_label_used": int(chosen_label),
         "colmap_label_counts": label_counts,
         "colmap_label_projection_scores": proj_scores,
