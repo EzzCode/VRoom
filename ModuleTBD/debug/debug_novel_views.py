@@ -132,6 +132,17 @@ def generate_debug_artifacts(*, manifest, scope_cameras, debug_dir):
     make_generated_grid(manifest, debug_dir)
     make_coverage_polar(manifest, scope_cameras, debug_dir)
 
+    # Copy input conditioning image if it exists in 03_novel_views
+    try:
+        obj_dir = debug_dir.parent.parent
+        input_cond_src = obj_dir / "03_novel_views" / "input.png"
+        if input_cond_src.exists():
+            import shutil
+            shutil.copy2(input_cond_src, debug_dir / "input.png")
+            logger.info("Copied input conditioning image to debug novel_views: %s", debug_dir / "input.png")
+    except Exception as exc:
+        logger.warning("Failed to copy input conditioning image to debug: %s", exc)
+
     frames = manifest.get("frames", [])
     summary = {
         "n_views": int(manifest.get("n_views", len(frames))),

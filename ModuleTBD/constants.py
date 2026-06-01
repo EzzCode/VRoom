@@ -13,3 +13,14 @@ SEED_PERCENTILE_LO = 2      # lower percentile for world-scale bounding box
 SEED_PERCENTILE_HI = 98     # upper percentile for world-scale bounding box
 WS_CLIP_MIN        = 0.05   # world-scale ratio clamp (lower)
 WS_CLIP_MAX        = 2.0    # world-scale ratio clamp (upper)
+
+GAUSSIAN_MODEL_DEFAULTS = {
+    "gs_attr": "2D",
+    "feat_dim": 32,
+    "view_dim": 3,
+    "appearance_dim": 0,
+    "n_offsets": 10,
+    "voxel_size": 0.001,
+    "render_mode": "RGB+ED",
+    "tile_size_2dgs": 8,
+}

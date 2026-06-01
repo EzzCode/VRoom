@@ -113,7 +113,7 @@ def _reference_alpha(scope, frame: ObjectFrame, gaussians, pipeline_config, az_d
     return alpha
 
 
-def run_hallucination(scope: ObjectScope, frame: ObjectFrame, gaussians, pipeline_config, scores, output_dir, reuse_sv3d=False):
+def run_generation(scope: ObjectScope, frame: ObjectFrame, gaussians, pipeline_config, scores, output_dir, reuse_sv3d=False):
     output_dir    = Path(output_dir)
     generated_dir = output_dir / "generated"
     sv3d_dir  = output_dir / "sv3d"
@@ -158,6 +158,7 @@ def run_hallucination(scope: ObjectScope, frame: ObjectFrame, gaussians, pipelin
     rgb = cv2.cvtColor(cast(Any, rgba)[..., :3], cv2.COLOR_BGR2RGB)
     alpha = cast(Any, rgba)[..., 3].astype(np.float32) / 255.0
     input_rgb, _ = _resize(rgb, alpha, SV3D_INPUT_SIZE)
+    cv2.imwrite(str(output_dir / "input.png"), cv2.cvtColor(input_rgb, cv2.COLOR_RGB2BGR))
 
     if reuse_sv3d:
         views = load_cache(output_dir, top_azimuth_deg, top_elevation_deg)

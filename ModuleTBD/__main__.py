@@ -73,15 +73,15 @@ def run(
     enable_densification=False,
     max_anchor_count=20000,
     densify_grad_threshold=0.00005,
-    densify_extra_ratio=0.08,
     debug=False,
 ):
     """Run extraction → frame scoring → hallucination → training for one object."""
     import torch
+    from ModuleTBD.config import ObjectTrainingConfig
     from ModuleTBD.utils.scene_analysis import compute_object_scope, load_gaussians
     from ModuleTBD.utils.transforms import ObjectFrame
     from ModuleTBD.view_selection import run_extraction, run_scoring
-    from ModuleTBD.view_generation import run_hallucination
+    from ModuleTBD.view_generation import run_generation
     from ModuleTBD.pipeline import run_pipeline
 
     torch.backends.cudnn.benchmark = True
@@ -91,6 +91,22 @@ def run(
     output_root.mkdir(parents=True, exist_ok=True)
     obj_id = int(object_id)
     obj_dir = output_root / f"obj_{obj_id}"
+
+    config = ObjectTrainingConfig(
+        iterations=iterations,
+        generated_weight=generated_weight,
+        real_weight=real_weight,
+        rgb_weight=rgb_weight,
+        generated_rgb_scale=generated_rgb_scale,
+        depth_weight=depth_weight,
+        depth_start_iter=depth_start_iter,
+        depth_front_weight=depth_front_weight,
+        depth_back_weight=depth_back_weight,
+        colmap_init_target_points=colmap_init_target_points,
+        enable_densification=enable_densification,
+        max_anchor_count=max_anchor_count,
+        densify_grad_threshold=densify_grad_threshold,
+    )
 
     # Resolve PLY path — prefer latest iteration_* checkpoint (has label_ids);
     # fall back to flat point_cloud/point_cloud.ply if no iterations exist.
@@ -209,7 +225,7 @@ def run(
     logger.info("─" * 80)
 
     try:
-        halluc_manifest = run_hallucination(
+        halluc_manifest = run_generation(
             scope=scope,
             frame=frame,
             gaussians=gaussians,
@@ -234,28 +250,15 @@ def run(
     try:
         training_result = run_pipeline(
             model_path=str(model_path),
-            object_label_id=obj_id,
-            halluc_index_path=obj_dir / "03_novel_views" / "generation.json",
+            object_id=obj_id,
+            generation_path=obj_dir / "03_novel_views" / "generation.json",
             output_dir=output_root,
             halluc_manifest=halluc_manifest,
             gaussians=gaussians,
             pipe_config=pipe_config,
             scope=scope,
             frame=frame,
-            iterations=iterations,
-            generated_weight=generated_weight,
-            real_weight=real_weight,
-            rgb_weight=rgb_weight,
-            generated_rgb_scale=generated_rgb_scale,
-            depth_weight=depth_weight,
-            depth_start_iter=depth_start_iter,
-            depth_front_weight=depth_front_weight,
-            depth_back_weight=depth_back_weight,
-            colmap_init_target_points=colmap_init_target_points,
-            enable_densification=enable_densification,
-            max_anchor_count=max_anchor_count,
-            densify_grad_threshold=densify_grad_threshold,
-            densify_extra_ratio=densify_extra_ratio,
+            config=config,
         )
         training_result_clean = {k: v for k, v in training_result.items() if k != "_gaussians"}
         summary["phases"]["training"] = training_result_clean
@@ -279,7 +282,6 @@ def run(
                 extraction_manifest=extraction_manifest,
                 scores_manifest=scores_manifest,
                 halluc_manifest=halluc_manifest,
-                training_summary=summary["phases"].get("training"),
                 model_path=str(model_path),
                 object_id=obj_id,
             )
@@ -354,7 +356,6 @@ def _parse_args():
     p.add_argument("--enable_densification", action="store_true")
     p.add_argument("--max_anchor_count", type=int, default=20000)
     p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
-    p.add_argument("--densify_extra_ratio", type=float, default=0.08)
 
     # General
     p.add_argument("--debug", action="store_true")
@@ -390,7 +391,6 @@ def main():
         enable_densification=args.enable_densification,
         max_anchor_count=args.max_anchor_count,
         densify_grad_threshold=args.densify_grad_threshold,
-        densify_extra_ratio=args.densify_extra_ratio,
         debug=args.debug,
     )
 

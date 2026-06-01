@@ -122,10 +122,13 @@ def generate_debug_artifacts(
 
 def _load_trained_gaussians(parent_gaussians, model_dir):
     from gstrain.vroom_core.models.facade import GaussianModel
-    from ModuleTBD.trainer import _model_kwargs
+    from ModuleTBD.constants import GAUSSIAN_MODEL_DEFAULTS
 
     model_dir = Path(model_dir)
-    kwargs = _model_kwargs(parent_gaussians)
+    kwargs = {
+        k: getattr(parent_gaussians, k, GAUSSIAN_MODEL_DEFAULTS[k])
+        for k in GAUSSIAN_MODEL_DEFAULTS
+    } if parent_gaussians is not None else GAUSSIAN_MODEL_DEFAULTS
     gaussians = GaussianModel(
         gs_attr=str(kwargs["gs_attr"]),
         feat_dim=int(kwargs["feat_dim"]),

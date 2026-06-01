@@ -43,7 +43,7 @@ def _rgba_to_rgb_mask(rgba):
     return rgb, mask
 
 
-def build_supervision_views(generation_log_path, extraction_path,
+def build_views(generation_log_path, extraction_path,
                              scope, frame, cloud_points,
                              real_weight=1.0, generated_weight=1.0,
                              up_override=None):
@@ -146,23 +146,23 @@ def build_supervision_views(generation_log_path, extraction_path,
                     "width": int(width),
                     "height": int(height),
                     "position": np.asarray(camera["position"], np.float32),
-                    "azimuth_offset_deg": float(camera.get("azimuth_deg", extracted_frame["azimuth_deg"])),
-                    "elevation_offset_deg": float(camera.get("elevation_deg", extracted_frame["elevation_deg"])),
+                    "azimuth_deg": float(camera.get("azimuth_deg", extracted_frame["azimuth_deg"])),
+                    "elevation_deg": float(camera.get("elevation_deg", extracted_frame["elevation_deg"])),
                     "frame_index": cam_index,
                 },
                 "weight": float(real_weight),
             })
 
-    # Setup SV3D intrinsic matrix using vertical FOV
+    #SV3D intrinsics using vertical FOV
     target_res = int(RESOLUTION)
-    focal_y = 0.5 * target_res / math.tan(0.5 * math.radians(FOV_Y_DEG))
-    K_sv3d = np.array([[focal_y, 0.0, target_res / 2.0],
-                       [0.0, focal_y, target_res / 2.0],
+    fy = 0.5 * target_res / math.tan(0.5 * math.radians(FOV_Y_DEG))
+    K_sv3d = np.array([[fy, 0.0, target_res / 2.0],
+                       [0.0, fy, target_res / 2.0],
                        [0.0, 0.0, 1.0]], dtype=np.float32)
 
     generated_views = []
     
-    # Process generated camera views
+    # Process generated views
     for gen_frame in accepted_frames:
         rgba_path = resolve_path(gen_frame["rgba_path"], manifest_dir=generation_log_path.parent)
         if not rgba_path.exists():
@@ -173,21 +173,22 @@ def build_supervision_views(generation_log_path, extraction_path,
             raise RuntimeError(f"cv2.imread returned None for: {rgba_path}")
 
         rgb, mask = _rgba_to_rgb_mask(rgba)
-        if rgb.shape[0] != target_res or rgb.shape[1] != target_res:
+        height, width = rgb.shape[:2]
+        if width != target_res or height != target_res:
             rgb = cv2.resize(rgb, (target_res, target_res), interpolation=cv2.INTER_AREA)
             mask = cv2.resize(mask.astype(np.uint8), (target_res, target_res), interpolation=cv2.INTER_NEAREST) > 0
 
         azimuth_deg = float(gen_frame["azimuth_deg"])
         elevation_deg = float(gen_frame["elevation_deg"])
 
-        R_world_to_cam, T_world_to_cam, cam_pos_world = frame.virtual_to_world_camera(azimuth_deg, elevation_deg)
+        R_world_to_cam, T_world_to_cam, cam_world = frame.virtual_to_world_camera(azimuth_deg, elevation_deg)
 
         if up_override is not None:
             up_vector = np.asarray(up_override, np.float32)
             up_vector = up_vector / max(float(np.linalg.norm(up_vector)), 1e-9)
-            R_world_to_cam, T_world_to_cam = look_at(cam_pos_world, frame.centroid, up_vector)
+            R_world_to_cam, T_world_to_cam = look_at(cam_world, frame.centroid, up_vector)
 
-        # Compute projection scale to match the target filling fraction
+        #projection scale to match the filling fraction
         R = np.asarray(R_world_to_cam, np.float64)
         T = np.asarray(T_world_to_cam, np.float64).reshape(3)
         K = np.asarray(K_sv3d, np.float64)
@@ -212,44 +213,44 @@ def build_supervision_views(generation_log_path, extraction_path,
         projected_u = front_points_cam[:, 0] / front_points_cam[:, 2] * fx + center_x
         projected_v = front_points_cam[:, 1] / front_points_cam[:, 2] * fy + center_y
         
-        u_lo = float(np.percentile(projected_u, SEED_PERCENTILE_LO))
-        u_hi = float(np.percentile(projected_u, SEED_PERCENTILE_HI))
-        v_lo = float(np.percentile(projected_v, SEED_PERCENTILE_LO))
-        v_hi = float(np.percentile(projected_v, SEED_PERCENTILE_HI))
+        u_low = float(np.percentile(projected_u, SEED_PERCENTILE_LO))
+        u_high = float(np.percentile(projected_u, SEED_PERCENTILE_HI))
+        v_low = float(np.percentile(projected_v, SEED_PERCENTILE_LO))
+        v_high = float(np.percentile(projected_v, SEED_PERCENTILE_HI))
         
-        projected_span = max(u_hi - u_lo, v_hi - v_lo)
+        projected_span = max(u_high - u_low, v_high - v_low)
         world_scale = float(np.clip(projected_span / max(sv3d_px, 1.0), WS_CLIP_MIN, WS_CLIP_MAX))
 
         K_view = K_sv3d.copy()
         K_view[0, 0] = float(K_sv3d[0, 0] / world_scale)
         K_view[1, 1] = float(K_sv3d[1, 1] / world_scale)
 
-        # Center-align the projected point cloud bounding box with the actual mask image bounding box
+        # Center the projected point cloud bbox with mask 
         ys, xs = np.where(mask)
         if len(xs) > 0:
-            # Re-project using the newly adjusted focal lengths
+            # project with adjusted focal lengths
             projected_u = front_points_cam[:, 0] / front_points_cam[:, 2] * float(K_view[0, 0]) + float(K_view[0, 2])
             projected_v = front_points_cam[:, 1] / front_points_cam[:, 2] * float(K_view[1, 1]) + float(K_view[1, 2])
             in_bounds = (projected_u >= 0) & (projected_u < target_res) & (projected_v >= 0) & (projected_v < target_res)
             
             if int(in_bounds.sum()) >= SEED_MIN_IN_FRONT:
-                valid_u = projected_u[in_bounds]
-                valid_v = projected_v[in_bounds]
+                u = projected_u[in_bounds]
+                v = projected_v[in_bounds]
                 proj_bbox = (
-                    float(np.percentile(valid_u, SEED_PERCENTILE_LO)),
-                    float(np.percentile(valid_v, SEED_PERCENTILE_LO)),
-                    float(np.percentile(valid_u, SEED_PERCENTILE_HI)),
-                    float(np.percentile(valid_v, SEED_PERCENTILE_HI)),
+                    float(np.percentile(u, SEED_PERCENTILE_LO)),
+                    float(np.percentile(v, SEED_PERCENTILE_LO)),
+                    float(np.percentile(u, SEED_PERCENTILE_HI)),
+                    float(np.percentile(v, SEED_PERCENTILE_HI)),
                 )
                 img_bbox = (float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1))
-                proj_cx = 0.5 * (proj_bbox[0] + proj_bbox[2])
-                proj_cy = 0.5 * (proj_bbox[1] + proj_bbox[3])
+                projected_cx = 0.5 * (proj_bbox[0] + proj_bbox[2])
+                projected_cy = 0.5 * (proj_bbox[1] + proj_bbox[3])
                 img_cx = 0.5 * (img_bbox[0] + img_bbox[2])
                 img_cy = 0.5 * (img_bbox[1] + img_bbox[3])
                 
-                # Limit shift to 25% of the frame resolution
-                shift_x = float(np.clip(img_cx - proj_cx, -0.25 * target_res, 0.25 * target_res))
-                shift_y = float(np.clip(img_cy - proj_cy, -0.25 * target_res, 0.25 * target_res))
+                #limit shift to 25% of frame
+                shift_x = float(np.clip(img_cx - projected_cx, -0.25 * target_res, 0.25 * target_res))
+                shift_y = float(np.clip(img_cy - projected_cy, -0.25 * target_res, 0.25 * target_res))
                 K_view[0, 2] += shift_x
                 K_view[1, 2] += shift_y
 
@@ -263,15 +264,15 @@ def build_supervision_views(generation_log_path, extraction_path,
                 "K": K_view,
                 "width": target_res,
                 "height": target_res,
-                "position": np.asarray(cam_pos_world, np.float32),
-                "azimuth_offset_deg": azimuth_deg,
-                "elevation_offset_deg": elevation_deg,
+                "position": np.asarray(cam_world, np.float32),
+                "azimuth_deg": azimuth_deg,
+                "elevation_deg": elevation_deg,
                 "frame_index": int(gen_frame.get("index", 0)),
             },
             "weight": float(generated_weight),
         })
 
     views = real_views + generated_views
-    logger.info("Supervision views ready: total=%d  real=%d  generated=%d.",
+    logger.info("views ready: total=%d  real=%d  generated=%d.",
                 len(views), len(real_views), len(generated_views))
     return views

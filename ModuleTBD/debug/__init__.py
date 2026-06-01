@@ -55,7 +55,6 @@ def generate_all_debug_artifacts(
     extraction_manifest=None,
     scores_manifest=None,
     halluc_manifest=None,
-    training_summary=None,
     model_path=None,
     object_id=None,
 ):

@@ -118,8 +118,8 @@ def test_projection_overlay(seed_points_W, supervision_views, output_dir):
             for point_index, (px, py) in enumerate(zip(u[valid].astype(np.int32), v[valid].astype(np.int32))):
                 cv2.circle(bgr, (int(px), int(py)), 2, tuple(int(c) for c in colors[point_index, 0]), -1)
 
-        azimuth = float(camera.get("azimuth_offset_deg", 0.0))
-        elevation = float(camera.get("elevation_offset_deg", 0.0))
+        azimuth = float(camera.get("azimuth_deg", 0.0))
+        elevation = float(camera.get("elevation_deg", 0.0))
         label = f"#{index} {source} az={azimuth:.0f} el={elevation:.0f} n={n_in_frame}"
         cv2.putText(bgr, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         overlay_dir.mkdir(parents=True, exist_ok=True)
@@ -140,8 +140,8 @@ def test_projection_overlay(seed_points_W, supervision_views, output_dir):
     return results
 
 
-def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None, frame=None):
-    from ModuleTBD.dataset_builder import build_supervision_views
+def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None, frame=None, ply_path=None):
+    from ModuleTBD.dataset_builder import build_views
     from ModuleTBD.utils.colmap_init import load_colmap_object_point_cloud
     from ModuleTBD.utils.scene_analysis import compute_object_scope
 
@@ -150,7 +150,17 @@ def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None,
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     if scope is None or frame is None:
-        scope, frame, _ = compute_object_scope(model_path, int(object_id))
+        model_path = Path(model_path)
+        if ply_path is None:
+            pc_base = model_path / "point_cloud"
+            iter_dirs = sorted(
+                [d for d in pc_base.iterdir() if d.is_dir() and d.name.startswith("iteration_")],
+                key=lambda d: int(d.name.split("_")[-1]),
+            ) if pc_base.exists() else []
+            resolved_ply = (iter_dirs[-1] / "point_cloud.ply") if iter_dirs else (pc_base / "point_cloud.ply")
+        else:
+            resolved_ply = Path(ply_path)
+        scope, frame, _ = compute_object_scope(str(model_path), int(object_id), ply_path=str(resolved_ply))
 
     extraction_index = obj_dir / "01_extraction" / "extraction_index.json"
     generation_index = obj_dir / "03_novel_views" / "generation.json"
@@ -164,13 +174,24 @@ def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None,
     )
     seed_points_W = np.asarray(point_cloud.points, np.float32)
 
-    supervision_views = build_supervision_views(
-        halluc_index_path=generation_index,
-        extraction_index_path=extraction_index,
+    # Load conditioning camera up-vector override if available
+    up_override = None
+    try:
+        with open(generation_index) as f:
+            gen_manifest = json.load(f)
+        cam_idx = gen_manifest.get("conditioning", {}).get("cam_index")
+        if cam_idx is not None and 0 <= int(cam_idx) < len(scope.cameras):
+            up_override = -np.asarray(scope.cameras[int(cam_idx)]["R"], np.float32)[1]
+    except Exception:
+        pass
+
+    supervision_views = build_views(
+        generation_log_path=generation_index,
+        extraction_path=extraction_index,
         scope=scope,
         frame=frame,
-        seed_points_W=seed_points_W,
-        resolution=576,
+        cloud_points=seed_points_W,
+        up_override=up_override,
     )
 
     report = {
@@ -220,6 +241,7 @@ def _parse_args():
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--output_root", default=None)
     parser.add_argument("--object_id", type=int, required=True)
+    parser.add_argument("--ply_path", default=None)
     return parser.parse_args()
 
 
@@ -240,4 +262,5 @@ if __name__ == "__main__":
         model_path=args.model_path,
         object_id=args.object_id,
         debug_dir=Path(obj_dir) / "debug" / "projection_audit",
+        ply_path=args.ply_path,
     )

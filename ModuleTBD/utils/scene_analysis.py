@@ -7,12 +7,14 @@ import yaml
 from ModuleTBD.utils.transforms import ObjectFrame
 from gstrain.vroom_core import GaussianModel
 from gstrain.vroom_core.models.semantics import SemanticCodec
+from object_isolation.core.scene_loader import load_gaussians
 from .helpers import normalize
+from ModuleTBD.constants import GAUSSIAN_MODEL_DEFAULTS
 import logging
 logger = logging.getLogger(__name__)
 
 
-def load_cameras(cameras_json: Union[str, Path]):
+def _load_cameras(cameras_json: Union[str, Path]):
     cameras_json = Path(cameras_json)
     if not cameras_json.exists():
         raise FileNotFoundError(f"Expected cameras.json at {cameras_json}")
@@ -55,7 +57,7 @@ def load_cameras(cameras_json: Union[str, Path]):
     return result
 
 
-def load_gaussians(model_path: Union[str, Path], ply_path=None):
+def _load_gaussians(model_path: Union[str, Path], ply_path=None):
     model_path = Path(model_path)
     config_path = model_path / "config.yaml"
 
@@ -80,22 +82,21 @@ def load_gaussians(model_path: Union[str, Path], ply_path=None):
     if kwargs is None:
         raise ValueError(f"model_config.kwargs is missing in {config_path}")
 
-    _GAUSSIAN_MODEL_KWARGS = {
-        "n_offsets", "feat_dim", "view_dim", "appearance_dim",
-        "voxel_size", "gs_attr", "render_mode", "tile_size_2dgs",
+    model_kwargs = {
+        k: kwargs.get(k, GAUSSIAN_MODEL_DEFAULTS[k])
+        for k in GAUSSIAN_MODEL_DEFAULTS
     }
-    filtered_kwargs = {k: v for k, v in kwargs.items() if k in _GAUSSIAN_MODEL_KWARGS}
 
     resolved_ply = Path(ply_path) if ply_path else model_path / "point_cloud.ply"
     model = GaussianModel(
-        gs_attr=str(filtered_kwargs.get("gs_attr", "2D")),
-        feat_dim=int(filtered_kwargs.get("feat_dim", 32)),
-        view_dim=int(filtered_kwargs.get("view_dim", 3)),
-        appearance_dim=int(filtered_kwargs.get("appearance_dim", 0)),
-        n_offsets=int(filtered_kwargs.get("n_offsets", 10)),
-        voxel_size=float(filtered_kwargs.get("voxel_size", 0.001)),
-        render_mode=str(filtered_kwargs.get("render_mode", "RGB+ED")),
-        tile_size_2dgs=int(filtered_kwargs.get("tile_size_2dgs", 8)),
+        gs_attr=str(model_kwargs["gs_attr"]),
+        feat_dim=int(model_kwargs["feat_dim"]),
+        view_dim=int(model_kwargs["view_dim"]),
+        appearance_dim=int(model_kwargs["appearance_dim"]),
+        n_offsets=int(model_kwargs["n_offsets"]),
+        voxel_size=float(model_kwargs["voxel_size"]),
+        render_mode=str(model_kwargs["render_mode"]),
+        tile_size_2dgs=int(model_kwargs["tile_size_2dgs"]),
     )
     model.load_ply(str(resolved_ply))                    # load anchors + label_ids
     model.load_mlp_checkpoints(str(resolved_ply.parent)) # load MLPs (same dir as PLY)
@@ -107,6 +108,7 @@ def load_gaussians(model_path: Union[str, Path], ply_path=None):
     object.__setattr__(model, "explicit_gs", False)   # training flag
     model.weed_ratio = 0.0      # disable anchor pruning
     model.set_eval()
+    model.optim_params = config.get("optim_params", {})
 
     logger.info(
         "Loaded GaussianModel from %s with %d anchors and label IDs: %s",
@@ -178,6 +180,7 @@ class ObjectScope:
     visible_cam_indices: list
     cam_centers_visible: np.ndarray
     cameras: list = field(default_factory=list)
+    optim_params: dict = field(default_factory=dict)
 
 
 def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_path=None):
@@ -190,7 +193,7 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
     if not resolved_ply.exists():
         raise FileNotFoundError(f"PLY not found: {resolved_ply}")
 
-    gaussians, pipe_config = load_gaussians(str(model_path), ply_path=str(resolved_ply))
+    gaussians, pipe_config = _load_gaussians(str(model_path), ply_path=str(resolved_ply))
     all_anchors = gaussians.get_anchor.detach().cpu().numpy().astype(np.float32)
     label_ids = cast(Any, gaussians.label_ids).detach().cpu().numpy().reshape(-1).astype(np.int64)
 
@@ -217,7 +220,7 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
     # sqrt of eigenvalues gives the standard deviation along each principal axis 
     obb_extents = np.sqrt(np.clip(eigen_values[np.argsort(eigen_values)[::-1]], 0.0, None)).astype(np.float32)
 
-    cameras = load_cameras(cameras_json)
+    cameras = _load_cameras(cameras_json)
 
     visible_index = []
     visible_centers = []
@@ -253,6 +256,7 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
         visible_cam_indices=visible_index,
         cam_centers_visible=camera_centers,
         cameras=cameras,
+        optim_params=getattr(gaussians, "optim_params", {}),
     )
     obj_frame = _build_coordinate_frames(scope)
     for ci in visible_index:
