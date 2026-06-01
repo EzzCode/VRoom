@@ -7,7 +7,6 @@ import yaml
 from ModuleTBD.utils.transforms import ObjectFrame
 from gstrain.vroom_core import GaussianModel
 from gstrain.vroom_core.models.semantics import SemanticCodec
-from object_isolation.core.scene_loader import load_gaussians
 from .helpers import normalize
 from ModuleTBD.constants import GAUSSIAN_MODEL_DEFAULTS
 import logging
@@ -57,7 +56,7 @@ def _load_cameras(cameras_json: Union[str, Path]):
     return result
 
 
-def _load_gaussians(model_path: Union[str, Path], ply_path=None):
+def load_gaussians(model_path: Union[str, Path], ply_path=None):
     model_path = Path(model_path)
     config_path = model_path / "config.yaml"
 
@@ -193,7 +192,7 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
     if not resolved_ply.exists():
         raise FileNotFoundError(f"PLY not found: {resolved_ply}")
 
-    gaussians, pipe_config = _load_gaussians(str(model_path), ply_path=str(resolved_ply))
+    gaussians, pipe_config = load_gaussians(str(model_path), ply_path=str(resolved_ply))
     all_anchors = gaussians.get_anchor.detach().cpu().numpy().astype(np.float32)
     label_ids = cast(Any, gaussians.label_ids).detach().cpu().numpy().reshape(-1).astype(np.int64)
 
