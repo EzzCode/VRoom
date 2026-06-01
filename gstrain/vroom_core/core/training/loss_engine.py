@@ -8,6 +8,8 @@ class LossEngine:
 
     def calc_volumetric_loss(self, scales: torch.Tensor, volume_lambda):
         """Calculates volumetric loss from scaling factors."""
+        if scales.numel() == 0:
+            return torch.zeros(1, device=scales.device).squeeze()
         volumes = torch.prod(
             scales, dim=1
         )  # multiply the x, y and z scales to get the volumes of each gaussian
