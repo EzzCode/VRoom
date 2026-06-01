@@ -136,11 +136,8 @@ def apply_frustum_culling(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
     scales = torch.exp(anchor_cloud.anchors_log_scales[anchor_cloud.visibility_mask])[
         :, :3
     ]
-    import torch.nn.functional as F
-
-    quats = F.normalize(
-        anchor_cloud.anchors_rotations[anchor_cloud.visibility_mask], dim=-1
-    )
+    quats = torch.zeros((means.shape[0], 4), dtype=torch.float32, device=means.device)
+    quats[:, 0] = 1.0
     render_device = means.device
 
     Ks = torch.tensor(

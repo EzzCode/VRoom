@@ -11,9 +11,7 @@ from gstrain.vroom_core.utilities.training import (
 from gstrain.vroom_core.core.training.loss_engine import LossEngine
 from gstrain.vroom_core.utilities.utils import (
     CheckpointManager,
-    compute_psnr,
 )
-
 
 def prepare_gaussian_space_props(
     anchor_cloud,
@@ -180,16 +178,12 @@ class TrainingOrchestrator:
             self.densifier.reset_state()
             torch.cuda.empty_cache()
 
-        with torch.no_grad():
-            psnr = compute_psnr(rasterizer_output["render"], camera_view.original_image)
-
         # Detach rendered image for visualisation
         rendered_image_detached = rasterizer_output["render"].detach()
         total_loss_value = losses["total"].item()
 
         return {
             "total_loss": total_loss_value,
-            "psnr": psnr,
             "rendered_image": rendered_image_detached,
         }
 

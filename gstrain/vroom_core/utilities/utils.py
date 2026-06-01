@@ -120,49 +120,9 @@ def projection_matrix(
     return matrix
 
 
-def compute_anchors_scale_and_rotation(
-    anchors_positions: torch.Tensor,
-    distances: torch.Tensor,
-    voxel_size: float,
-    device: torch.device | str = "cuda",
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute scale and rotation for anchors based on distances and voxel size"""
-    area_of_effect = distances[:, 1:].mean(dim=-1).clamp(min=max(voxel_size, 1e-6))
-    log_scaling = torch.log(area_of_effect.sqrt()).unsqueeze(-1).repeat(1, 6)
-    rotations = torch.zeros(
-        (anchors_positions.shape[0], 4),
-        dtype=torch.float32,
-        device=device,
-    )
-    rotations[:, 0] = 1.0  # identity quaternion
-    return log_scaling, rotations
 
 
-def estimate_voxel_size(knn_distances: torch.Tensor, min_size: float = 1e-6) -> float:
-    """
-    Estimates a voxel size for a uniform grid using knn distances
-    """
-    voxel_size = torch.median(knn_distances[:, 1:]).item()
-    voxel_size = max(voxel_size, min_size)
-    print(f"voxel size = {voxel_size}")
-    return voxel_size
 
-
-def compute_psnr(prediction: torch.Tensor, target: torch.Tensor) -> float:
-    """Compute Peak Signal-to-Noise Ratio (PSNR) between prediction and target tensors."""
-    target = target.to(prediction.device)
-    mse = torch.mean((prediction - target) ** 2)
-    if mse == 0:
-        return float("inf")
-    return float(20 * torch.log10(1.0 / torch.sqrt(mse)))
-
-
-def calc_volumetric_loss(scales: torch.Tensor, volume_lambda: float) -> torch.Tensor:
-    """Calculates volumetric loss from scaling factors."""
-    volumes = torch.prod(
-        scales, dim=1
-    )  # multiply the x, y and z scales to get the volumes of each gaussian
-    return torch.mean(volumes) * volume_lambda
 
 
 class CheckpointManager:
@@ -185,7 +145,9 @@ class CheckpointManager:
         )
         features = field.anchor_features.detach().cpu().numpy()
         scales = field.anchors_log_scales.detach().cpu().numpy()
-        rotations = field.anchors_rotations.detach().cpu().numpy()
+        # Generate identity rotations for PLY compatibility
+        rotations = np.zeros((anchor.shape[0], 4), dtype=np.float32)
+        rotations[:, 0] = 1.0
         labels = (
             field.semantic_labels.detach().cpu().numpy().reshape(-1, 1)
             if field.semantic_labels is not None

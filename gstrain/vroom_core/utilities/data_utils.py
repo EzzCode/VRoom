@@ -689,7 +689,6 @@ class TrainingScene:
                 gaussians_offsets=payload["offset"],
                 anchor_features=payload["feature"],
                 anchors_log_scales=payload["log_scaling"],
-                anchors_rotations=payload["rotation"],
                 labels=payload["labels"],
                 semantic_manager=None
                 if payload["labels"] is None

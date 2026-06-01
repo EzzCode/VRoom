@@ -1,11 +1,17 @@
 import torch
 import torch.nn.functional as F
-from gstrain.vroom_core.utilities.utils import calc_volumetric_loss
 
 
 class LossEngine:
     def __init__(self, semantic_manager):
         self.semantic_manager = semantic_manager
+
+    def calc_volumetric_loss(self, scales: torch.Tensor, volume_lambda):
+        """Calculates volumetric loss from scaling factors."""
+        volumes = torch.prod(
+            scales, dim=1
+        )  # multiply the x, y and z scales to get the volumes of each gaussian
+        return torch.mean(volumes) * volume_lambda
 
     def calc_l1_loss(self, render, real_image):
         return torch.mean(torch.abs(render - real_image))
@@ -122,7 +128,7 @@ class LossEngine:
             )
         else:
             semantic_loss = torch.zeros(1, device=render.device).squeeze()
-        volumetric_loss = calc_volumetric_loss(scales, volume_reg_weight)
+        volumetric_loss = self.calc_volumetric_loss(scales, volume_reg_weight)
 
         return {
             "rgb_loss": rgb_loss,

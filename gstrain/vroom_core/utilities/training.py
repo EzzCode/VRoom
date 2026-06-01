@@ -15,7 +15,6 @@ _FIELD_GROUPS = {
     "gaussians_offsets",
     "anchor_features",
     "anchors_log_scales",
-    "anchors_rotations",
 }
 
 
@@ -41,7 +40,7 @@ def extend_optimizer(optimizer, anchor_cloud, extension_dict):
 
         new_param = nn.Parameter(
             torch.cat([old_param.detach(), ext], dim=0),
-            requires_grad=(name != "anchors_rotations"),
+            requires_grad=True,
         )
         group["params"][0] = new_param
         if state:
@@ -70,7 +69,7 @@ def prune_optimizer(optimizer, anchor_cloud, keep_mask):
 
         new_param = nn.Parameter(
             old_param[keep_mask].detach().clone(),
-            requires_grad=(name != "anchors_rotations"),
+            requires_grad=True,
         )
         group["params"][0] = new_param
         if state:
@@ -110,11 +109,6 @@ class Optimizer:
                 "params": [anchor_cloud.anchors_log_scales],
                 "lr": args.anchor_scale_lr,
                 "name": "anchors_log_scales",
-            },
-            {
-                "params": [anchor_cloud.anchors_rotations],
-                "lr": args.anchor_rot_lr,
-                "name": "anchors_rotations",
             },
             {
                 "params": decoder.opacity_network.parameters(),
@@ -213,7 +207,6 @@ def state_snapshot(
         "gaussian_offsests": anchor_cloud.gaussians_offsets.detach(),
         "anchor_feature": anchor_cloud.anchor_features.detach(),
         "anchor_log_scales": anchor_cloud.anchors_log_scales.detach(),
-        "anchor_rotation": anchor_cloud.anchors_rotations.detach(),
         "semantic_labels": anchor_cloud.semantic_labels,
         "spatial_lr_scale": spatial_lr_scale,
         "optimizer_state": optimizer.state_dict(),
@@ -300,7 +293,6 @@ def update_progress_bar(
 ) -> None:
     """Updates the postfix metrics on the tqdm progress bar."""
     total_loss = step_output["total_loss"]
-    psnr = step_output["psnr"]
     progress_bar.set_postfix(
-        {"Loss": f"{total_loss:.4f}", "PSNR": f"{psnr:.2f}", "Anchors": num_anchors}
+        {"Loss": f"{total_loss:.4f}", "Anchors": num_anchors}
     )

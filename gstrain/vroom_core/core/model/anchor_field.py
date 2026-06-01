@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -7,10 +8,33 @@ import torch
 import torch.nn as nn
 
 from gstrain.vroom_core.utilities.utils import (
-    compute_anchors_scale_and_rotation,
-    estimate_voxel_size,
     SemanticsManager,
 )
+
+
+def compute_anchors_scale(
+    anchors_positions: torch.Tensor,
+    voxel_size: float,
+    device: torch.device | str = "cuda",
+) -> torch.Tensor:
+    """Compute scale for anchors based on voxel size"""
+    log_scale_val = math.log(max(voxel_size, 1e-6))
+    return torch.full(
+        (anchors_positions.shape[0], 6),
+        log_scale_val,
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def estimate_voxel_size(knn_distances: torch.Tensor, min_size: float = 1e-6) -> float:
+    """
+    Estimates a voxel size for a uniform grid using knn distances
+    """
+    voxel_size = torch.median(knn_distances).item()
+    voxel_size = max(voxel_size, min_size)
+    print(f"Calculated voxel size = {voxel_size}")
+    return voxel_size
 
 
 @dataclass
@@ -18,7 +42,6 @@ class AnchorCloudData:
     anchors_positions: torch.Tensor
     anchor_features: torch.Tensor
     anchors_log_scales: torch.Tensor
-    anchors_rotations: torch.Tensor
     labels: Optional[torch.Tensor]
     semantic_manager: Optional[SemanticsManager]
     gaussians_offsets: torch.Tensor
@@ -48,7 +71,7 @@ class AnchorCloud(nn.Module):
         self.visibility_mask = torch.empty((0,), dtype=torch.bool, device=self.device)
         self.semantic_manager = semantic_manager
         self.feature_dim = feature_dim
-
+        self.distances_between_points = self._knn(point_cloud, k=4)
         self.anchors_positions = (
             nn.Parameter(torch.empty((0, 3), dtype=torch.float32, device=self.device)),
         )
@@ -64,11 +87,6 @@ class AnchorCloud(nn.Module):
         self.anchors_log_scales = nn.Parameter(
             torch.empty((0, 6), dtype=torch.float32, device=self.device)
         )  # log is taken so we can apply exponential to the scale, in case optimizer made scale a negative number
-
-        self.anchors_rotations = nn.Parameter(
-            torch.empty((0, 4), dtype=torch.float32, device=self.device),
-            requires_grad=False,
-        )
         self.semantic_labels: Optional[torch.Tensor] = None
         self.gaussians_offsets = nn.Parameter(
             torch.empty(
@@ -100,11 +118,9 @@ class AnchorCloud(nn.Module):
         """
         Intialize the anchor cloud from the sparse point cloud by quantization
         """
-        distances_between_points = self._knn(point_cloud, k=4)
-        distances_between_anchors = self._knn(self.anchors_positions, k=4)
 
         if self.voxel_size is None:
-            self.voxel_size = estimate_voxel_size(distances_between_points)
+            self.voxel_size = estimate_voxel_size(self.distances_between_points)
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
@@ -122,15 +138,13 @@ class AnchorCloud(nn.Module):
 
         print(f"Number of Anchors generated {self.anchors_positions.shape[0]} ")
 
-        # set scale and rotation for each anchor
-        log_scales, rotations = compute_anchors_scale_and_rotation(
+        # set scale for each anchor
+        log_scales = compute_anchors_scale(
             self.anchors_positions,
-            distances_between_anchors,
             self.voxel_size,
             self.device,
         )
         self.anchors_log_scales = nn.Parameter(log_scales)
-        self.anchors_rotations = nn.Parameter(rotations, requires_grad=False)
 
         self.anchor_features = nn.Parameter(
             torch.zeros(
@@ -158,7 +172,6 @@ class AnchorCloud(nn.Module):
             anchors_positions=self.anchors_positions,
             anchor_features=self.anchor_features,
             anchors_log_scales=self.anchors_log_scales,
-            anchors_rotations=self.anchors_rotations,
             labels=self.anchor_labels,
             semantic_manager=self.semantic_manager,
             gaussians_offsets=self.gaussians_offsets,
@@ -224,9 +237,6 @@ class AnchorCloud(nn.Module):
             .to(self.device)
             .requires_grad_(True)
         )
-        self.anchors_rotations = nn.Parameter(
-            data.anchors_rotations.clone().detach().to(self.device), requires_grad=False
-        )
         self.semantic_labels = (
             None
             if data.labels is None
@@ -244,7 +254,6 @@ class AnchorCloud(nn.Module):
         gaussians_offsets: torch.Tensor,
         anchor_features: torch.Tensor,
         anchors_log_scales: torch.Tensor,
-        anchors_rotations: torch.Tensor,
         labels: Optional[torch.Tensor],
     ) -> None:
         """Appends new anchors to the anchor cloud after growing process"""
@@ -267,10 +276,6 @@ class AnchorCloud(nn.Module):
             torch.cat(
                 [self.anchors_log_scales, anchors_log_scales], dim=0
             ).requires_grad_(True)
-        )
-        self.anchors_rotations = nn.Parameter(
-            torch.cat([self.anchors_rotations, anchors_rotations], dim=0),
-            requires_grad=False,
         )
         self.visibility_mask = torch.ones(
             self.anchors_positions.shape[0], dtype=torch.bool, device=self.device
@@ -308,9 +313,6 @@ class AnchorCloud(nn.Module):
         )
         self.anchors_log_scales = nn.Parameter(
             self.anchors_log_scales[keep].detach().clone().requires_grad_(True)
-        )
-        self.anchors_rotations = nn.Parameter(
-            self.anchors_rotations[keep].detach().clone(), requires_grad=False
         )
         self.visibility_mask = torch.ones(
             self.anchors_positions.shape[0], dtype=torch.bool, device=self.device

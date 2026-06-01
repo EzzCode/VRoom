@@ -334,9 +334,6 @@ class DensifcationController:
                 (n_new, 6), log_scale_val, dtype=torch.float32, device=device
             )
 
-            anchor_rotation = torch.zeros(n_new, 4, dtype=torch.float32, device=device)
-            anchor_rotation[:, 0] = 1.0
-
             anchor_offsets = torch.zeros(
                 n_new,
                 self.num_gaussians_per_anchor,
@@ -350,7 +347,6 @@ class DensifcationController:
                 "gaussians_offsets": anchor_offsets,
                 "anchor_features": anchor_feature,
                 "anchors_log_scales": anchor_log_scales,
-                "anchors_rotations": anchor_rotation,
             }
 
             # update optimizer and the anchor cloud data
