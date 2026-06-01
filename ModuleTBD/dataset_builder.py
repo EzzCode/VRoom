@@ -1,3 +1,4 @@
+from ModuleTBD.utils.helpers import resolve_path
 import json
 import logging
 import math
@@ -19,18 +20,6 @@ from .utils.transforms import look_at
 
 logger = logging.getLogger(__name__)
 
-_VROOM_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _resolve_path(path_value, *, manifest_dir):
-    p = Path(path_value)
-    if p.is_absolute():
-        return p
-    for candidate in (manifest_dir / p, Path.cwd() / p, _VROOM_ROOT / p):
-        if candidate.exists():
-            return candidate
-    return _VROOM_ROOT / p
-
 
 def _rgba_to_rgb_mask(rgba):
     if rgba.ndim == 2:
@@ -46,7 +35,7 @@ def _rgba_to_rgb_mask(rgba):
     return rgb, (a[..., 0] > 0.5)
 
 
-def _resize_rgb_mask_camera(rgb, mask, K, *, target_long_edge):
+def _resize_rgb_mask_camera(rgb, mask, K, target_long_edge):
     h, w = rgb.shape[:2]
     if target_long_edge is None or int(target_long_edge) <= 0:
         return rgb, mask, K.astype(np.float32), w, h
@@ -102,31 +91,45 @@ def _compute_world_scale_px(seed_points_W, R_w2c, T_w2c, K, target_size):
     return float(np.clip(world_px / max(sv3d_px, 1.0), WS_CLIP_MIN, WS_CLIP_MAX))
 
 
-def build_supervision_views(halluc_index_path, extraction_index_path,
+def build_supervision_views(generation_log_path, extraction_path,
                              scope, frame, seed_points_W,
                              real_weight=1.0, hallucination_weight=1.0,
                              fov_y_deg=50.0, resolution=576,
-                             real_target_long_edge=576,
                              up_override=None):
+    
+    generation_log_path = Path(generation_log_path)
+    if not generation_log_path.exists():
+        raise FileNotFoundError(f"Generation log not found: {generation_log_path}")
+    
+    with open(generation_log_path) as f:
+        manifest = json.load(f)
+
+    frames = manifest.get("frames", [])
+    accepted = [fr for fr in frames if fr.get("accepted", False)]
+
+    if not accepted:
+        raise RuntimeError(f"No accepted hallucinated frames in {generation_log_path}.")
+
     if seed_points_W is None or len(seed_points_W) == 0:
         raise ValueError("seed_points_W must be a non-empty array.")
 
     real_views = []
-    extraction_index_path = Path(extraction_index_path)
-    if not extraction_index_path.exists():
-        logger.warning("Extraction manifest not found: %s", extraction_index_path)
-    else:
-        with open(extraction_index_path) as f:
-            manifest = json.load(f)
 
-        for fr in manifest.get("frames", []):
+    extraction_path = Path(extraction_path)
+    if not extraction_path.exists():
+        logger.warning("Extraction json not found: %s", extraction_path)
+    else:
+        with open(extraction_path) as f:
+            json_data = json.load(f)
+
+        for fr in json_data.get("frames", []):
             cam_index = int(fr["cam_index"])
             if cam_index < 0 or cam_index >= len(scope.cameras):
                 logger.warning("Skipping real frame with invalid cam_index=%d.", cam_index)
                 continue
 
-            cam_p     = scope.cameras[cam_index]
-            rgba_path = _resolve_path(fr["rgba_path"], manifest_dir=extraction_index_path.parent)
+            camera     = scope.cameras[cam_index]
+            rgba_path = resolve_path(fr["rgba_path"], manifest_dir=extraction_path.parent)
             if not rgba_path.exists():
                 logger.warning("Missing real RGBA %s; skipping.", rgba_path)
                 continue
@@ -137,17 +140,17 @@ def build_supervision_views(halluc_index_path, extraction_index_path,
                 continue
 
             rgb, mask = _rgba_to_rgb_mask(rgba)
-            K = np.asarray(cam_p["K"], np.float32)
+            K = np.asarray(camera["K"], np.float32)
             rgb, mask, K, width, height = _resize_rgb_mask_camera(
-                rgb, mask, K, target_long_edge=real_target_long_edge
+                rgb, mask, K, target_long_edge=resolution
             )
 
-            if int(height) != int(width):
-                side      = max(int(height), int(width))
-                pad_top   = (side - int(height)) // 2
-                pad_bot   = side - int(height) - pad_top
-                pad_left  = (side - int(width))  // 2
-                pad_right = side - int(width)  - pad_left
+            if height != width:
+                longest = max(height, width)
+                pad_top = (longest - height) // 2
+                pad_bot = longest - height - pad_top
+                pad_left = (longest - width) // 2
+                pad_right = longest - width - pad_left
                 rgb = cv2.copyMakeBorder(rgb, pad_top, pad_bot, pad_left, pad_right,
                                          cv2.BORDER_CONSTANT, value=(255, 255, 255))
                 mask = cv2.copyMakeBorder(mask.astype(np.uint8),
@@ -156,40 +159,29 @@ def build_supervision_views(halluc_index_path, extraction_index_path,
                 K = K.copy()
                 K[0, 2] += float(pad_left)
                 K[1, 2] += float(pad_top)
-                width  = side
-                height = side
+                width = longest
+                height = longest
 
             real_views.append({
                 "source": "real",
                 "rgb": rgb,
                 "mask": mask,
                 "camera": {
-                    "R": np.asarray(cam_p["R"], np.float32),
-                    "T": np.asarray(cam_p["T"], np.float32),
+                    "R": np.asarray(camera["R"], np.float32),
+                    "T": np.asarray(camera["T"], np.float32),
                     "K": K,
                     "width": int(width),
                     "height": int(height),
-                    "position": np.asarray(cam_p["position"], np.float32),
-                    "azimuth_offset_deg": float(cam_p.get("azimuth_deg", fr.get("azimuth_deg", 0.0))),
-                    "elevation_offset_deg": float(cam_p.get("elevation_deg", 0.0)),
+                    "position": np.asarray(camera["position"], np.float32),
+                    "azimuth_offset_deg": float(camera.get("azimuth_deg", fr.get("azimuth_deg", 0.0))),
+                    "elevation_offset_deg": float(camera.get("elevation_deg", 0.0)),
                     "is_conditioning": False,
                     "frame_index": cam_index,
                 },
                 "weight": float(real_weight),
             })
 
-    halluc_index_path = Path(halluc_index_path)
-    if not halluc_index_path.exists():
-        raise FileNotFoundError(f"Hallucination manifest not found: {halluc_index_path}")
 
-    with open(halluc_index_path) as f:
-        manifest = json.load(f)
-
-    frames = manifest.get("frames", [])
-    accepted = [fr for fr in frames if fr.get("accepted", False)]
-
-    if not accepted:
-        raise RuntimeError(f"No accepted hallucinated frames in {halluc_index_path}.")
 
     res  = int(resolution)
     fy_  = 0.5 * res / math.tan(0.5 * math.radians(float(fov_y_deg)))
@@ -199,7 +191,7 @@ def build_supervision_views(halluc_index_path, extraction_index_path,
 
     halluc_views = []
     for fr in accepted:
-        rgba_path = _resolve_path(fr["rgba_path"], manifest_dir=halluc_index_path.parent)
+        rgba_path = resolve_path(fr["rgba_path"], manifest_dir=generation_log_path.parent)
         if not rgba_path.exists():
             raise FileNotFoundError(
                 f"Accepted hallucination RGBA missing: {rgba_path}. "
