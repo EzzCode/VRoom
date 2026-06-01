@@ -18,7 +18,7 @@ def compute_anchors_scale(
     device: torch.device | str = "cuda",
 ) -> torch.Tensor:
     """Compute scale for anchors based on voxel size"""
-    log_scale_val = math.log(max(voxel_size, 1e-6))
+    log_scale_val = 0.5 * math.log(max(voxel_size, 1e-6))
     return torch.full(
         (anchors_positions.shape[0], 6),
         log_scale_val,
