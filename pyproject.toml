@@ -44,3 +44,12 @@ packages = [
     "object_isolation.core.diffusion_priors",
     "object_isolation.debug",
 ]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]
+search_path = [
+    "D:\\conda_envs\\objectgs\\Lib\\site-packages",
+]

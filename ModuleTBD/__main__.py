@@ -75,8 +75,6 @@ def run(
     max_anchor_count=20000,
     densify_grad_threshold=0.00005,
     densify_extra_ratio=0.08,
-    n_compare_views=8,
-    skip_compare=False,
     debug=False,
 ):
     """Run extraction → frame scoring → hallucination → training for one object."""
@@ -200,7 +198,7 @@ def run(
         top1 = scores_manifest.get("top_k", [{}])[0] if scores_manifest.get("top_k") else {}
         logger.info("✓ Frame scoring: best score = %.3f  cam=%s  az=%.1f°",
                     top1.get("score", 0.0), top1.get("cam_index", "?"),
-                    top1.get("azimuth", 0.0))
+                    top1.get("azimuth_deg", 0.0))
     except Exception as exc:
         logger.exception("✗ Frame scoring failed: %s", exc)
         summary["phases"]["frame_scoring"] = {"error": str(exc)}
@@ -260,7 +258,6 @@ def run(
             densify_grad_threshold=densify_grad_threshold,
             densify_extra_ratio=densify_extra_ratio,
             fov_y_deg=fov_y_deg,
-            debug=debug,
         )
         training_result_clean = {k: v for k, v in training_result.items() if k != "_gaussians"}
         summary["phases"]["training"] = training_result_clean
@@ -270,34 +267,7 @@ def run(
         summary["phases"]["training"] = {"error": str(exc)}
         return summary
 
-    # ── Compare renders (debug) ───────────────────────────────────────────────
     if debug:
-        try:
-            import numpy as np
-            from ModuleTBD.pipeline import build_orbit_cameras, render_orbit, save_compare_grid
-            compare_dir = obj_dir / "07_compare"
-            object_half_size = float(np.linalg.norm(
-                np.asarray(scope.aabb_max, dtype=np.float32)
-                - np.asarray(scope.aabb_min, dtype=np.float32)
-            ) / 2.0)
-            cams = build_orbit_cameras(
-                center=scope.centroid,
-                radius=object_half_size,
-                orbit_radius=scope.radius,
-                up=scope.up,
-                ref_cam_position=np.asarray(scope.cam_centers_visible, dtype=np.float32).mean(axis=0),
-                n_views=n_compare_views,
-            )
-            before = render_orbit(gaussians, pipe_config, cams, object_label_id=obj_id)
-            trained_gaussians = training_result.get("_gaussians")
-            if trained_gaussians is not None:
-                after = render_orbit(trained_gaussians, pipe_config, cams)
-                save_compare_grid(before, after, compare_dir)
-                logger.info("✓ Comparison renders saved to %s", compare_dir)
-        except Exception as exc:
-            logger.warning("Compare render failed (non-fatal): %s", exc)
-
-        # ── Debug-only visual artifacts ──────────────────────────────────────
         try:
             from ModuleTBD.debug import generate_all_debug_artifacts
             generate_all_debug_artifacts(
@@ -305,6 +275,7 @@ def run(
                 scope=scope,
                 frame=frame,
                 gaussians=gaussians,
+                trained_gaussians=training_result.get("_gaussians"),
                 pipe_config=pipe_config,
                 images_dir=images_dir,
                 extraction_manifest=extraction_manifest,
@@ -313,8 +284,6 @@ def run(
                 training_summary=summary["phases"].get("training"),
                 model_path=str(model_path),
                 object_id=obj_id,
-                n_compare_views=n_compare_views,
-                do_compare_renders=False,  # we already rendered 07_compare above
             )
             logger.info("✓ Debug artifacts written under %s", obj_dir)
         except Exception as exc:
@@ -389,8 +358,6 @@ def _parse_args():
     p.add_argument("--max_anchor_count", type=int, default=20000)
     p.add_argument("--densify_grad_threshold", type=float, default=0.00005)
     p.add_argument("--densify_extra_ratio", type=float, default=0.08)
-    p.add_argument("--n_compare_views", type=int, default=8)
-    p.add_argument("--skip_compare", action="store_true")
 
     # General
     p.add_argument("--debug", action="store_true")
@@ -428,8 +395,6 @@ def main():
         max_anchor_count=args.max_anchor_count,
         densify_grad_threshold=args.densify_grad_threshold,
         densify_extra_ratio=args.densify_extra_ratio,
-        n_compare_views=args.n_compare_views,
-        skip_compare=args.skip_compare,
         debug=args.debug,
     )
 

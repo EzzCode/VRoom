@@ -1,6 +1,6 @@
 """Visual Debug for Scope Discovery + Coordinate Frames (ModuleTBD).
 
-Outputs under ``<obj_dir>/00_scope/debug/``::
+Outputs under ``<obj_dir>/debug/scope/``::
 
     summary.json             numeric snapshot of the scope
     aabb_overlays/           AABB drawn on a subset of training images
@@ -232,7 +232,6 @@ def make_topdown_plot(scope, frame, out_path,
 
 def render_aabb_overlays(scope, gaussians, pipe_config, out_dir,
                          max_views=6):
-    out_dir.mkdir(parents=True, exist_ok=True)
     saved = []
     if gaussians is None or pipe_config is None:
         return saved
@@ -257,9 +256,10 @@ def render_aabb_overlays(scope, gaussians, pipe_config, out_dir,
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(rgb_u8, f"cam={ci} | img={img_name}",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+        out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"cam_{ci:03d}_{img_name}.png"
-        cv2.imwrite(str(out_path), cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR))
-        saved.append(out_path)
+        if cv2.imwrite(str(out_path), cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR)):
+            saved.append(out_path)
     return saved
 
 
@@ -313,7 +313,7 @@ def main():
         args.model_path, args.object_id, ply_path=args.ply_path,
     )
     gaussians, _ = load_gaussians(args.model_path, ply_path=args.ply_path)
-    out_dir = Path(args.output_root) / f"obj_{args.object_id}" / "00_scope" / "debug"
+    out_dir = Path(args.output_root) / f"obj_{args.object_id}" / "debug" / "scope"
     generate_debug_artifacts(
         scope=scope, frame=frame, debug_dir=out_dir,
         gaussians=gaussians, pipe_config=pipe_config,

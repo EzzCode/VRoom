@@ -70,7 +70,7 @@ class ObjectFrame:
         self.up = up
         self.base_dir = base
         self.centroid = np.asarray(self.centroid, dtype=np.float32).reshape(3)
-        self.radius = float(self.radius)
+        self.radius = self.radius
         self.R = np.stack([
                 base,
                 right,

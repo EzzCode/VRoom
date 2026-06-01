@@ -1,4 +1,3 @@
-import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,8 +17,6 @@ from .utils.colmap_init import load_colmap_object_point_cloud
 
 logger = logging.getLogger(__name__)
 
-
-# ── Tensor helpers ────────────────────────────────────────────────────────────
 
 def _img_tensor(rgb):
     arr = np.asarray(rgb)
@@ -45,8 +42,6 @@ def _alpha_tensor(alpha):
         return alpha.unsqueeze(0).float()
     return alpha.reshape(1, *alpha.shape[-2:]).float()
 
-
-# ── Model helpers ─────────────────────────────────────────────────────────────
 
 def _model_kwargs(parent=None):
     defaults = {
@@ -111,8 +106,6 @@ def _make_opt(n, s, *, enable_densification, densify_grad_threshold, densify_ext
     )
 
 
-# ── Training ──────────────────────────────────────────────────────────────────
-
 def train_object(
     *,
     supervision_views,
@@ -141,12 +134,7 @@ def train_object(
     densify_grad_threshold=0.00005,
     densify_extra_ratio=0.08,
     max_offset_abs=0.45,
-    debug=False,
 ):
-    """Train a fresh per-object gstrain model from COLMAP seed points.
-
-    Returns {"gaussians": GaussianModel, "summary": dict}.
-    """
     if not supervision_views:
         raise RuntimeError("No supervision views.")
 
@@ -324,7 +312,4 @@ def train_object(
         "final_loss": float(np.mean(tail)) if tail else 0.0,
         "model_dir": str(model_dir),
     }
-    if debug:
-        with open(out_dir / "05_training_summary.json", "w") as f:
-            json.dump(summary, f, indent=2)
     return {"gaussians": gaussians, "summary": summary}

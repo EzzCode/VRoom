@@ -150,11 +150,11 @@ def _upsample_from_colmap_neighbors(xyz, colors, *, target_points):
     alpha    = rng.random((n_extra, 1), dtype=np.float32)
 
     extra_xyz    = (1.0 - alpha) * xyz[base] + alpha * xyz[nbr]
-    extra_xyz   += rng.normal(0.0, noise_sig, size=extra_xyz.shape).astype(np.float32)
+    extra_xyz   += rng.normal(0.0, noise_sig, size=extra_xyz.shape)
     extra_colors = (1.0 - alpha) * colors[base] + alpha * colors[nbr]
 
-    xyz_out    = np.concatenate([xyz,    extra_xyz.astype(np.float32)],    axis=0)
-    colors_out = np.concatenate([colors, extra_colors.astype(np.float32)], axis=0)
+    xyz_out    = np.concatenate([xyz,    extra_xyz],    axis=0)
+    colors_out = np.concatenate([colors, extra_colors], axis=0)
     return xyz_out, colors_out, {
         "colmap_upsampled": True,
         "colmap_upsample_target_points": int(target_points),
@@ -229,7 +229,7 @@ def _score_labels_against_extraction(xyz_all, labels_all, *, scope,
         if cam_index < 0 or cam_index >= len(scope.cameras):
             continue
 
-        rgba_value = frame.get("out_rgba_path")
+        rgba_value = frame.get("rgba_path")
         if not rgba_value:
             continue
         mask_path = _resolve_path(rgba_value, base_dir=manifest_dir)
@@ -394,8 +394,8 @@ def load_colmap_object_point_cloud(*, model_path, object_id, scope,
     normals   = np.zeros_like(xyz, np.float32)
     label_ids = np.full((xyz.shape[0],), int(object_id), np.uint8)
     pcd = PointCloudSample(
-        points=xyz.astype(np.float32),
-        colors=colors.astype(np.float32),
+        points=xyz,
+        colors=colors,
         normals=normals,
         label_ids=label_ids,
     )

@@ -1,6 +1,6 @@
 """Visual Debug for Object View Extraction (ModuleTBD).
 
-Outputs under ``<obj_dir>/01_extraction/debug/``::
+Outputs under ``<obj_dir>/debug/extraction/``::
 
     triptych/                    per-frame [source | used mask] grids
     contact_sheet.png            12-frame thumbnail grid
@@ -38,6 +38,18 @@ def _imread_rgb(path):
     if img is None:
         return None
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+def _image_path(images_dir, image_name):
+    value = str(image_name or "")
+    path = Path(value)
+    candidates = [images_dir / path]
+    if path.suffix == "":
+        candidates.extend(images_dir / f"{value}{suffix}" for suffix in (".jpg", ".jpeg", ".png"))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _resize_pair(rgb, mask, max_h=320):
@@ -112,16 +124,16 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
     images_dir = Path(images_dir)
     debug_dir = Path(debug_dir)
     debug_dir.mkdir(parents=True, exist_ok=True)
-    (debug_dir / "triptych").mkdir(parents=True, exist_ok=True)
 
     frames = manifest.get("frames", [])
     n_total = len(frames)
 
     sheet_items = []
+    triptych_files = []
     frames_for_triptych = frames[:max_triptychs]
     for f in frames_for_triptych:
-        rgb_src = _imread_rgb(images_dir / f.get("image_name", "")) \
-            if (images_dir / f.get("image_name", "")).exists() else None
+        source_path = _image_path(images_dir, f.get("image_name", ""))
+        rgb_src = _imread_rgb(source_path) if source_path is not None else None
         rgba = cv2.imread(f.get("rgba_path", ""), cv2.IMREAD_UNCHANGED)
         mask_hybrid = (rgba[..., -1] > 127).astype(np.uint8) * 255 if rgba is not None and rgba.ndim == 3 else None
         if rgb_src is None or mask_hybrid is None:
@@ -131,13 +143,15 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
                  f"az={f.get('azimuth', 0.0):+.1f} | "
                  f"fg={f.get('object_coverage', 0.0):.3f}")
         trip = _make_triptych(rgb_src, mask_hybrid, label)
+        (debug_dir / "triptych").mkdir(parents=True, exist_ok=True)
         out_path = debug_dir / "triptych" / f"cam_{f.get('cam_index'):03d}.png"
-        cv2.imwrite(str(out_path), cv2.cvtColor(trip, cv2.COLOR_RGB2BGR))
+        if cv2.imwrite(str(out_path), cv2.cvtColor(trip, cv2.COLOR_RGB2BGR)):
+            triptych_files.append(str(out_path))
 
     # Contact sheet
     for f in frames[:contact_sheet_size]:
-        rgb_src = _imread_rgb(images_dir / f.get("image_name", "")) \
-            if (images_dir / f.get("image_name", "")).exists() else None
+        source_path = _image_path(images_dir, f.get("image_name", ""))
+        rgb_src = _imread_rgb(source_path) if source_path is not None else None
         if rgb_src is None:
             continue
         rgba = cv2.imread(f.get("rgba_path", ""), cv2.IMREAD_UNCHANGED)
@@ -151,12 +165,17 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
                             f"cam={f.get('cam_index')} fg={f.get('object_coverage', 0):.2f}"))
 
     sheet = _make_contact_sheet(sheet_items)
+    contact_sheet = None
     if sheet is not None:
-        cv2.imwrite(str(debug_dir / "contact_sheet.png"),
-                    cv2.cvtColor(sheet, cv2.COLOR_RGB2BGR))
+        contact_sheet = debug_dir / "contact_sheet.png"
+        if not cv2.imwrite(str(contact_sheet), cv2.cvtColor(sheet, cv2.COLOR_RGB2BGR)):
+            contact_sheet = None
 
     summary = {
         "n_frames": n_total,
+        "n_triptychs": len(triptych_files),
+        "triptych_files": triptych_files,
+        "contact_sheet": str(contact_sheet) if contact_sheet is not None else None,
         "object_coverage_mean": float(np.mean([f.get("object_coverage", 0.0) for f in frames])) if frames else 0.0,
         "object_coverage_min": float(np.min([f.get("object_coverage", 0.0) for f in frames])) if frames else 0.0,
         "object_coverage_max": float(np.max([f.get("object_coverage", 0.0) for f in frames])) if frames else 0.0,
@@ -174,7 +193,7 @@ def main():
     parser.add_argument("--images_dir", required=True,
                         help="Directory containing source images (e.g. images_4)")
     parser.add_argument("--output_root", default=None,
-                        help="If given, writes to <output_root>/01_extraction/debug/")
+                        help="If given, writes to <output_root>/debug/extraction/")
     parser.add_argument("--max_triptychs", type=int, default=20)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
@@ -184,7 +203,7 @@ def main():
         manifest = json.load(f)
 
     if args.output_root:
-        debug_dir = Path(args.output_root) / "01_extraction" / "debug"
+        debug_dir = Path(args.output_root) / "debug" / "extraction"
     else:
         debug_dir = Path(args.extraction_index).parent / "debug"
     generate_debug_artifacts(

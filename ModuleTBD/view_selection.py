@@ -99,16 +99,14 @@ def run_extraction(scope, images_dir, output_dir, tracked_id_map_dir, tracked_ob
             #average brightness of the object 0.5 is perfect condition
             score = max(0.0, 1.0 - 2.0 * abs(float(np.mean(img)) - 0.5))
             #over/under exposure penalty
-            exposure = float(score
-                             * (1.0 - min(1.0, float(np.mean(img > 0.98)) * EXPOSURE_CLAMP))
-                             * (1.0 - min(1.0, float(np.mean(img < 0.02)) * EXPOSURE_CLAMP)))
+            exposure = score * (1.0 - min(1.0, float(np.mean(img > 0.98)) * EXPOSURE_CLAMP)) * (1.0 - min(1.0, float(np.mean(img < 0.02)) * EXPOSURE_CLAMP))
 
             frames.append({
                 "cam_index": cam_index,
                 "image_name": image_name,
                 "object_coverage": n_pixels / (height * width),
-                "azimuth": float(camera.get("azimuth_deg", float("nan"))),
-                "elevation": float(camera.get("elevation_deg", float("nan"))),
+                "azimuth_deg": float(camera.get("azimuth_deg", float("nan"))),
+                "elevation_deg": float(camera.get("elevation_deg", float("nan"))),
                 "rgba_path": str(output_path),
                 "sharpness": sharpness,
                 "exposure": exposure,
@@ -142,15 +140,14 @@ def run_scoring(extraction_index_path, top_k=5):
     results = []
     for frame, sharp in zip(frames, sharp_norm):
         #wrap angles to [-180, 180]
-        azimuth = ((float(frame["azimuth"]) + 180.0) % 360.0) - 180.0
-        elevation = float(frame["elevation"])
+        azimuth_deg = ((float(frame["azimuth_deg"]) + 180.0) % 360.0) - 180.0
+        elevation_deg = float(frame["elevation_deg"])
 
         #prefer 0 and 0
-        if not math.isfinite(azimuth) or not math.isfinite(elevation):
+        if not math.isfinite(azimuth_deg) or not math.isfinite(elevation_deg):
             front = 0.0
         else:
-            front = float(((1.0 + math.cos(math.radians(azimuth))) * 0.5)
-                          * max(0.0, math.cos(math.radians(elevation))))
+            front = ((1.0 + math.cos(math.radians(azimuth_deg))) * 0.5) * max(0.0, math.cos(math.radians(elevation_deg)))
 
         # Cover is object is too small or fills the whole frame
         coverage = float(frame["object_coverage"])
@@ -168,8 +165,8 @@ def run_scoring(extraction_index_path, top_k=5):
             "cam_index": frame["cam_index"],
             "image_name": frame["image_name"],
             "rgba_path": frame["rgba_path"],
-            "azimuth": azimuth,
-            "elevation": elevation,
+            "azimuth_deg": azimuth_deg,
+            "elevation_deg": elevation_deg,
             "object_coverage": coverage,
             "sharpness": float(frame["sharpness"]),
             "components": {"front": front, "cover": cover, "sharp": float(sharp), "expose": exposure},
@@ -187,7 +184,9 @@ def run_scoring(extraction_index_path, top_k=5):
 
     if result["top_k"]:
         best = result["top_k"][0]
-        logger.info("Best frame: camera=%d azimuth degree=%.1f score=%.3f components=%s",
-                    best["cam_index"], best["azimuth"], best["score"],
-                    {k: round(v, 2) for k, v in best["components"].items()})
+        components = best.get("components")
+        if isinstance(components, dict):
+            logger.info("Best frame: camera=%d azimuth degree=%.1f score=%.3f components=%s",
+                        best["cam_index"], best["azimuth_deg"], best["score"],
+                        {k: round(v, 2) for k, v in components.items()})
     return result
