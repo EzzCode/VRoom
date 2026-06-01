@@ -2,6 +2,7 @@ import json
 import logging
 import math
 from pathlib import Path
+from typing import cast, Any
 
 import cv2
 import numpy as np
@@ -32,11 +33,12 @@ def _load_object_mask(tracked_id_map_dir, image_name, tracked_object_id, shape):
     id_map_path = find_tracked_id_map(Path(tracked_id_map_dir), image_name)
     if id_map_path is None:
         return None
-    id_map = cv2.imread(str(id_map_path), cv2.IMREAD_UNCHANGED)
-    if id_map is None:
+    id_map_matrix = cv2.imread(str(id_map_path), cv2.IMREAD_UNCHANGED)
+    if id_map_matrix is None:
         return None
+    id_map = np.asarray(id_map_matrix)
     if id_map.ndim == 3:
-        id_map = id_map[..., 0]
+        id_map = cast(Any, id_map)[..., 0]
     height, width = shape
     if id_map.shape[:2] != (height, width):
         id_map = cv2.resize(id_map, (width, height), interpolation=cv2.INTER_NEAREST)

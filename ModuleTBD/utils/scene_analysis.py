@@ -1,9 +1,9 @@
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Union, Any, cast
 import numpy as np
 import yaml
-from ModuleTBD.utils.transforms import ObjectFrame
 from ModuleTBD.utils.transforms import ObjectFrame
 from gstrain.vroom_core import GaussianModel
 from gstrain.vroom_core.models.semantics import SemanticCodec
@@ -12,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def load_cameras(cameras_json: str):
+def load_cameras(cameras_json: Union[str, Path]):
     cameras_json = Path(cameras_json)
     if not cameras_json.exists():
         raise FileNotFoundError(f"Expected cameras.json at {cameras_json}")
@@ -55,7 +55,7 @@ def load_cameras(cameras_json: str):
     return result
 
 
-def load_gaussians(model_path: str, ply_path=None):
+def load_gaussians(model_path: Union[str, Path], ply_path=None):
     model_path = Path(model_path)
     config_path = model_path / "config.yaml"
 
@@ -66,7 +66,7 @@ def load_gaussians(model_path: str, ply_path=None):
             except Exception:
                 raise ValueError(f"Error parsing YAML config at {config_path}")
     else:
-        raise FileNotFoundError(f"Expected config.yaml at {model_path}")
+        raise FileNotFoundError(f"Expected config.yaml at {config_path}")
 
     model_params = config.get("model_params", {})
     pipeline_params = config.get("pipeline_params", {})
@@ -87,7 +87,16 @@ def load_gaussians(model_path: str, ply_path=None):
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in _GAUSSIAN_MODEL_KWARGS}
 
     resolved_ply = Path(ply_path) if ply_path else model_path / "point_cloud.ply"
-    model = GaussianModel(**filtered_kwargs)             # construct empty model
+    model = GaussianModel(
+        gs_attr=str(filtered_kwargs.get("gs_attr", "2D")),
+        feat_dim=int(filtered_kwargs.get("feat_dim", 32)),
+        view_dim=int(filtered_kwargs.get("view_dim", 3)),
+        appearance_dim=int(filtered_kwargs.get("appearance_dim", 0)),
+        n_offsets=int(filtered_kwargs.get("n_offsets", 10)),
+        voxel_size=float(filtered_kwargs.get("voxel_size", 0.001)),
+        render_mode=str(filtered_kwargs.get("render_mode", "RGB+ED")),
+        tile_size_2dgs=int(filtered_kwargs.get("tile_size_2dgs", 8)),
+    )
     model.load_ply(str(resolved_ply))                    # load anchors + label_ids
     model.load_mlp_checkpoints(str(resolved_ply.parent)) # load MLPs (same dir as PLY)
     if model.label_ids is None:
@@ -95,7 +104,7 @@ def load_gaussians(model_path: str, ply_path=None):
             f"Model at {model_path} does not have label_ids; cannot compute object scope."
         )
     model.id_encoder = SemanticCodec.from_labels(model.label_ids.view(-1))
-    model.explicit_gs = False   # training flag
+    object.__setattr__(model, "explicit_gs", False)   # training flag
     model.weed_ratio = 0.0      # disable anchor pruning
     model.set_eval()
 
@@ -183,9 +192,9 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
 
     gaussians, pipe_config = load_gaussians(str(model_path), ply_path=str(resolved_ply))
     all_anchors = gaussians.get_anchor.detach().cpu().numpy().astype(np.float32)
-    label_ids = gaussians.label_ids.detach().cpu().numpy().reshape(-1).astype(np.int64)
+    label_ids = cast(Any, gaussians.label_ids).detach().cpu().numpy().reshape(-1).astype(np.int64)
 
-    object_mask = (label_ids == int(object_label_id))
+    object_mask = (label_ids == object_label_id)
     if not object_mask.any():
         raise ValueError(
             f"object_label_id={object_label_id} has no anchors in {model_path}. "
@@ -229,10 +238,10 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
     distances = np.linalg.norm(camera_centers - centroid.reshape(1, 3), axis=1)
     radius = float(np.median(distances))
     # ensure radius is not too small compared to object size
-    radius = max(radius, 0.1 * np.linalg.norm(obb_extents))
+    radius = max(radius, float(0.1 * np.linalg.norm(obb_extents)))
 
     scope = ObjectScope(
-        object_label_id=int(object_label_id),
+        object_label_id=object_label_id,
         n_anchors=total_objects,
         centroid=centroid,
         aabb_min=aabb_min,
@@ -248,8 +257,8 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
     obj_frame = _build_coordinate_frames(scope)
     for ci in visible_index:
         az, el = obj_frame.world_to_virtual(cameras[ci]["position"])
-        cameras[ci]["azimuth_deg"] = float(az) % 360.0
-        cameras[ci]["elevation_deg"] = float(el)
+        cameras[ci]["azimuth_deg"] = az % 360.0
+        cameras[ci]["elevation_deg"] = el
     
     logger.info(
         "ObjectScope obj=%d: %d anchors | centroid=%s | radius=%.3f | visible_cams=%d/%d",

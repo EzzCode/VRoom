@@ -4,6 +4,7 @@ import json
 import logging
 import math
 from pathlib import Path
+from typing import cast, Any
 
 import cv2
 import numpy as np
@@ -152,11 +153,12 @@ def run_hallucination(scope: ObjectScope, frame: ObjectFrame, gaussians, pipe_co
     if R is not None:
         top_cam_up = -R[1]
 
-    rgba = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
-    if rgba is None:
+    rgba_matrix = cv2.imread(str(rgba_path), cv2.IMREAD_UNCHANGED)
+    if rgba_matrix is None:
         raise ValueError(f"Failed to load image from {rgba_path}")
-    rgb = cv2.cvtColor(rgba[..., :3], cv2.COLOR_BGR2RGB)
-    alpha = rgba[..., 3].astype(np.float32) / 255.0
+    rgba = np.asarray(rgba_matrix)
+    rgb = cv2.cvtColor(cast(Any, rgba)[..., :3], cv2.COLOR_BGR2RGB)
+    alpha = cast(Any, rgba)[..., 3].astype(np.float32) / 255.0
     input_rgb, _ = _resize(rgb, alpha, SV3D_INPUT_SIZE)
 
     if reuse_sv3d:

@@ -137,7 +137,7 @@ class SV3DBackend:
             raise ValueError(f"SV3D expects a square image, got {H}x{W}")
 
         pil = Image.fromarray(conditioning_rgb).resize(
-            (self._resolution, self._resolution), Image.LANCZOS)
+            (self._resolution, self._resolution), getattr(Image, "LANCZOS"))
 
         az_off_deg, polars_rad, azimuths_rad = _build_orbit_poses(
             self._num_frames, cond_elevation_deg)
@@ -148,10 +148,14 @@ class SV3DBackend:
         logger.info("SV3D-p generating %d frames (steps=%d, cond_el=%.1f\u00b0)...",
                     self._num_frames, self._num_inference_steps, cond_elevation_deg)
 
+        pipe = self._pipe
+        if pipe is None:
+            raise RuntimeError("Pipeline not loaded")
+
         autocast_dtype = torch.float16 if self.dtype == torch.float16 else torch.float32
         with torch.no_grad(), torch.autocast("cuda", dtype=autocast_dtype,
                                               enabled=(self.dtype == torch.float16)):
-            out = self._pipe(
+            out = pipe(
                 pil,
                 height=self._resolution, width=self._resolution,
                 num_frames=self._num_frames,

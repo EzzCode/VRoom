@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ def generate_all_debug_artifacts(
     debug_root = obj_dir / "debug"
     _reset_debug_tree(obj_dir, debug_root)
     debug_root.mkdir(parents=True, exist_ok=True)
-    results = {}
+    results: dict[str, Any] = {}
 
     # ── Scope ──────────────────────────────────────────────────────────────
     try:

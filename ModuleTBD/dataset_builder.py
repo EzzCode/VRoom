@@ -98,7 +98,7 @@ def _compute_world_scale_px(seed_points_W, R_w2c, T_w2c, K, target_size):
     u_hi = float(np.percentile(u, SEED_PERCENTILE_HI))
     v_lo = float(np.percentile(v, SEED_PERCENTILE_LO))
     v_hi = float(np.percentile(v, SEED_PERCENTILE_HI))
-    world_px = float(max(u_hi - u_lo, v_hi - v_lo))
+    world_px = max(u_hi - u_lo, v_hi - v_lo)
     return float(np.clip(world_px / max(sv3d_px, 1.0), WS_CLIP_MIN, WS_CLIP_MAX))
 
 
@@ -242,6 +242,8 @@ def build_supervision_views(halluc_index_path, extraction_index_path,
         in_front = pts_c[:, 2] > SEED_DEPTH_MIN
         ys, xs = np.where(mask)
         valid = np.asarray([], bool)
+        u = np.asarray([], np.float64)
+        v = np.asarray([], np.float64)
         if int(in_front.sum()) >= SEED_MIN_IN_FRONT and len(xs) > 0:
             pts_f = pts_c[in_front]
             u = pts_f[:, 0] / pts_f[:, 2] * float(K_view[0, 0]) + float(K_view[0, 2])

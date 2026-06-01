@@ -45,7 +45,7 @@ def _orbit_cameras(scope, frame, halluc_manifest=None, n_views=8, width=512, hei
         R_w2c, T_w2c = look_at(position, center, up)
         cameras.append({
             "index": index,
-            "azimuth_deg": float(((azimuth + 180.0) % 360.0) - 180.0),
+            "azimuth_deg": ((azimuth + 180.0) % 360.0) - 180.0,
             "elevation_deg": elevation,
             "R": R_w2c,
             "T": T_w2c,
@@ -125,10 +125,20 @@ def _load_trained_gaussians(parent_gaussians, model_dir):
     from ModuleTBD.trainer import _model_kwargs
 
     model_dir = Path(model_dir)
-    gaussians = GaussianModel(**_model_kwargs(parent_gaussians))
+    kwargs = _model_kwargs(parent_gaussians)
+    gaussians = GaussianModel(
+        gs_attr=str(kwargs["gs_attr"]),
+        feat_dim=int(kwargs["feat_dim"]),
+        view_dim=int(kwargs["view_dim"]),
+        appearance_dim=int(kwargs["appearance_dim"]),
+        n_offsets=int(kwargs["n_offsets"]),
+        voxel_size=float(kwargs["voxel_size"]),
+        render_mode=str(kwargs["render_mode"]),
+        tile_size_2dgs=int(kwargs["tile_size_2dgs"]),
+    )
     gaussians.load_ply(str(model_dir / "point_cloud.ply"))
     gaussians.load_mlp_checkpoints(str(model_dir))
-    gaussians.explicit_gs = False
+    object.__setattr__(gaussians, "explicit_gs", False)
     gaussians.weed_ratio = 0.0
     gaussians.set_eval()
     return gaussians

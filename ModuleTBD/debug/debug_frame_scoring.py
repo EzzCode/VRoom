@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import sys
+from typing import cast, Any
 
 import cv2
 import numpy as np
@@ -142,20 +143,22 @@ def _make_components(top_entries, *, out_path, width=1000, row_h=36, pad=12):
 def _read_thumb(path, max_h=160):
     if not path:
         return None
-    rgba = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-    if rgba is None:
+    rgba_mat = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if rgba_mat is None:
         return None
+    rgba = np.asarray(rgba_mat)
     if rgba.ndim == 3 and rgba.shape[-1] == 4:
-        alpha = rgba[..., -1:].astype(np.float32) / 255.0
-        rgb = rgba[..., :3].astype(np.float32)
+        alpha = cast(Any, rgba)[..., -1:].astype(np.float32) / 255.0
+        rgb = cast(Any, rgba)[..., :3].astype(np.float32)
         rgb = rgb * alpha + 245.0 * (1.0 - alpha)
         thumb = rgb.astype(np.uint8)
     else:
         thumb = rgba
+    thumb = np.asarray(thumb)
     h, w = thumb.shape[:2]
     s = min(1.0, max_h / max(h, 1))
     if s < 1.0:
-        thumb = cv2.resize(thumb, (int(w * s), int(h * s)), cv2.INTER_AREA)
+        thumb = cv2.resize(cast(Any, thumb), (int(w * s), int(h * s)), cv2.INTER_AREA)  # type: ignore
     return thumb
 
 

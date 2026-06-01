@@ -8,6 +8,7 @@ L2V - Local to Virtual
 """
 import numpy as np
 from dataclasses import dataclass
+from typing import Optional
 from .helpers import normalize
 
 
@@ -57,7 +58,7 @@ class ObjectFrame:
     up: np.ndarray         
     base_dir: np.ndarray   
     radius: float          
-    R: np.ndarray = None   
+    R: Optional[np.ndarray] = None   
 
     def __post_init__(self):
         up = normalize(self.up)
@@ -79,11 +80,17 @@ class ObjectFrame:
 
     def world_to_local(self, pts):
         pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
-        return (self.R @ (pts - self.centroid).T).T
+        R = self.R
+        if R is None:
+            raise RuntimeError("Rotation matrix R is not initialized")
+        return (R @ (pts - self.centroid).T).T
 
     def local_to_world(self, pts):
         pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
-        return (self.R.T @ pts.T).T + self.centroid
+        R = self.R
+        if R is None:
+            raise RuntimeError("Rotation matrix R is not initialized")
+        return (R.T @ pts.T).T + self.centroid
 
     def virtual_to_world_camera(self, azimuth_deg, elevation_deg):
         """Returns (R_w2c, T_w2c, camera_pos_world) for a Virtual orbit view."""

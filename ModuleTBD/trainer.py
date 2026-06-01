@@ -172,8 +172,18 @@ def train_object(
         max_points=int(max_init_points), target_points=int(colmap_init_target_points),
     )
 
-    gaussians = GaussianModel(**_model_kwargs(parent_gaussians))
-    gaussians.explicit_gs = False
+    kwargs = _model_kwargs(parent_gaussians)
+    gaussians = GaussianModel(
+        gs_attr=str(kwargs["gs_attr"]),
+        feat_dim=int(kwargs["feat_dim"]),
+        view_dim=int(kwargs["view_dim"]),
+        appearance_dim=int(kwargs["appearance_dim"]),
+        n_offsets=int(kwargs["n_offsets"]),
+        voxel_size=float(kwargs["voxel_size"]),
+        render_mode=str(kwargs["render_mode"]),
+        tile_size_2dgs=int(kwargs["tile_size_2dgs"]),
+    )
+    object.__setattr__(gaussians, "explicit_gs", False)
     gaussians.weed_ratio = 0.0
     gaussians.set_appearance(len(entries))
     spatial_extent = max(
@@ -189,8 +199,11 @@ def train_object(
         densify_extra_ratio=float(densify_extra_ratio),
     )
     gaussians.training_setup(opt)
+    optimizer = gaussians.optimizer
+    if optimizer is None:
+        raise RuntimeError("Optimizer is not initialized")
     initial_scaling = gaussians._scaling.detach().clone()
-    initial_anchor_count = int(gaussians._anchor.shape[0])
+    initial_anchor_count = gaussians._anchor.shape[0]
 
     if isinstance(pipe_config, dict):
         pipe = SimpleNamespace(**pipe_config)
@@ -263,7 +276,7 @@ def train_object(
             ).sum() / dv.sum().clamp_min(1.0)
             total = total + float(depth_weight) * depth_loss
 
-        gaussians.optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad(set_to_none=True)
         total.backward()
 
         with torch.no_grad():
@@ -273,10 +286,10 @@ def train_object(
                 if (
                     opt.densification
                     and densify_count % opt.update_interval == 0
-                    and int(gaussians._anchor.shape[0]) < int(max_anchor_count)
+                    and gaussians._anchor.shape[0] < max_anchor_count
                 ):
                     gaussians.run_densify(opt, iteration)
-            gaussians.optimizer.step()
+            optimizer.step()
             if gaussians._scaling.shape == initial_scaling.shape:
                 gaussians._scaling.data.clamp_(max=initial_scaling.max().item())
             gaussians._offset.data.clamp_(min=-float(max_offset_abs), max=float(max_offset_abs))
@@ -288,7 +301,7 @@ def train_object(
                 "loss": f"{loss_hist[-1]:.4f}",
                 "depth": f"{depth_hist[-1]:.4f}",
                 "src": entry["source"],
-                "anchors": int(gaussians._anchor.shape[0]),
+                "anchors": gaussians._anchor.shape[0],
             })
 
     gaussians.eval()
@@ -301,11 +314,11 @@ def train_object(
         "mode": "object_training",
         "init_source": init_meta.get("init_source", "unknown"),
         "n_supervision_views": len(supervision_views),
-        "n_depth_target_views": int(n_depth_targets),
+        "n_depth_target_views": n_depth_targets,
         "source_counts": source_counts,
-        "n_init_points": int(len(pcd.points)),
-        "n_final_anchors": int(gaussians._anchor.shape[0]),
-        "initial_anchor_count": int(initial_anchor_count),
+        "n_init_points": len(pcd.points),
+        "n_final_anchors": gaussians._anchor.shape[0],
+        "initial_anchor_count": initial_anchor_count,
         "densification_enabled": bool(enable_densification),
         "hallucination_rgb_scale": float(hallucination_rgb_scale),
         "depth_weight": float(depth_weight),

@@ -24,6 +24,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ def run(
     logger.info("STARTING COMPLETE PIPELINE FOR OBJECT %d", obj_id)
     logger.info("=" * 80 + "\n")
 
-    summary = {
+    summary: dict[str, Any] = {
         "object_id": obj_id,
         "model_path": str(model_path),
         "ply_path": str(resolved_ply),

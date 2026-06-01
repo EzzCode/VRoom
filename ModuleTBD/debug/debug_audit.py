@@ -65,7 +65,7 @@ def test_point_cloud_geometry(seed_points_W, supervision_views):
     extent = xyz.max(axis=0) - xyz.min(axis=0)
     camera_distances = [float(np.linalg.norm(cam - centroid)) for cam in cameras]
     return {
-        "n_points": int(xyz.shape[0]),
+        "n_points": xyz.shape[0],
         "centroid": centroid,
         "aabb_min": xyz.min(axis=0),
         "aabb_max": xyz.max(axis=0),
@@ -174,7 +174,7 @@ def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None,
     )
 
     report = {
-        "n_seed_points": int(seed_points_W.shape[0]),
+        "n_seed_points": seed_points_W.shape[0],
         "n_views": len(supervision_views),
         "hallucination_manifest": test_hallucination_manifest(hallucination_index),
         "point_cloud_geometry": test_point_cloud_geometry(seed_points_W, supervision_views),

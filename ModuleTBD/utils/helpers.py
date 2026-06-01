@@ -137,7 +137,7 @@ def load_cache(out_dir, cond_azimuth_deg, cond_elevation_deg):
 
     views = []
     for entry in sorted(manifest.get("frames", []), key=lambda e: int(e["index"])):
-        stem = f"{int(entry['index']):02d}__az{int(round(float(entry['azimuth_deg']))):+04d}"
+        stem = f"{entry['index']:02d}__az{round(entry['azimuth_deg']):+04d}"
         path = out_dir / "sv3d_raw" / f"{stem}.png"
         if not path.exists():
             raise FileNotFoundError(f"Missing cached frame: {path}. Re-run without reuse_sv3d=True.")

@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import sys
+from typing import cast, Any
 
 import cv2
 import numpy as np
@@ -53,11 +54,13 @@ def _image_path(images_dir, image_name):
 
 
 def _resize_pair(rgb, mask, max_h=320):
+    rgb = np.asarray(rgb)
+    mask = np.asarray(mask)
     h, w = rgb.shape[:2]
     s = min(1.0, max_h / max(h, 1))
     if s < 1.0:
-        rgb = cv2.resize(rgb, (int(w * s), int(h * s)), cv2.INTER_AREA)
-        mask = cv2.resize(mask, (int(w * s), int(h * s)), cv2.INTER_NEAREST)
+        rgb = cv2.resize(cast(Any, rgb), (int(w * s), int(h * s)), cv2.INTER_AREA)  # type: ignore
+        mask = cv2.resize(cast(Any, mask), (int(w * s), int(h * s)), cv2.INTER_NEAREST)  # type: ignore
     return rgb, mask
 
 
@@ -86,7 +89,7 @@ def _make_triptych(rgb, mask, frame_label):
     header_h = 28
     header = np.full((header_h, row.shape[1], 3), 245, np.uint8)
     cv2.putText(header, frame_label, (10, 20), cv2.FONT_HERSHEY_SIMPLEX,
-                0.55, (30, 30, 30), 1, cv2.LINE_AA)
+                 0.55, (30, 30, 30), 1, cv2.LINE_AA)
     return np.vstack([header, row])
 
 
@@ -101,11 +104,10 @@ def _make_contact_sheet(items, n_cols=4, thumb_h=160):
         h, w = thumb.shape[:2]
         if w < thumb_h * 4 // 3:
             pad = thumb_h * 4 // 3 - w
-            thumb = np.hstack([thumb, np.full((h, pad, 3), 240, np.uint8)])
+            thumbs.append(np.hstack([thumb, np.full((h, pad, 3), 240, np.uint8)]))
         else:
-            scale = thumb_h * 4 // 3 / w
-            thumb = cv2.resize(thumb, (thumb_h * 4 // 3, thumb_h), cv2.INTER_AREA)
-        thumbs.append(thumb)
+            thumb = cv2.resize(cast(Any, thumb), (thumb_h * 4 // 3, thumb_h), cv2.INTER_AREA)  # type: ignore
+            thumbs.append(thumb)
 
     while len(thumbs) % n_cols != 0:
         thumbs.append(np.full_like(thumbs[0], 240))
@@ -134,8 +136,12 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
     for f in frames_for_triptych:
         source_path = _image_path(images_dir, f.get("image_name", ""))
         rgb_src = _imread_rgb(source_path) if source_path is not None else None
-        rgba = cv2.imread(f.get("rgba_path", ""), cv2.IMREAD_UNCHANGED)
-        mask_hybrid = (rgba[..., -1] > 127).astype(np.uint8) * 255 if rgba is not None and rgba.ndim == 3 else None
+        rgba_mat = cv2.imread(f.get("rgba_path", ""), cv2.IMREAD_UNCHANGED)
+        if rgba_mat is not None:
+            rgba = np.asarray(rgba_mat)
+            mask_hybrid = (cast(Any, rgba)[..., -1] > 127).astype(np.uint8) * 255 if rgba.ndim == 3 else None
+        else:
+            mask_hybrid = None
         if rgb_src is None or mask_hybrid is None:
             continue
 
@@ -154,9 +160,13 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
         rgb_src = _imread_rgb(source_path) if source_path is not None else None
         if rgb_src is None:
             continue
-        rgba = cv2.imread(f.get("rgba_path", ""), cv2.IMREAD_UNCHANGED)
-        if rgba is not None and rgba.ndim == 3 and rgba.shape[-1] == 4:
-            mask = (rgba[..., -1] > 127).astype(np.uint8) * 255
+        rgba_mat = cv2.imread(f.get("rgba_path", ""), cv2.IMREAD_UNCHANGED)
+        if rgba_mat is not None:
+            rgba = np.asarray(rgba_mat)
+            if rgba.ndim == 3 and rgba.shape[-1] == 4:
+                mask = (cast(Any, rgba)[..., -1] > 127).astype(np.uint8) * 255
+            else:
+                mask = None
         else:
             mask = None
         if mask is None:

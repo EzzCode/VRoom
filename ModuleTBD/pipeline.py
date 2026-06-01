@@ -2,6 +2,7 @@ import json
 import logging
 import math
 from pathlib import Path
+from typing import cast, Any
 
 import numpy as np
 
@@ -51,7 +52,7 @@ def run_pipeline(
 
     if scope is None or pipe_config is None:
         logger.info("Computing scope for obj %d from %s", obj_id, model_path)
-        scope, pipe_config = compute_object_scope(model_path, obj_id)
+        scope, _, pipe_config = compute_object_scope(model_path, obj_id)
     if gaussians is None:
         gaussians, _ = load_gaussians(model_path)
     if frame is None:
@@ -78,9 +79,9 @@ def run_pipeline(
         current_az, current_el = frame.world_to_virtual(
             np.asarray(scope.cameras[cam_idx]["position"], np.float32)
         )
-        current_az = ((float(current_az) + 180.0) % 360.0) - 180.0
-        delta_az = abs(((float(manifest_az) - current_az + 180.0) % 360.0) - 180.0)
-        if delta_az > 0.5 or abs(float(manifest_el) - float(current_el)) > 0.5:
+        current_az = ((current_az + 180.0) % 360.0) - 180.0
+        delta_az = abs(((manifest_az - current_az + 180.0) % 360.0) - 180.0)
+        if delta_az > 0.5 or abs(manifest_el - current_el) > 0.5:
             raise RuntimeError(
                 f"Hallucination manifest frame mismatch for obj {obj_id}: "
                 f"manifest az/el=({manifest_az:.2f}, {manifest_el:.2f}) vs "
@@ -123,8 +124,8 @@ def run_pipeline(
 
     n_parent_anchors = int(gaussians._anchor.shape[0]) if gaussians is not None else 0
     n_parent_obj_anchors = 0
-    if gaussians is not None:
-        labels = gaussians.label_ids.squeeze(-1).cpu().numpy()
+    if gaussians is not None and getattr(gaussians, "label_ids", None) is not None:
+        labels = cast(Any, gaussians.label_ids).squeeze(-1).cpu().numpy()
         n_parent_obj_anchors = int((labels == obj_id).sum())
 
     result = train_object(

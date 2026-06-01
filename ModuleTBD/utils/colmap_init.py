@@ -9,6 +9,7 @@ seeds the fresh per-object Gaussian model.
 import json
 import logging
 from pathlib import Path
+from typing import cast, Any
 
 import cv2
 import numpy as np
@@ -160,8 +161,8 @@ def _upsample_from_colmap_neighbors(xyz, colors, *, target_points):
         "colmap_upsample_target_points": int(target_points),
         "colmap_upsample_source_points": n,
         "colmap_upsample_added_points": n_extra,
-        "colmap_upsample_median_nn": float(median_nn),
-        "colmap_upsample_noise_sigma": float(noise_sig),
+        "colmap_upsample_median_nn": median_nn,
+        "colmap_upsample_noise_sigma": noise_sig,
     }
 
 
@@ -236,11 +237,12 @@ def _score_labels_against_extraction(xyz_all, labels_all, *, scope,
         if not mask_path.exists():
             continue
 
-        img = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
-        if img is None:
+        img_mat = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
+        if img_mat is None:
             continue
+        img = np.asarray(img_mat)
         if img.ndim == 3 and img.shape[2] == 4:
-            mask = img[..., 3] > 127
+            mask = cast(Any, img)[..., 3] > 127
         elif img.ndim == 3:
             mask = img.mean(axis=2) > 127
         else:
@@ -267,8 +269,8 @@ def _score_labels_against_extraction(xyz_all, labels_all, *, scope,
             scores[lb]["mask_frames_seen"] += 1
 
     for lb, s in scores.items():
-        proj = int(s["projected_votes"])
-        ins  = int(s["inside_votes"])
+        proj = s["projected_votes"]
+        ins  = s["inside_votes"]
         frac = float(ins) / max(float(proj), 1.0)
         s["inside_fraction"]   = frac
         s["projection_score"]  = float(frac * np.log1p(float(ins)))
@@ -406,14 +408,14 @@ def load_colmap_object_point_cloud(*, model_path, object_id, scope,
         "colmap_label_used": int(chosen_label),
         "colmap_label_counts": label_counts,
         "colmap_label_projection_scores": proj_scores,
-        "aabb_filtered": bool(aabb_filtered),
+        "aabb_filtered": aabb_filtered,
         "n_colmap_selected_points": n_selected,
-        "n_colmap_seed_points": int(xyz.shape[0]),
+        "n_colmap_seed_points": xyz.shape[0],
         "label_ids_written_as_object_id": int(object_id),
         **upsample_meta,
     }
     logger.info(
         "Scratch init obj %d: %d seed points from %s (label=%d, aabb_filtered=%s).",
-        int(object_id), int(xyz.shape[0]), ply_path, int(chosen_label), bool(aabb_filtered),
+        int(object_id), xyz.shape[0], ply_path, int(chosen_label), aabb_filtered,
     )
     return pcd, metadata

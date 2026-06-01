@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import cast, Any
 
 import cv2
 import numpy as np
@@ -37,10 +38,11 @@ def _rgba_on_bg(rgba, bg=(245, 245, 245)):
 def _resize_h(img, max_h=170):
     if img is None:
         return None
+    img = np.asarray(img)
     h, w = img.shape[:2]
     scale = min(1.0, max_h / max(h, 1))
     if scale < 1.0:
-        return cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))), cv2.INTER_AREA)
+        return cv2.resize(cast(Any, img), (max(1, int(w * scale)), max(1, int(h * scale))), cv2.INTER_AREA)  # type: ignore
     return img
 
 
