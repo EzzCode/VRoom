@@ -1,3 +1,4 @@
+import math
 import torch
 
 from gstrain.vroom_core.utilities.training import extend_optimizer, prune_optimizer
@@ -329,7 +330,7 @@ class DensifcationController:
                 anchor_label = class_counts.view(n_new, n_classes).argmax(dim=1)
 
             anchor_scale = quantization_size
-            log_scale_val = float(torch.tensor(anchor_scale).log().item())
+            log_scale_val = 0.5 * math.log(max(anchor_scale, 1e-6))
             anchor_log_scales = torch.full(
                 (n_new, 6), log_scale_val, dtype=torch.float32, device=device
             )
@@ -384,6 +385,8 @@ class DensifcationController:
             return
 
         keep_mask = ~prune_them_anchors_mask
+        if keep_mask.sum() == 0:
+            return
 
         # update optimizer and the anchor cloud data
         prune_optimizer(self.optimizer, self.anchor_cloud, keep_mask)
