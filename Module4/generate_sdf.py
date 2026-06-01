@@ -136,11 +136,11 @@ def generate_tsdf_single_cam(depth_map, intrinsics, extrinsics,
     # 9. Dynamic Weighting
     # Assign higher weights to measurements taken close to camera
     weights = torch.zeros(world_points_h.shape[0], device=device, dtype=torch.float32)
-    # Carving Mask: We only assign weight to empty space (>0) or surface (approx. 0). 
-    # We ignore deep interior (-1) because cameras cannot see through solid walls
-    carving_mask = final_valid_mask & (tsdf_values > -0.99)
+    # Observable Mask: We only assign weight to empty space (>0) or surface (approx. 0). 
+    # We ignore deep interior (-1) because cameras cannot see inside objects
+    observable_mask = final_valid_mask & (tsdf_values > -0.99)
     # Inverse square weighting
-    weights[carving_mask] = 1.0 / (corner_depths[carving_mask] ** 2 + 1e-5)
+    weights[observable_mask] = 1.0 / (corner_depths[observable_mask] ** 2 + 1e-5)
 
     # 9. Reshape
     final_grid = tsdf_values.view(grid_shape)
