@@ -3,12 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 
 from gstrain.vroom_core.utilities.utils import (
-    PointCloudSample,
     compute_anchors_scale_and_rotation,
     estimate_voxel_size,
     SemanticsManager,
@@ -51,8 +49,8 @@ class AnchorCloud(nn.Module):
         self.semantic_manager = semantic_manager
         self.feature_dim = feature_dim
 
-        self.anchors_positions = nn.Parameter(
-            torch.empty((0, 3), dtype=torch.float32, device=self.device)
+        self.anchors_positions = (
+            nn.Parameter(torch.empty((0, 3), dtype=torch.float32, device=self.device)),
         )
 
         self.anchor_features = nn.Parameter(
@@ -65,7 +63,7 @@ class AnchorCloud(nn.Module):
 
         self.anchors_log_scales = nn.Parameter(
             torch.empty((0, 6), dtype=torch.float32, device=self.device)
-        )  # log is taken in case optimizer made scale a negative number
+        )  # log is taken so we can apply exponential to the scale, in case optimizer made scale a negative number
 
         self.anchors_rotations = nn.Parameter(
             torch.empty((0, 4), dtype=torch.float32, device=self.device),
@@ -102,10 +100,11 @@ class AnchorCloud(nn.Module):
         """
         Intialize the anchor cloud from the sparse point cloud by quantization
         """
+        distances_between_points = self._knn(point_cloud, k=4)
+        distances_between_anchors = self._knn(self.anchors_positions, k=4)
 
         if self.voxel_size is None:
-            distances = self._knn(point_cloud, k=4)
-            self.voxel_size = estimate_voxel_size(distances)
+            self.voxel_size = estimate_voxel_size(distances_between_points)
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
@@ -121,10 +120,14 @@ class AnchorCloud(nn.Module):
             unique_voxels, inversed_indices, point_labels
         )
 
+        print(f"Number of Anchors generated {self.anchors_positions.shape[0]} ")
+
         # set scale and rotation for each anchor
-        distances = self._knn(self.anchors_positions, k=4)
         log_scales, rotations = compute_anchors_scale_and_rotation(
-            self.anchors_positions, distances, self.voxel_size, self.device
+            self.anchors_positions,
+            distances_between_anchors,
+            self.voxel_size,
+            self.device,
         )
         self.anchors_log_scales = nn.Parameter(log_scales)
         self.anchors_rotations = nn.Parameter(rotations, requires_grad=False)
@@ -150,8 +153,6 @@ class AnchorCloud(nn.Module):
                 device=self.device,
             )
         )
-        print(f"Generated {self.anchors_positions.shape[0]} anchors")
-        print(f"voxel size = {self.voxel_size}")
 
         return AnchorCloudData(
             anchors_positions=self.anchors_positions,

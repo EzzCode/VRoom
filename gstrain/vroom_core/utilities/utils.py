@@ -143,7 +143,9 @@ def estimate_voxel_size(knn_distances: torch.Tensor, min_size: float = 1e-6) -> 
     Estimates a voxel size for a uniform grid using knn distances
     """
     voxel_size = torch.median(knn_distances[:, 1:]).item()
-    return max(voxel_size, min_size)
+    voxel_size = max(voxel_size, min_size)
+    print(f"voxel size = {voxel_size}")
+    return voxel_size
 
 
 def compute_psnr(prediction: torch.Tensor, target: torch.Tensor) -> float:
