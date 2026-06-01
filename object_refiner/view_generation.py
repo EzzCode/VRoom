@@ -1,5 +1,5 @@
-from ModuleTBD.utils.scene_analysis import ObjectScope
-from ModuleTBD.utils.transforms import ObjectFrame
+from object_refiner.utils.scene_analysis import ObjectScope
+from object_refiner.utils.transforms import ObjectFrame
 import json
 import logging
 import math
@@ -9,7 +9,7 @@ from typing import cast, Any
 import cv2
 import numpy as np
 
-from ModuleTBD.utils.helpers import load_cache
+from object_refiner.utils.helpers import load_cache
 
 from .constants import ALPHA_THRESH, FOV_Y_DEG, SV3D_FILL_FRAC
 from .utils.gstrain_wrapper import make_camera, render_rgba

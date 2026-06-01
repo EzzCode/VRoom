@@ -1,4 +1,4 @@
-"""Visual Debug for Frame Scoring (ModuleTBD).
+"""Visual Debug for Frame Scoring (object_refiner).
 
 Outputs under ``<obj_dir>/debug/frame_scoring/``::
 
@@ -8,7 +8,7 @@ Outputs under ``<obj_dir>/debug/frame_scoring/``::
     topk_strip.png           horizontal strip of the chosen top-K thumbnails
     summary.json             ranking + selected indices
 
-ModuleTBD's scoring mirrors the old object_isolation components.
+object_refiner's scoring mirrors the old object_refiner components.
 """
 from __future__ import annotations
 
@@ -226,7 +226,7 @@ def generate_debug_artifacts(*, scores, debug_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ModuleTBD frame-scoring visual debug.")
+    parser = argparse.ArgumentParser(description="object_refiner frame-scoring visual debug.")
     parser.add_argument("--scores_json", required=True,
                         help="JSON file containing ranking + top_k (e.g. 99_pipeline_summary.json or a saved scores file).")
     parser.add_argument("--debug_dir", required=True)

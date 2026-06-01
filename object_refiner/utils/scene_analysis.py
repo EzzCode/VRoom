@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import Union, Any, cast
 import numpy as np
 import yaml
-from ModuleTBD.utils.transforms import ObjectFrame
+from object_refiner.utils.transforms import ObjectFrame
 from gstrain.vroom_core import GaussianModel
 from gstrain.vroom_core.models.semantics import SemanticCodec
 from .helpers import normalize
-from ModuleTBD.constants import GAUSSIAN_MODEL_DEFAULTS
+from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
 import logging
 logger = logging.getLogger(__name__)
 

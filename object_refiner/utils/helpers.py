@@ -6,8 +6,8 @@ import numpy as np
 import re
 
 # TODO(label-alignment): remove this import once tracked_object_id == object_label_id end-to-end
-from ModuleTBD.utils.gstrain_wrapper import make_camera, render_rgba, render_rgba
-from ModuleTBD.utils.sv3d_wrapper import HallucinatedView
+from object_refiner.utils.gstrain_wrapper import make_camera, render_rgba, render_rgba
+from object_refiner.utils.sv3d_wrapper import HallucinatedView
 
 logger = logging.getLogger(__name__)
 SV3D_VIEW_COUNT      = 21

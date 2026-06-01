@@ -14,8 +14,8 @@ _VROOM_ROOT = Path(__file__).resolve().parents[2]
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from ModuleTBD.utils.gstrain_wrapper import make_camera, render_rgba
-from ModuleTBD.utils.transforms import R_L2V, look_at, orbit_position
+from object_refiner.utils.gstrain_wrapper import make_camera, render_rgba
+from object_refiner.utils.transforms import R_L2V, look_at, orbit_position
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ def generate_debug_artifacts(
 
 def _load_trained_gaussians(parent_gaussians, model_dir):
     from gstrain.vroom_core.models.facade import GaussianModel
-    from ModuleTBD.constants import GAUSSIAN_MODEL_DEFAULTS
+    from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
 
     model_dir = Path(model_dir)
     kwargs = {
@@ -159,9 +159,8 @@ def _resolve_ply(model_path, ply_path=None):
 
 
 def main():
-    from ModuleTBD.utils.scene_analysis import compute_object_scope, load_gaussians
-
-    parser = argparse.ArgumentParser(description="Render before/after comparison images for a trained ModuleTBD object.")
+    from object_refiner.utils.scene_analysis import compute_object_scope, load_gaussians
+    parser = argparse.ArgumentParser(description="Render before/after comparison images for a trained object_refiner object.")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--object_id", type=int, required=True)
     parser.add_argument("--obj_dir", default=None)

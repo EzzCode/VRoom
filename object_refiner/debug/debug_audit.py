@@ -13,7 +13,7 @@ _VROOM_ROOT = Path(__file__).resolve().parents[2]
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from ModuleTBD.constants import SEED_DEPTH_MIN
+from object_refiner.constants import SEED_DEPTH_MIN
 
 logger = logging.getLogger(__name__)
 
@@ -141,9 +141,9 @@ def test_projection_overlay(seed_points_W, supervision_views, output_dir):
 
 
 def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None, frame=None, ply_path=None):
-    from ModuleTBD.dataset_builder import build_views
-    from ModuleTBD.utils.colmap_init import load_colmap_object_point_cloud
-    from ModuleTBD.utils.scene_analysis import compute_object_scope
+    from object_refiner.dataset_builder import build_views
+    from object_refiner.utils.colmap_init import load_colmap_object_point_cloud
+    from object_refiner.utils.scene_analysis import compute_object_scope
 
     obj_dir = Path(obj_dir)
     debug_dir = Path(debug_dir)
@@ -234,7 +234,7 @@ def generate_debug_artifacts(
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="ModuleTBD projection audit.",
+        description="object_refiner projection audit.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--obj_dir", default=None)

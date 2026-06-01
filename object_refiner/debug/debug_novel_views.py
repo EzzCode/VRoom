@@ -157,7 +157,7 @@ def generate_debug_artifacts(*, manifest, scope_cameras, debug_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ModuleTBD novel-view visual debug.")
+    parser = argparse.ArgumentParser(description="object_refiner novel-view visual debug.")
     parser.add_argument("--hallucination_index", required=True)
     parser.add_argument("--debug_dir", required=True)
     args = parser.parse_args()

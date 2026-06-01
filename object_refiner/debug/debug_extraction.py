@@ -1,4 +1,4 @@
-"""Visual Debug for Object View Extraction (ModuleTBD).
+"""Visual Debug for Object View Extraction (object_refiner).
 
 Outputs under ``<obj_dir>/debug/extraction/``::
 
@@ -8,10 +8,10 @@ Outputs under ``<obj_dir>/debug/extraction/``::
 
 Run standalone::
 
-    python -m ModuleTBD.debug.debug_extraction \\
-        --extraction_index ModuleTBD/outputs/obj_8/01_extraction/extraction_index.json \\
+    python -m object_refiner.debug.debug_extraction \\
+        --extraction_index object_refiner/outputs/obj_8/01_extraction/extraction_index.json \\
         --images_dir data/3dovs/bed/images_4 \\
-        --output_root ModuleTBD/outputs
+        --output_root object_refiner/outputs
 """
 from __future__ import annotations
 
@@ -197,7 +197,7 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ModuleTBD extraction visual debug.")
+    parser = argparse.ArgumentParser(description="object_refiner extraction visual debug.")
     parser.add_argument("--extraction_index", required=True,
                         help="Path to extraction_index.json")
     parser.add_argument("--images_dir", required=True,

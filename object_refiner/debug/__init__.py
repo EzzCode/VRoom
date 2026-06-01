@@ -1,13 +1,13 @@
-"""ModuleTBD debug-artifact subpackage.
+"""object_refiner debug-artifact subpackage.
 
-Mirrors ``object_isolation.debug`` but is adapted to ModuleTBD's API
+Mirrors ``object_isolation.debug`` but is adapted to object_refiner's API
 (``ObjectFrame`` instead of ``WorldLocal``/``LocalSV3D``, ``azimuth_deg``
 field names, no ``scope.*_W`` suffixes, etc.).
 
 Nothing here is needed for a production training run. Importing this
 package or calling any of its functions only writes files when the user
 explicitly opts in via ``--debug`` (or invokes one of the standalone
-``python -m ModuleTBD.debug.<sub>`` CLIs).
+``python -m object_refiner.debug.<sub>`` CLIs).
 """
 from __future__ import annotations
 

@@ -1,14 +1,14 @@
-"""ModuleTBD end-to-end pipeline CLI.
+"""object_refiner end-to-end pipeline CLI.
 
 Drop-in replacement for ``object_isolation.run_pipeline`` using the
-rewritten ModuleTBD modules.
+rewritten object_refiner modules.
 
 Usage::
 
-    python -m ModuleTBD \\
+    python -m object_refiner \\
         --model_path temp_deps/ObjectGS/outputs/3dovs/2d_crossentropy_loss_01/2026-03-19_04-01-38 \\
         --scene_dir  data/3dovs/bed \\
-        --output_root object_isolation/outputs \\
+        --output_root object_refiner/outputs \\
         --object_id  8 \\
         --iterations 12000 \\
         --debug \\
@@ -77,12 +77,12 @@ def run(
 ):
     """Run extraction → frame scoring → hallucination → training for one object."""
     import torch
-    from ModuleTBD.config import ObjectTrainingConfig
-    from ModuleTBD.utils.scene_analysis import compute_object_scope, load_gaussians
-    from ModuleTBD.utils.transforms import ObjectFrame
-    from ModuleTBD.view_selection import run_extraction, run_scoring
-    from ModuleTBD.view_generation import run_generation
-    from ModuleTBD.pipeline import run_pipeline
+    from object_refiner.config import ObjectTrainingConfig
+    from object_refiner.utils.scene_analysis import compute_object_scope, load_gaussians
+    from object_refiner.utils.transforms import ObjectFrame
+    from object_refiner.view_selection import run_extraction, run_scoring
+    from object_refiner.view_generation import run_generation
+    from object_refiner.pipeline import run_pipeline
 
     torch.backends.cudnn.benchmark = True
 
@@ -173,7 +173,7 @@ def run(
         # TODO(label-alignment): replace this entire block with `tracked_object_id = object_label_id`
         #   once Module1 and ObjectGS share the same label namespace; delete vote_tracked_object_id() too.
         if tracked_object_id is None:
-            from ModuleTBD.utils.helpers import vote_tracked_object_id
+            from object_refiner.utils.helpers import vote_tracked_object_id
             tracked_object_id = vote_tracked_object_id(
                 scope, gaussians, pipe_config, resolved_tracked_id_map_dir, tau_alpha=tau_alpha
             )
@@ -270,7 +270,7 @@ def run(
 
     if debug:
         try:
-            from ModuleTBD.debug import generate_all_debug_artifacts
+            from object_refiner.debug import generate_all_debug_artifacts
             generate_all_debug_artifacts(
                 obj_dir=obj_dir,
                 scope=scope,
@@ -309,7 +309,7 @@ def run(
 
 def _parse_args():
     p = argparse.ArgumentParser(
-        description="ModuleTBD — end-to-end object isolation pipeline",
+        description="object_refiner — end-to-end object refiner pipeline",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     # Required
@@ -320,7 +320,7 @@ def _parse_args():
     p.add_argument("--object_id", required=True, type=int)
 
     # Paths
-    p.add_argument("--output_root", default="object_isolation/outputs")
+    p.add_argument("--output_root", default="object_refiner/outputs")
     p.add_argument("--ply_path", default=None,
                    help="Explicit path to point_cloud.ply "
                         "(default: <model_path>/point_cloud/point_cloud.ply)")

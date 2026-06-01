@@ -1,4 +1,4 @@
-"""Visual Debug for Scope Discovery + Coordinate Frames (ModuleTBD).
+"""Visual Debug for Scope Discovery + Coordinate Frames (object_refiner).
 
 Outputs under ``<obj_dir>/debug/scope/``::
 
@@ -9,10 +9,10 @@ Outputs under ``<obj_dir>/debug/scope/``::
 
 Run standalone::
 
-    python -m ModuleTBD.debug.debug_scope \\
+    python -m object_refiner.debug.debug_scope \\
         --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
         --object_id 8 \\
-        --output_root ModuleTBD/outputs
+        --output_root object_refiner/outputs
 """
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ _VROOM_ROOT = Path(__file__).resolve().parents[2]
 if str(_VROOM_ROOT) not in sys.path:
     sys.path.insert(0, str(_VROOM_ROOT))
 
-from ModuleTBD.utils.scene_analysis import compute_object_scope, load_gaussians
-from ModuleTBD.utils.gstrain_wrapper import make_camera, render_rgba
+from object_refiner.utils.scene_analysis import compute_object_scope, load_gaussians
+from object_refiner.utils.gstrain_wrapper import make_camera, render_rgba
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def coord_roundtrip_test(frame, out_path, n_pts=100, n_views=20, seed=0):
         _R, _T, C_W = frame.virtual_to_world_camera(float(az), float(el))
         az_back, el_back = frame.world_to_virtual(C_W)
         # Compare on the unit-sphere position to avoid azimuth wrap issues.
-        from ModuleTBD.utils.transforms import orbit_position
+        from object_refiner.utils.transforms import orbit_position
         p_in = orbit_position(az, el)
         p_back = orbit_position(az_back, el_back)
         view_errs.append(float(np.linalg.norm(p_in - p_back)))
@@ -300,10 +300,10 @@ def generate_debug_artifacts(*, scope, frame, debug_dir,
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="ModuleTBD scope/frame visual debug.")
+    parser = argparse.ArgumentParser(description="object_refiner scope/frame visual debug.")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--object_id", required=True, type=int)
-    parser.add_argument("--output_root", default="ModuleTBD/outputs")
+    parser.add_argument("--output_root", default="object_refiner/outputs")
     parser.add_argument("--ply_path", default=None)
     parser.add_argument("--max_aabb_views", type=int, default=6)
     args = parser.parse_args()

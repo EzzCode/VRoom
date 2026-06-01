@@ -13,7 +13,6 @@ requires-python = ">=3.9"
 # ──────────────────────────────────────────────────────────────────────────────
 [tool.setuptools.package-dir]
 "module1"          = "Module1"
-"module2"          = "Module2"
 
 
 # Explicit list of every importable package (folder with __init__.py).
@@ -34,15 +33,10 @@ packages = [
     # Module1  →  import module1 ...
     "module1",
 
-    # Module-2  →  import module2 ...
-    "module2",
-    "module2.utils",
-
-    # object_isolation  →  import object_isolation ...
-    "object_isolation",
-    "object_isolation.core",
-    "object_isolation.core.diffusion_priors",
-    "object_isolation.debug",
+    # object_refiner  →  import object_refiner ...
+    "object_refiner",
+    "object_refiner.utils",
+    "object_refiner.debug",
 ]
 
 [tool.pyrefly]
