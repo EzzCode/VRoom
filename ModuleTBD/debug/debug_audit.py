@@ -30,8 +30,8 @@ def _json_default(value):
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def test_hallucination_manifest(hallucination_index_path):
-    path = Path(hallucination_index_path)
+def test_generation_manifest(generation_index_path):
+    path = Path(generation_index_path)
     if not path.exists():
         return {"exists": False, "error": f"missing {path}"}
 
@@ -153,7 +153,7 @@ def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None,
         scope, frame, _ = compute_object_scope(model_path, int(object_id))
 
     extraction_index = obj_dir / "01_extraction" / "extraction_index.json"
-    hallucination_index = obj_dir / "03_novel_views" / "hallucination_index.json"
+    generation_index = obj_dir / "03_novel_views" / "generation.json"
     point_cloud, _meta = load_colmap_object_point_cloud(
         model_path=str(model_path),
         object_id=int(object_id),
@@ -165,7 +165,7 @@ def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None,
     seed_points_W = np.asarray(point_cloud.points, np.float32)
 
     supervision_views = build_supervision_views(
-        halluc_index_path=hallucination_index,
+        halluc_index_path=generation_index,
         extraction_index_path=extraction_index,
         scope=scope,
         frame=frame,
@@ -176,7 +176,7 @@ def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None,
     report = {
         "n_seed_points": seed_points_W.shape[0],
         "n_views": len(supervision_views),
-        "hallucination_manifest": test_hallucination_manifest(hallucination_index),
+        "generation_manifest": test_generation_manifest(generation_index),
         "point_cloud_geometry": test_point_cloud_geometry(seed_points_W, supervision_views),
         "projection_overlay": test_projection_overlay(seed_points_W, supervision_views, debug_dir),
     }

@@ -176,7 +176,7 @@ def main():
     scope, frame, pipe_config = compute_object_scope(args.model_path, int(args.object_id), ply_path=str(resolved_ply))
     parent_gaussians, _ = load_gaussians(args.model_path, ply_path=str(resolved_ply))
     trained_gaussians = _load_trained_gaussians(parent_gaussians, obj_dir / "06_model")
-    hallucination_index = obj_dir / "03_novel_views" / "hallucination_index.json"
+    hallucination_index = obj_dir / "03_novel_views" / "generation.json"
     halluc_manifest = None
     if hallucination_index.exists():
         with open(hallucination_index) as f:

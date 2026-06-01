@@ -121,7 +121,7 @@ def train_object(
     max_init_points=20000,
     colmap_init_target_points=8000,
     rgb_weight=1.0,
-    hallucination_rgb_scale=1.0,
+    generated_rgb_scale=1.0,
     alpha_weight=1.0,
     outside_alpha_weight=5.0,
     depth_weight=0.1,
@@ -228,8 +228,8 @@ def train_object(
             rng.shuffle(order)
         entry = entries[order[(iteration - 1) % len(order)]]
         cam, gt, mask = entry["camera"], entry["gt_image"], entry["gt_mask"]
-        weight = float(entry["weight"])
-        rgb_scale = 1.0 if entry["source"] == "real" else float(hallucination_rgb_scale)
+        weight = entry["weight"]
+        rgb_scale = 1.0 if entry["source"] == "real" else float(generated_rgb_scale)
 
         gaussians.update_learning_rate(iteration)
         gaussians.set_anchor_mask(cam.camera_center, cam.resolution_scale)
@@ -320,7 +320,7 @@ def train_object(
         "n_final_anchors": gaussians._anchor.shape[0],
         "initial_anchor_count": initial_anchor_count,
         "densification_enabled": bool(enable_densification),
-        "hallucination_rgb_scale": float(hallucination_rgb_scale),
+        "generated_rgb_scale": float(generated_rgb_scale),
         "depth_weight": float(depth_weight),
         "final_loss": float(np.mean(tail)) if tail else 0.0,
         "model_dir": str(model_dir),

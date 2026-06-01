@@ -13,7 +13,7 @@ Usage::
         --iterations 12000 \\
         --debug \\
         --enable_densification \\
-        --hallucination_weight 0.6
+        --generated_weight 0.6
 
 By default ``--ply_path`` is resolved to ``<model_path>/point_cloud/point_cloud.ply``
 (the standard ObjectGS checkpoint layout). Pass it explicitly if your layout differs.
@@ -46,7 +46,6 @@ def _setup_logging(level=logging.INFO):
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 def run(
-    *,
     model_path,
     scene_dir,
     output_root,
@@ -60,13 +59,12 @@ def run(
     # Frame scoring
     top_k=5,
     # Novel views
-    fov_y_deg=50.0,
     reuse_sv3d=False,
     # Training
-    hallucination_weight=1.0,
+    generated_weight=1.0,
     real_weight=1.0,
     rgb_weight=1.0,
-    hallucination_rgb_scale=1.0,
+    generated_rgb_scale=1.0,
     depth_weight=0.1,
     depth_start_iter=100,
     depth_front_weight=1.0,
@@ -215,7 +213,7 @@ def run(
             scope=scope,
             frame=frame,
             gaussians=gaussians,
-            pipe_config=pipe_config,
+            pipeline_config=pipe_config,
             scores=scores_manifest,
             output_dir=obj_dir / "03_novel_views",
             reuse_sv3d=reuse_sv3d,
@@ -237,7 +235,7 @@ def run(
         training_result = run_pipeline(
             model_path=str(model_path),
             object_label_id=obj_id,
-            halluc_index_path=obj_dir / "03_novel_views" / "hallucination_index.json",
+            halluc_index_path=obj_dir / "03_novel_views" / "generation.json",
             output_dir=output_root,
             halluc_manifest=halluc_manifest,
             gaussians=gaussians,
@@ -245,10 +243,10 @@ def run(
             scope=scope,
             frame=frame,
             iterations=iterations,
-            hallucination_weight=hallucination_weight,
+            generated_weight=generated_weight,
             real_weight=real_weight,
             rgb_weight=rgb_weight,
-            hallucination_rgb_scale=hallucination_rgb_scale,
+            generated_rgb_scale=generated_rgb_scale,
             depth_weight=depth_weight,
             depth_start_iter=depth_start_iter,
             depth_front_weight=depth_front_weight,
@@ -258,7 +256,6 @@ def run(
             max_anchor_count=max_anchor_count,
             densify_grad_threshold=densify_grad_threshold,
             densify_extra_ratio=densify_extra_ratio,
-            fov_y_deg=fov_y_deg,
         )
         training_result_clean = {k: v for k, v in training_result.items() if k != "_gaussians"}
         summary["phases"]["training"] = training_result_clean
@@ -342,14 +339,13 @@ def _parse_args():
     p.add_argument("--top_k", type=int, default=5)
 
     # Novel views
-    p.add_argument("--fov_y_deg", type=float, default=50.0)
     p.add_argument("--reuse_sv3d", action="store_true")
 
     # Training
-    p.add_argument("--hallucination_weight", type=float, default=1.0)
+    p.add_argument("--generated_weight", type=float, default=1.0)
     p.add_argument("--real_weight", type=float, default=1.0)
     p.add_argument("--rgb_weight", type=float, default=1.0)
-    p.add_argument("--hallucination_rgb_scale", type=float, default=1.0)
+    p.add_argument("--generated_rgb_scale", type=float, default=1.0)
     p.add_argument("--depth_weight", type=float, default=0.1)
     p.add_argument("--depth_start_iter", type=int, default=100)
     p.add_argument("--depth_front_weight", type=float, default=1.0)
@@ -381,12 +377,11 @@ def main():
         iterations=args.iterations,
         tau_alpha=args.tau_alpha,
         top_k=args.top_k,
-        fov_y_deg=args.fov_y_deg,
         reuse_sv3d=args.reuse_sv3d,
-        hallucination_weight=args.hallucination_weight,
+        generated_weight=args.generated_weight,
         real_weight=args.real_weight,
         rgb_weight=args.rgb_weight,
-        hallucination_rgb_scale=args.hallucination_rgb_scale,
+        generated_rgb_scale=args.generated_rgb_scale,
         depth_weight=args.depth_weight,
         depth_start_iter=args.depth_start_iter,
         depth_front_weight=args.depth_front_weight,

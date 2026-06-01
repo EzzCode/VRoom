@@ -18,7 +18,6 @@ class HallucinatedView:
     rgb: np.ndarray        # (H, W, 3) uint8
     azimuth_deg: float     # V-frame azimuth in (-180, 180]
     elevation_deg: float   # V-frame elevation in [-90, 90]
-    is_conditioning: bool = False # True for the input view, False for hallucinated views
 
 
 def _setup_hf_cache():

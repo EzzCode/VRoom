@@ -88,7 +88,7 @@ def _alpha_mask(rgb):
 
 
 
-def _reference_alpha(scope, frame: ObjectFrame, gaussians, pipe_config, az_deg, el_deg, resolution, up_override=None):
+def _reference_alpha(scope, frame: ObjectFrame, gaussians, pipeline_config, az_deg, el_deg, resolution, up=None):
     
     fov_y = math.radians(FOV_Y_DEG)
     fy = 0.5 * resolution / math.tan(0.5 * fov_y)
@@ -98,11 +98,11 @@ def _reference_alpha(scope, frame: ObjectFrame, gaussians, pipe_config, az_deg, 
 
     # R and T is for world to camera and C is camera position in world 
     R, T, C = frame.virtual_to_world_camera(az_deg, el_deg)
-    if up_override is not None:
-        R, T = look_at(C, scope.centroid, up_override)
+    if up is not None:
+        R, T = look_at(C, scope.centroid, up)
 
     cam = make_camera(R, T, K, resolution, resolution)
-    render = render_rgba(gaussians, cam, pipe_config, bg_white=True, object_label_id=scope.object_label_id)
+    render = render_rgba(gaussians, cam, pipeline_config, bg_white=True, object_label_id=scope.object_label_id)
 
     rgb   = (render["rgb"].detach().clamp(0.0, 1.0).permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
     alpha = render["alpha"].detach().cpu().numpy()
@@ -113,30 +113,28 @@ def _reference_alpha(scope, frame: ObjectFrame, gaussians, pipe_config, az_deg, 
     return alpha
 
 
-def run_hallucination(scope: ObjectScope, frame: ObjectFrame, gaussians, pipe_config, *, scores, output_dir, reuse_sv3d=False):
+def run_hallucination(scope: ObjectScope, frame: ObjectFrame, gaussians, pipeline_config, scores, output_dir, reuse_sv3d=False):
     output_dir    = Path(output_dir)
     generated_dir = output_dir / "generated"
-    sv3d_raw_dir  = output_dir / "sv3d_raw"
-    manifest_path = output_dir / "hallucination_index.json"
-    for dir in (generated_dir, sv3d_raw_dir):
+    sv3d_dir  = output_dir / "sv3d"
+    log_path = output_dir / "generation.json"
+    for dir in (generated_dir, sv3d_dir):
         dir.mkdir(parents=True, exist_ok=True)
 
     if not reuse_sv3d:
-        if manifest_path.exists():
-            manifest_path.unlink()
-        for dir in (generated_dir, sv3d_raw_dir):
+        if log_path.exists():
+            log_path.unlink()
+        for dir in (generated_dir, sv3d_dir):
             for img in dir.glob("*.png"):
                 img.unlink()
 
     if not scores or not scores.get("top_k"):
-        logger.warning("scores object has no top_k")
         raise RuntimeError("scores object has no top_k")
 
     top = scores["top_k"][0]
     rgba_path = Path(top["rgba_path"])
     if not rgba_path.exists():
-        raise FileNotFoundError(
-            f"input RGBA not found at {rgba_path}.")
+        raise FileNotFoundError(f"input RGBA not found at {rgba_path}.")
 
     top_cam_index = int(top["cam_index"])
     top_azimuth_deg = float(top["azimuth_deg"])
@@ -173,16 +171,10 @@ def run_hallucination(scope: ObjectScope, frame: ObjectFrame, gaussians, pipe_co
 
     resolution = views[0].rgb.shape[0]
     frames = []
+    n_views = len(views)
     n_kept = 0
-
     for i, view in enumerate(views):
-        ref_alpha = _reference_alpha(
-            scope, frame, gaussians, pipe_config,
-            az_deg=view.azimuth_deg,
-            el_deg=view.elevation_deg,
-            resolution=resolution,
-            up_override=top_cam_up,
-        )
+        ref_alpha = _reference_alpha(scope, frame, gaussians, pipeline_config, view.azimuth_deg, view.elevation_deg, resolution, top_cam_up)
 
         mask_ref = ref_alpha > ALPHA_THRESH
         mask_sv3d = _alpha_mask(view.rgb)
@@ -200,29 +192,27 @@ def run_hallucination(scope: ObjectScope, frame: ObjectFrame, gaussians, pipe_co
             n_kept += 1
 
         stem = f"{i:02d}__az{round(view.azimuth_deg):+04d}"
-        sv3d_raw_path = sv3d_raw_dir / f"{stem}.png"
+        sv3d_path = sv3d_dir / f"{stem}.png"
         generated_path = generated_dir / f"{stem}.png"
 
-        cv2.imwrite(str(sv3d_raw_path), cv2.cvtColor(view.rgb, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(sv3d_path), cv2.cvtColor(view.rgb, cv2.COLOR_RGB2BGR))
         cv2.imwrite(str(generated_path), np.dstack([
-            cv2.cvtColor(view.rgb, cv2.COLOR_RGB2BGR),
-            (mask_sv3d.astype(np.uint8) * 255),
-        ]))
+                                                    cv2.cvtColor(view.rgb, cv2.COLOR_RGB2BGR),
+                                                    (mask_sv3d.astype(np.uint8) * 255),
+                                                    ]))
 
         frames.append({
             "index": i,
             "azimuth_deg": view.azimuth_deg,
             "elevation_deg": view.elevation_deg,
-            "is_conditioning": view.is_conditioning,
             "accepted": accepted,
             "rgba_path": str(generated_path),
         })
 
-    logger.info("Novel-view synthesis: kept %d / %d views (threshold IoU=%.2f).",
-                n_kept, len(views), IOU_THRESHOLD)
+    logger.info("Novel view generation: kept %d / %d views (threshold IoU=%.2f).", n_kept, n_views, IOU_THRESHOLD)
 
     result = {
-        "n_views": len(views),
+        "n_views": n_views,
         "n_kept": n_kept,
         "conditioning": {
             "cam_index": top_cam_index,
@@ -232,8 +222,8 @@ def run_hallucination(scope: ObjectScope, frame: ObjectFrame, gaussians, pipe_co
         "frames": frames,
     }
 
-    with open(manifest_path, "w") as f:
+    with open(log_path, "w") as f:
         json.dump(result, f, indent=2)
 
-    logger.info("Hallucination manifest: %s", manifest_path)
+    logger.info("Generation log: %s", log_path)
     return result

@@ -73,8 +73,7 @@ def make_generated_grid(manifest, debug_dir, n_cols=5, thumb_h=170):
         img = _resize_h(img, thumb_h)
         accepted = bool(frame.get("accepted", False))
         bg = (60, 160, 80) if accepted else (170, 70, 70)
-        suffix = " cond" if frame.get("is_conditioning") else ""
-        label = f"#{frame.get('index')} az={float(frame.get('azimuth_deg', 0.0)):+.1f} el={float(frame.get('elevation_deg', 0.0)):+.1f}{suffix}"
+        label = f"#{frame.get('index')} az={float(frame.get('azimuth_deg', 0.0)):+.1f} el={float(frame.get('elevation_deg', 0.0)):+.1f}"
         tiles.append(_label_band(img, label, bg))
 
     if not tiles:
@@ -116,8 +115,6 @@ def make_coverage_polar(manifest, scope_cameras, debug_dir):
         color = (60, 180, 60) if frame.get("accepted") else (180, 60, 60)
         center = point(frame.get("azimuth_deg", 0.0), r_outer * 0.55)
         cv2.circle(img, center, 6, color, -1)
-        if frame.get("is_conditioning"):
-            cv2.circle(img, center, 9, (40, 120, 220), 2)
 
     cond = manifest.get("conditioning", {})
     if cond:

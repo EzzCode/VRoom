@@ -99,7 +99,7 @@ def make_sv3d_grid(manifest: dict, debug_dir: Path, cols: int = 7, tile: int = 2
         r, c = divmod(k, cols)
         x0 = c * tile
         y0 = 40 + r * (tile + 30)
-        img = _to_bgr(_imread(fr["sv3d_raw_path"]))
+        img = _to_bgr(_imread(fr["sv3d_path"]))
         if img is not None:
             img = cv2.resize(img, (tile, tile), interpolation=cv2.INTER_AREA)
             canvas[y0:y0 + tile, x0:x0 + tile] = img
@@ -132,7 +132,7 @@ def make_iou_strip(manifest: dict, debug_dir: Path, tile: int = 200, max_rows: i
 
     for r, fr in enumerate(frames):
         y0 = 40 + r * row_h
-        sv3d = _to_bgr(_imread(fr["sv3d_raw_path"]))
+        sv3d = _to_bgr(_imread(fr["sv3d_path"]))
         ref = _to_bgr(_imread(fr["objgs_ref_path"]))
         if sv3d is None or ref is None:
             continue
@@ -275,7 +275,7 @@ def main():
                         help="Reduce num_frames to 14 and resolution to 512 if VRAM-tight.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--reuse_sv3d", action="store_true",
-                        help="Skip diffusion; reload sv3d_raw/*.png from a prior run.")
+                        help="Skip diffusion; reload sv3d/*.png from a prior run.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")

@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 def run_pipeline(
-    *,
     model_path,
     object_label_id,
     halluc_index_path,
@@ -27,10 +26,10 @@ def run_pipeline(
     frame=None,
     iterations=1200,
     lr_scale=1.0,
-    hallucination_weight=1.0,
+    generated_weight=1.0,
     real_weight=1.0,
     rgb_weight=1.0,
-    hallucination_rgb_scale=1.0,
+    generated_rgb_scale=1.0,
     depth_weight=0.1,
     depth_start_iter=100,
     depth_front_weight=1.0,
@@ -41,7 +40,6 @@ def run_pipeline(
     densify_grad_threshold=0.00005,
     densify_extra_ratio=0.08,
     use_cond_cam_up=True,
-    fov_y_deg=50.0,
 ):
     from .dataset_builder import build_supervision_views
 
@@ -69,7 +67,7 @@ def run_pipeline(
     cam_idx = int(halluc.get("conditioning", {}).get("cam_index", -1))
     if not (0 <= cam_idx < len(scope.cameras)):
         raise RuntimeError(
-            f"hallucination_index.json conditioning.cam_index={cam_idx} out of range "
+            f"generation.json conditioning.cam_index={cam_idx} out of range "
             f"(scope has {len(scope.cameras)} cameras). Re-run hallucination."
         )
 
@@ -103,24 +101,21 @@ def run_pipeline(
     seed_points = np.asarray(pcd.points, np.float32)
 
     supervision_views = build_supervision_views(
-        halluc_index_path=halluc_path,
-        extraction_index_path=extraction_index_path,
+        generation_log_path=halluc_path,
+        extraction_path=extraction_index_path,
         scope=scope,
         frame=frame,
-        seed_points_W=seed_points,
+        cloud_points=seed_points,
         real_weight=float(real_weight),
-        hallucination_weight=float(hallucination_weight),
-        fov_y_deg=float(fov_y_deg),
-        resolution=576,
-        real_target_long_edge=576,
+        generated_weight=float(generated_weight),
         up_override=up_override,
     )
     if not supervision_views:
         raise RuntimeError(f"No supervision views produced for obj {obj_id}.")
 
     n_real = sum(1 for v in supervision_views if v.get("source") == "real")
-    n_hall = len(supervision_views) - n_real
-    logger.info("%d supervision views for obj %d (real=%d hall=%d)", len(supervision_views), obj_id, n_real, n_hall)
+    n_generated = len(supervision_views) - n_real
+    logger.info("%d supervision views for obj %d (real=%d generated=%d)", len(supervision_views), obj_id, n_real, n_generated)
 
     n_parent_anchors = int(gaussians._anchor.shape[0]) if gaussians is not None else 0
     n_parent_obj_anchors = 0
@@ -141,7 +136,7 @@ def run_pipeline(
         lr_scale=float(lr_scale),
         colmap_init_target_points=int(colmap_init_target_points),
         rgb_weight=float(rgb_weight),
-        hallucination_rgb_scale=float(hallucination_rgb_scale),
+        generated_rgb_scale=float(generated_rgb_scale),
         depth_weight=float(depth_weight),
         depth_start_iter=int(depth_start_iter),
         depth_front_weight=float(depth_front_weight),
@@ -155,10 +150,10 @@ def run_pipeline(
     summary = dict(result["summary"])
     summary.update({
         "n_real_supervision_views": n_real,
-        "n_hallucinated_supervision_views": n_hall,
+        "n_generated_supervision_views": n_generated,
         "n_parent_anchors": n_parent_anchors,
         "n_parent_obj_anchors": n_parent_obj_anchors,
-        "halluc_index_path": str(halluc_path),
+        "generated_index_path": str(halluc_path),
         "extraction_index_path": str(extraction_index_path),
         "model_path": str(model_path),
     })

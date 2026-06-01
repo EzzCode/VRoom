@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 _VROOM_ROOT = Path(__file__).resolve().parents[2]
 
-_SEED_DEPTH_MIN = 1e-4
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +171,7 @@ def _upsample_from_colmap_neighbors(xyz, colors, *, target_points):
 
 def _project_points(points, cam, mask_shape):
     """Project world points through camera; return (u_int, v_int, valid_bool)."""
+    eps = 1e-4
     R = np.asarray(cam["R"], np.float32)
     T = np.asarray(cam["T"], np.float32).reshape(1, 3)
     K = np.asarray(cam["K"], np.float32)
@@ -190,7 +190,7 @@ def _project_points(points, cam, mask_shape):
 
     ui = np.rint(u).astype(np.int64)
     vi = np.rint(v).astype(np.int64)
-    valid = (z > _SEED_DEPTH_MIN) & (ui >= 0) & (ui < width) & (vi >= 0) & (vi < height)
+    valid = (z > eps) & (ui >= 0) & (ui < width) & (vi >= 0) & (vi < height)
     return ui, vi, valid
 
 

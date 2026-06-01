@@ -11,6 +11,17 @@ from ModuleTBD.utils.sv3d_wrapper import HallucinatedView
 
 logger = logging.getLogger(__name__)
 SV3D_VIEW_COUNT      = 21
+_VROOM_ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_path(path_value, *, manifest_dir):
+    p = Path(path_value)
+    if p.is_absolute():
+        return p
+    for candidate in (manifest_dir / p, Path.cwd() / p, _VROOM_ROOT / p):
+        if candidate.exists():
+            return candidate
+    return _VROOM_ROOT / p
 
 def normalize(vector: np.ndarray):
     eps = 1e-8
@@ -111,7 +122,7 @@ def vote_tracked_object_id(scope, gaussians, pipe_config, tracked_id_map_dir, n_
 
 def load_cache(out_dir, cond_azimuth_deg, cond_elevation_deg):
     out_dir       = Path(out_dir)
-    manifest_path = out_dir / "hallucination_index.json"
+    manifest_path = out_dir / "generation.json"
     if not manifest_path.exists():
         raise FileNotFoundError(f"No cache manifest at {manifest_path}. Re-run without reuse_sv3d=True.")
 
@@ -138,7 +149,7 @@ def load_cache(out_dir, cond_azimuth_deg, cond_elevation_deg):
     views = []
     for entry in sorted(manifest.get("frames", []), key=lambda e: int(e["index"])):
         stem = f"{entry['index']:02d}__az{round(entry['azimuth_deg']):+04d}"
-        path = out_dir / "sv3d_raw" / f"{stem}.png"
+        path = out_dir / "sv3d" / f"{stem}.png"
         if not path.exists():
             raise FileNotFoundError(f"Missing cached frame: {path}. Re-run without reuse_sv3d=True.")
         bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -148,7 +159,6 @@ def load_cache(out_dir, cond_azimuth_deg, cond_elevation_deg):
             rgb=cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB),
             azimuth_deg=float(entry["azimuth_deg"]),
             elevation_deg=float(entry["elevation_deg"]),
-            is_conditioning=bool(entry.get("is_conditioning", False)),
         ))
     if not views:
         raise RuntimeError(f"Manifest at {manifest_path} has no frames.")
