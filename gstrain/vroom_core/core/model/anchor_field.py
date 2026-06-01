@@ -71,7 +71,6 @@ class AnchorCloud(nn.Module):
         self.visibility_mask = torch.empty((0,), dtype=torch.bool, device=self.device)
         self.semantic_manager = semantic_manager
         self.feature_dim = feature_dim
-        self.distances_between_points = self._knn(point_cloud, k=4)
         self.anchors_positions = (
             nn.Parameter(torch.empty((0, 3), dtype=torch.float32, device=self.device)),
         )
@@ -118,9 +117,10 @@ class AnchorCloud(nn.Module):
         """
         Intialize the anchor cloud from the sparse point cloud by quantization
         """
+        distances_between_points = self._knn(point_cloud, k=4)
 
         if self.voxel_size is None:
-            self.voxel_size = estimate_voxel_size(self.distances_between_points)
+            self.voxel_size = estimate_voxel_size(distances_between_points)
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
