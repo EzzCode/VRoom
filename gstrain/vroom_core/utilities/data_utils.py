@@ -124,8 +124,9 @@ class RenderCamera(nn.Module):
     def _load_object_mask(self, resolution):
         source = Path(self.image_path)
         candidates = [
+            Path(str(source).replace("images", "tracked/id_maps")).with_suffix(".png"),
             Path(str(source).replace("images", "object_mask_deva")).with_suffix(".png"),
-            Path(str(source).replace("images_all", "object_mask")).with_suffix(".png"),
+            Path(str(source).replace("images", "object_mask")).with_suffix(".png"),
             Path(str(source).replace("images", "object_mask")).with_suffix(".png"),
         ]
         for candidate in candidates:
@@ -354,12 +355,15 @@ def discover_colmap_scene(
         (base / "sparse/0/images.txt", base / "sparse/0/cameras.txt", False),
         (base / "colmap/images.txt", base / "colmap/cameras_undistorted.txt", False),
     ]
+    point_cloud_candidates = [
+        base / "labeled_output/points3D_labeled.ply",
+    ]
     if "3dovs" in root or "lerf_ovs" in root:
-        point_cloud_candidates = [base / "sparse/0/points3D_deva.ply"]
+        point_cloud_candidates.append(base / "sparse/0/points3D_deva.ply")
     elif "scannet" in root or "mipnerf360" in root:
-        point_cloud_candidates = [base / "points3D.ply"]
+        point_cloud_candidates.append(base / "points3D.ply")
     else:
-        point_cloud_candidates = [base / "sparse/0/points3D.ply"]
+        point_cloud_candidates.append(base / "sparse/0/points3D.ply")
 
     image_file = camera_file = None
     binary = True
@@ -534,10 +538,12 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
 def split_records(
     records: list[FrameRecord], llffhold: int
 ) -> tuple[list[FrameRecord], list[FrameRecord]]:
-    return (
-        [record for record in records if "test" not in record.image_name],
-        [record for record in records if "test" in record.image_name],
-    )
+    train = [record for record in records if "test" not in record.image_name]
+    test = [record for record in records if "test" in record.image_name]
+    if not train and records:
+        train = records
+        test = []
+    return train, test
 
 
 def load_colmap_bundle(
@@ -550,6 +556,11 @@ def load_colmap_bundle(
 ) -> SceneBundle:
     layout = discover_colmap_scene(root, images, depths, masks, add_depth)
     records = read_camera_records(layout)
+    if not records:
+        raise FileNotFoundError(
+            f"No valid camera records could be loaded. Checked image directory: {layout.image_dir}. "
+            f"Please verify that the image files exist and match the filenames in your COLMAP database."
+        )
     train_records, test_records = split_records(records, llffhold)
     return SceneBundle(
         point_cloud=load_point_cloud(str(layout.point_cloud_file)),
