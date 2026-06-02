@@ -8,7 +8,7 @@ import torch.nn as nn
 
 from gstrain.vroom_core.utilities.utils import (
     compute_anchors_scale_and_rotation,
-    estimate_voxel_size,
+    estimate_quantization_size,
     SemanticsManager,
 )
 
@@ -22,7 +22,7 @@ class AnchorCloudData:
     labels: Optional[torch.Tensor]
     semantic_manager: Optional[SemanticsManager]
     gaussians_offsets: torch.Tensor
-    voxel_size: float
+    quantization_size: float
 
 
 class AnchorCloud(nn.Module):
@@ -35,7 +35,7 @@ class AnchorCloud(nn.Module):
         gaussians_per_anchor,
         feature_dim,
         point_cloud=None,
-        voxel_size=None,
+        quantization_size=None,
         density_mode=False,
         semantic_manager=None,
         device="cuda",
@@ -43,7 +43,7 @@ class AnchorCloud(nn.Module):
         super().__init__()
         self.device = device
         self.gaussians_per_anchor = gaussians_per_anchor
-        self.voxel_size = voxel_size
+        self.quantization_size = quantization_size
         self.density_mode = density_mode
         self.visibility_mask = torch.empty((0,), dtype=torch.bool, device=self.device)
         self.semantic_manager = semantic_manager
@@ -102,16 +102,16 @@ class AnchorCloud(nn.Module):
         """
         distances_between_points = self._knn(point_cloud, k=4)
 
-        if self.voxel_size is None:
-            self.voxel_size = estimate_voxel_size(distances_between_points)
+        if self.quantization_size is None:
+            self.quantization_size = estimate_quantization_size(distances_between_points)
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
-            point_cloud, self.voxel_size
+            point_cloud, self.quantization_size
         )  # updates anchors tensor
 
         self.anchors_positions = nn.Parameter(
-            (unique_voxels * self.voxel_size).float()
+            (unique_voxels * self.quantization_size).float()
         )  # quantized points (anchors)
 
         distances_between_anchors = self._knn(self.anchors_positions, k=4)
@@ -125,7 +125,7 @@ class AnchorCloud(nn.Module):
         log_scales, rotations = compute_anchors_scale_and_rotation(
             self.anchors_positions,
             distances_between_anchors,
-            self.voxel_size,
+            self.quantization_size,
             self.device,
         )
         self.anchors_log_scales = nn.Parameter(log_scales)
@@ -162,7 +162,7 @@ class AnchorCloud(nn.Module):
             labels=self.anchor_labels,
             semantic_manager=self.semantic_manager,
             gaussians_offsets=self.gaussians_offsets,
-            voxel_size=self.voxel_size,
+            quantization_size=self.quantization_size,
         )
 
     def _knn(self, point_cloud, k, chunk_size=2048):
@@ -178,11 +178,11 @@ class AnchorCloud(nn.Module):
                 final_distances[i:end] = chunk_distances[:, 1:]
         return final_distances
 
-    def _quantize_cloud(self, point_cloud, voxel_size):
+    def _quantize_cloud(self, point_cloud, quantization_size):
         """
-        Quantize the point cloud based on the voxel size
+        Quantize the point cloud based on the quantization size
         """
-        quantized_grid = (point_cloud / voxel_size).to(torch.int64)
+        quantized_grid = (point_cloud / quantization_size).to(torch.int64)
         # use torch.unique to get the unique voxels and their counts
         unique_voxels, inversed_indices, counts = torch.unique(
             quantized_grid, dim=0, return_counts=True, return_inverse=True
@@ -236,7 +236,7 @@ class AnchorCloud(nn.Module):
         self.visibility_mask = torch.ones(
             self.anchors_positions.shape[0], dtype=torch.bool, device=self.device
         )
-        self.voxel_size = data.voxel_size
+        self.quantization_size = data.quantization_size
 
     def append(
         self,

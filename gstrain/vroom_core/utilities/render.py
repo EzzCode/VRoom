@@ -12,7 +12,7 @@ def render(
     bg_color,
     gaussian_type="3D",
     render_mode="RGB+ED",
-    tile_size_2dgs=8,
+    tile_Size=8,
     semantics=None,
 ):
     xyz = gaussian_positions

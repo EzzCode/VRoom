@@ -18,7 +18,6 @@ from .utilities.gaussian_decoder import GaussianDecoder
 from .utilities.utils import (
     SemanticsManager,
     PointCloudSample,
-    compute_psnr,
     focal_to_fov,
     fov_to_focal,
     pil_image_to_tensor,
@@ -43,7 +42,6 @@ __all__ = [
     "camera_to_json",
     "LossEngine",
     "compute_nerf_normalization",
-    "compute_psnr",
     "ensure_directory",
     "exponential_lr_schedule",
     "focal_to_fov",

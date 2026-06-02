@@ -24,8 +24,8 @@ def _build_dataset_args(model_params: dict, dataset_path: str, run_dir: str):
     return DatasetArgs(
         dataset_path=dataset_path,
         model_path=run_dir,
-        resolution=model_params.get("resolution", -1),
-        resolution_scales=model_params.get("resolution_scales", [1.0]),
+        image_downscale_factor=model_params.get("image_downscale_factor", -1),
+        multiscale_factors=model_params.get("multiscale_factors", [1.0]),
         frames=model_params.get("frames", "images"),
         depths=model_params.get("depths", "depths"),
         masks=model_params.get("masks", "masks"),
@@ -109,12 +109,12 @@ def main():
 
     model_kwargs = model_params.get("model_config", {}).get("kwargs", {})
     anchor_cloud = AnchorCloud(
-        voxel_size=model_kwargs.get("voxel_size", None),
+        quantization_size=model_kwargs.get("quantization_size", None),
         gaussians_per_anchor=model_kwargs.get("gs_per_anchor", 5),
-        feature_dim=model_kwargs.get("feat_dim", 32),
+        feature_dim=model_kwargs.get("feature_dim", 32),
     )
     decoder = GaussianDecoder(
-        feature_dim=model_kwargs.get("feat_dim", 32),
+        feature_dim=model_kwargs.get("feature_dim", 32),
         anchor_cloud=anchor_cloud,
     ).to(anchor_cloud.device)
 
@@ -148,7 +148,7 @@ def main():
         "rendering": {
             "gaussian_type": model_kwargs.get("gaussian_type", "3D"),
             "render_mode": model_kwargs.get("render_mode", "RGB+ED"),
-            "tile_size_2dgs": model_kwargs.get("tile_size_2dgs", 8),
+            "tile_Size": model_kwargs.get("tile_Size", 8),
         },
         "densifier": cfg.get("densifier", {}),
     }

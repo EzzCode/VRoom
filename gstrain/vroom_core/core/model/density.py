@@ -4,12 +4,12 @@ from gstrain.vroom_core.utilities.training import extend_optimizer, prune_optimi
 
 
 class DensifcationController:
-    def __init__(self, voxel_size, anchor_cloud, optimizer, num_gaussians_per_anchor=5):
+    def __init__(self, quantization_size, anchor_cloud, optimizer, num_gaussians_per_anchor=5):
         self.gaussian_gradients_acc = None
         self.gaussian_visits = None
         self.anchor_opacity_acc = None
         self.anchor_visits = None
-        self.voxel_size = voxel_size
+        self.quantization_size = quantization_size
         self.anchor_cloud = anchor_cloud
         self.optimizer = optimizer
         self.num_gaussians_per_anchor = num_gaussians_per_anchor
@@ -152,12 +152,12 @@ class DensifcationController:
         # we are going to do growing for different quantization levels depending on gradient value
         level_2_threshold = gradient_threshold * 2  # level 2 resolution threshold
         level_3_threshold = gradient_threshold * 4  # level 3 resolution threshold
-        quantization_size_L1 = self.voxel_size
-        quantization_size_L2 = self.voxel_size / 4
-        quantization_size_L3 = self.voxel_size / 16
+        quantization_size_L1 = self.quantization_size
+        quantization_size_L2 = self.quantization_size / 4
+        quantization_size_L3 = self.quantization_size / 16
 
         device = self.anchor_cloud.anchors_positions.device
-        feat_dim = self.anchor_cloud.anchor_features.shape[1]
+        feature_dim = self.anchor_cloud.anchor_features.shape[1]
 
         # we do this process for each quantization level
         for level, quantization_size in enumerate(
@@ -263,7 +263,7 @@ class DensifcationController:
             )
 
             anchor_positions = anchors_to_add.float() * quantization_size
-            anchor_feature = torch.zeros(n_new, feat_dim, device=device)
+            anchor_feature = torch.zeros(n_new, feature_dim, device=device)
             anchor_label = (
                 torch.zeros(n_new, dtype=torch.long, device=device)
                 if parent_to_gaussian_labels is not None
@@ -294,12 +294,12 @@ class DensifcationController:
             contributing_features = parent_to_gaussian_features[
                 contributes
             ]  # size is number of gaussians
-            feature_sum = torch.zeros(n_new, feat_dim, device=device)
+            feature_sum = torch.zeros(n_new, feature_dim, device=device)
             feature_count = torch.zeros(n_new, device=device)
             feature_sum.scatter_add_(
                 0,
                 contributing_slot.unsqueeze(1).expand(
-                    -1, feat_dim
+                    -1, feature_dim
                 ),  # anchor ids are the buckets
                 contributing_features,
             )
