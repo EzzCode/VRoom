@@ -19,9 +19,9 @@ class LossEngine:
         luminance_stabilizer,
         contrast_stabilizer,
     ):
-        # because avg_pool2d requires 4D inputs (Num of batches, color Channels, Height, Width)
-        render_4d = render.unsqueeze(0) if render.dim() == 3 else render
-        real_image_4d = real_image.unsqueeze(0) if real_image.dim() == 3 else real_image
+        # because avg_pool2d requires 4D inputs (Num of batches, color channels, height, width)
+        render_4d = render.unsqueeze(0)
+        real_image_4d = real_image.unsqueeze(0)
 
         # Represents the average luminance (mu)
         mean_filter_render = F.avg_pool2d(
@@ -57,7 +57,6 @@ class LossEngine:
         # covariance = E(xy) - mu_x * mu_y
         covariance = real_and_render_avg - mean_product
 
-        # numerator uses 2 * mu_x * mu_y, not 2 * (mu_x^2 * mu_y^2)
         numerator = (2 * mean_product + luminance_stabilizer) * (
             2 * covariance + contrast_stabilizer
         )
