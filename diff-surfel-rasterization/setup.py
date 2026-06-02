@@ -1,34 +1,55 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 from setuptools import setup
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 import os
 os.path.dirname(os.path.abspath(__file__))
 
 setup(
-    name="diff_surfel_rasterization",
-    packages=['diff_surfel_rasterization'],
+    name="custom_differentiable_rasterizer",
+    packages=['cuda_rasterizer'],
     version='0.0.1',
     ext_modules=[
+        # ==========================================
+        # NEW RASTERIZER
+        # ==========================================
         CUDAExtension(
-            name="diff_surfel_rasterization._C",
+            name="cuda_rasterizer._C",
             sources=[
-            "cuda_rasterizer/rasterizer_impl.cu",
-            "cuda_rasterizer/forward.cu",
-            "cuda_rasterizer/backward.cu",
-            "rasterize_points.cu",
-            "ext.cpp"],
-            extra_compile_args={"nvcc": ["-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")]})
-        ],
+                "cuda_rasterizer/src/bindings.cpp",
+                "cuda_rasterizer/src/rasterizer.cu",
+                "cuda_rasterizer/src/orchestrator.cu",
+                "cuda_rasterizer/src/fwd.cu",
+                "cuda_rasterizer/src/bwd.cu",
+            ],
+            extra_compile_args={
+                "nvcc": [
+                    "-O3",
+                    "--use_fast_math",
+                    # Pascal (P100 - Kaggle)
+                    "-gencode=arch=compute_60,code=sm_60",
+                    # Volta (V100 - Colab)
+                    "-gencode=arch=compute_70,code=sm_70",
+                    # Turing (GTX series, RTX 2000 series, T4 - Kaggle)
+                    "-gencode=arch=compute_75,code=sm_75",
+                    # Ampere (RTX 3000 series, A100)
+                    "-gencode=arch=compute_80,code=sm_80",
+                    "-gencode=arch=compute_86,code=sm_86",
+                    # Ada Lovelace (RTX 4000 series)
+                    "-gencode=arch=compute_89,code=sm_89",
+                    # Hopper (H100)
+                    "-gencode=arch=compute_90,code=sm_90",
+                    # Embed PTX for future architectures
+                    "-gencode=arch=compute_90,code=compute_90",
+                    # May help GLM inline more aggressively
+                    "--expt-relaxed-constexpr",
+                    # Inject source lines into Nsight Compute
+                    "-lineinfo",
+                    # Include thrid party libraries (currently GLM)
+                    "-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")
+                ],
+                "cxx": ["-O3"]
+            }
+        )
+    ],
     cmdclass={
         'build_ext': BuildExtension
     }

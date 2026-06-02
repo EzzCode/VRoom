@@ -1,7 +1,7 @@
 import gsplat
 import torch
 from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_2dgs
-from diff_surfel_rasterization import rasterization_2dgs_inria_wrapper
+from cuda_rasterizer import rasterize_2dgs
 
 
 def render(
@@ -58,17 +58,17 @@ def render(
             combined_colors = torch.cat([color, semantics.detach()], dim=-1)
         else:
             combined_colors = color
-
-        (rendered, render_alphas), info = rasterization_2dgs_inria_wrapper(
-            means=xyz,
+        
+        (rendered, render_alphas), info = rasterize_2dgs(
+            points_world_space=xyz,
             quats=rot,
-            scales=scaling,
+            scale_vecs=scaling,
             opacities=opacity.squeeze(-1),
-            colors=combined_colors,
-            viewmats=viewmat[None],
-            Ks=K[None],
-            width=int(viewpoint_camera.image_width),
-            height=int(viewpoint_camera.image_height),
+            colors_feat=combined_colors,
+            w2cam_mats=viewmat[None],
+            cam_intrinsics=K[None],
+            img_W=int(viewpoint_camera.image_width),
+            img_H=int(viewpoint_camera.image_height),
             backgrounds=background_color[None],
             near_plane=0.01,
             far_plane=100.0,
