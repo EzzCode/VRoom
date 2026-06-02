@@ -135,10 +135,10 @@ def run(
 
     # ── Scope & model ─────────────────────────────────────────────────────────
     logger.info("Computing scope and loading model …")
-    scope, frame, pipe_config = compute_object_scope(
+    scope, frame = compute_object_scope(
         str(model_path), obj_id, ply_path=str(resolved_ply)
     )
-    gaussians, _ = load_gaussians(str(model_path), ply_path=str(resolved_ply))
+    gaussians = load_gaussians(str(model_path), ply_path=str(resolved_ply))
 
     # ── Extraction ───────────────────────────────────────────────────────────
     logger.info("\n" + "─" * 80)
@@ -175,7 +175,7 @@ def run(
         if tracked_object_id is None:
             from object_refiner.utils.helpers import vote_tracked_object_id
             tracked_object_id = vote_tracked_object_id(
-                scope, gaussians, pipe_config, resolved_tracked_id_map_dir, tau_alpha=tau_alpha
+                scope, gaussians, resolved_tracked_id_map_dir, tau_alpha=tau_alpha
             )
             if tracked_object_id is None:
                 raise RuntimeError(
@@ -229,7 +229,6 @@ def run(
             scope=scope,
             frame=frame,
             gaussians=gaussians,
-            pipeline_config=pipe_config,
             scores=scores_manifest,
             output_dir=obj_dir / "03_novel_views",
             reuse_sv3d=reuse_sv3d,
@@ -255,7 +254,6 @@ def run(
             output_dir=output_root,
             halluc_manifest=halluc_manifest,
             gaussians=gaussians,
-            pipe_config=pipe_config,
             scope=scope,
             frame=frame,
             config=config,
@@ -277,7 +275,6 @@ def run(
                 frame=frame,
                 gaussians=gaussians,
                 trained_gaussians=training_result.get("_gaussians"),
-                pipe_config=pipe_config,
                 images_dir=images_dir,
                 extraction_manifest=extraction_manifest,
                 scores_manifest=scores_manifest,
@@ -314,7 +311,7 @@ def _parse_args():
     )
     # Required
     p.add_argument("--model_path", required=True,
-                   help="Trained ObjectGS run dir (contains cameras.json, config.yaml)")
+                   help="Trained ObjectGS run dir (contains cameras.json, config.json)")
     p.add_argument("--scene_dir", required=True,
                    help="Scene dir with images/ subdir")
     p.add_argument("--object_id", required=True, type=int)

@@ -8,8 +8,7 @@ from tqdm.auto import tqdm
 
 from object_refiner.utils.gstrain_wrapper import prefilter_anchors as _prefilter
 from object_refiner.utils.gstrain_wrapper import render_rgba as _gstrain_render
-from object_refiner.utils.gstrain_wrapper import build_vroom_gaussians, save_vroom_checkpoint
-from object_refiner.utils.helpers import ssim_loss as _ssim_loss
+from object_refiner.utils.gstrain_wrapper import build_vroom_gaussians, save_vroom_checkpoint, ssim_loss as _ssim_loss
 from gstrain.vroom_core.core.model.density import DensifcationController
 from gstrain.vroom_core.utilities.training import Optimizer as GstrainOptimizer
 
@@ -25,7 +24,6 @@ logger = logging.getLogger(__name__)
 def train_object(
     *,
     built_views,
-    pipeline_config,
     scope,
     object_id,
     model_path,
@@ -84,10 +82,6 @@ def train_object(
             "depth_target": None,
             "depth_valid": None,
         })
-    if isinstance(pipeline_config, dict):
-        pipeline = Namespace(**pipeline_config)
-    else:
-        pipeline = pipeline_config if pipeline_config is not None else Namespace()
 
     # Render parent depth targets
     if depth_weight > 0.0 and parent_gaussians is not None:
@@ -104,7 +98,6 @@ def train_object(
                         pkg = _gstrain_render(
                             parent_gaussians,
                             entry["camera"],
-                            pipeline,
                             bg_white=False,
                             object_label_id=object_id,
                             training=False,
@@ -235,19 +228,11 @@ def train_object(
         rgb_scale = 1.0 if entry["source"] == "real" else generated_rgb_scale
 
         opt_wrapper.step_learning_rate(iteration)
-        if getattr(pipeline, "add_prefilter", True):
-            vis = _prefilter(gaussians, camera)
-        else:
-            vis = torch.ones(
-                gaussians.anchor_cloud.anchors_positions.shape[0],
-                dtype=torch.bool,
-                device="cuda",
-            )
+        vis = _prefilter(gaussians, camera)
 
         pkg = _gstrain_render(
             gaussians,
             camera,
-            pipeline,
             bg_white=True,
             training=True,
             visible_mask=vis,

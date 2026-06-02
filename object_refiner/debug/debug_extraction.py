@@ -120,7 +120,7 @@ def _make_contact_sheet(items, n_cols=4, thumb_h=160):
 # ── orchestrator ──────────────────────────────────────────────────────────────
 
 def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
-                             scope=None, gaussians=None, pipe_config=None,
+                             scope=None, gaussians=None,
                              max_triptychs=20,
                              contact_sheet_size=12):
     images_dir = Path(images_dir)

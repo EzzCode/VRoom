@@ -50,7 +50,6 @@ def generate_all_debug_artifacts(
     frame,
     gaussians=None,
     trained_gaussians=None,
-    pipe_config=None,
     images_dir=None,
     extraction_manifest=None,
     scores_manifest=None,
@@ -74,7 +73,7 @@ def generate_all_debug_artifacts(
         from .debug_scope import generate_debug_artifacts as _scope
         results["scope"] = _scope(
             scope=scope, frame=frame,
-            gaussians=gaussians, pipe_config=pipe_config,
+            gaussians=gaussians,
             debug_dir=debug_root / "scope",
         )
     except Exception as exc:  # noqa: BLE001
@@ -86,7 +85,7 @@ def generate_all_debug_artifacts(
             from .debug_extraction import generate_debug_artifacts as _extr
             results["extraction"] = _extr(
                 manifest=extraction_manifest,
-                scope=scope, gaussians=gaussians, pipe_config=pipe_config,
+                scope=scope, gaussians=gaussians,
                 images_dir=Path(images_dir),
                 debug_dir=debug_root / "extraction",
             )
@@ -125,7 +124,6 @@ def generate_all_debug_artifacts(
                 frame=frame,
                 parent_gaussians=gaussians,
                 trained_gaussians=trained_gaussians,
-                pipe_config=pipe_config,
                 object_id=object_id,
                 halluc_manifest=halluc_manifest,
                 debug_dir=debug_root / "compare",

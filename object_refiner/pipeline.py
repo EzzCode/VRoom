@@ -22,7 +22,6 @@ def run_pipeline(
     output_dir,
     halluc_manifest=None,
     gaussians=None,
-    pipe_config=None,
     scope=None,
     frame=None,
     config = ObjectTrainingConfig(),
@@ -37,11 +36,15 @@ def run_pipeline(
     object_dir = output_dir / f"obj_{object_id}"
     object_dir.mkdir(parents=True, exist_ok=True)
 
-    if scope is None or pipe_config is None:
+    if scope is None or frame is None:
         logger.info("Computing scope for obj %d from %s", object_id, model_path)
-        scope, _, pipe_config = compute_object_scope(model_path, object_id)
+        s, f = compute_object_scope(model_path, object_id)
+        if scope is None:
+            scope = s
+        if frame is None:
+            frame = f
     if gaussians is None:
-        gaussians, _ = load_gaussians(model_path)
+        gaussians = load_gaussians(model_path)
     if frame is None:
         frame = ObjectFrame(centroid=scope.centroid, up=scope.up,
                             base_dir=scope.base_dir, radius=scope.radius)
@@ -101,7 +104,6 @@ def run_pipeline(
     )
     result = train_object(
         built_views=supervision_views,
-        pipeline_config=pipe_config,
         scope=scope,
         object_id=object_id,
         model_path=model_path,

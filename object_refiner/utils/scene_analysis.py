@@ -3,14 +3,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union, Any, cast
 import numpy as np
-import yaml
+from gstrain.vroom_core.config import load_vroom_config
 from object_refiner.utils.transforms import ObjectFrame
 from .gstrain_wrapper import build_vroom_gaussians, load_vroom_checkpoint
 from gstrain.vroom_core.utilities.utils import SemanticsManager
-from .helpers import normalize
 from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
-import logging
+from .helpers import normalize
 import torch
+import logging
 logger = logging.getLogger(__name__)
 
 
@@ -59,19 +59,16 @@ def _load_cameras(cameras_json: Union[str, Path]):
 
 def load_gaussians(model_path: Union[str, Path], ply_path=None):
     model_path = Path(model_path)
-    config_path = model_path / "config.yaml"
+    config_path = model_path / "config.json"
 
-    if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as f:
-            try:
-                config = yaml.load(f, Loader=yaml.FullLoader)
-            except Exception:
-                raise ValueError(f"Error parsing YAML config at {config_path}")
-    else:
-        raise FileNotFoundError(f"Expected config.yaml at {config_path}")
+    if not config_path.exists():
+        raise FileNotFoundError(f"config.json not found at {config_path}")
 
-    model_params = config.get("model_params", {})
-    pipeline_params = config.get("pipeline_params", {})
+    try:
+        _, model_params, optim_params, _ = load_vroom_config(config_path)
+        config = {"optim_params": optim_params}
+    except Exception as e:
+        raise ValueError(f"Error parsing config at {config_path}: {e}")
 
     # model_params: { 'model_config': { 'name': 'GaussianModel', 'kwargs': { ... } } }
     model_config = model_params.get("model_config")
@@ -80,7 +77,7 @@ def load_gaussians(model_path: Union[str, Path], ply_path=None):
 
     kwargs = model_config.get("kwargs", {})
     if kwargs is None:
-        raise ValueError(f"model_config.kwargs is missing in {config_path}")
+        raise ValueError(f"model_config.kwargs is missing in config file")
 
     model_kwargs = {
         k: kwargs.get(k, GAUSSIAN_MODEL_DEFAULTS[k])
@@ -101,11 +98,10 @@ def load_gaussians(model_path: Union[str, Path], ply_path=None):
     model.optim_params = config.get("optim_params", {})
 
     logger.info(
-        "Loaded VRoomGaussians from %s with %d anchors and label IDs: %s",
-        model_path, len(model.anchor_cloud.anchors_positions),
-        sorted(np.unique(model.anchor_cloud.semantic_labels.cpu().numpy()).tolist()),
+        "Loaded Gaussians from %s with %d anchors and %d unique label IDs: %s",
+        model_path, len(model.anchor_cloud.anchors_positions),unique_labels.shape[0],unique_labels.tolist(),
     )
-    return model, pipeline_params
+    return model
 
 
 def count_anchors(cam: dict, points: np.ndarray):
@@ -183,7 +179,7 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
     if not resolved_ply.exists():
         raise FileNotFoundError(f"PLY not found: {resolved_ply}")
 
-    gaussians, pipe_config = load_gaussians(str(model_path), ply_path=str(resolved_ply))
+    gaussians = load_gaussians(str(model_path), ply_path=str(resolved_ply))
     all_anchors = gaussians.anchor_cloud.anchors_positions.detach().cpu().numpy().astype(np.float32)
     label_ids = cast(Any, gaussians.anchor_cloud.semantic_labels).detach().cpu().numpy().reshape(-1).astype(np.int64)
 
@@ -260,7 +256,7 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
         np.round(scope.centroid, 3).tolist(), scope.radius,
         len(scope.visible_cam_indices), len(cameras),
     )
-    return scope,obj_frame, pipe_config
+    return scope, obj_frame
 
 def _build_coordinate_frames(object_scope: ObjectScope):
     """Build coordinate frames for object isolation training."""

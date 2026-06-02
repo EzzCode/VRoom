@@ -13,7 +13,6 @@ from typing import cast, Any
 
 import cv2
 import numpy as np
-import yaml
 
 from gstrain.vroom_core.utilities.utils import PointCloudSample
 
@@ -39,15 +38,21 @@ def _resolve_path(path_value, *, base_dir):
 
 def _read_source_path(model_path):
     model_path = Path(model_path)
-    config_path = model_path / "config.yaml"
-    if not config_path.exists():
+    config_json_path = model_path / "config.json"
+
+    if not config_json_path.exists():
         return None
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.load(f, Loader=yaml.FullLoader) or {}
-    source_path = (cfg.get("model_params") or {}).get("source_path")
-    if not source_path:
-        return None
-    return _resolve_path(source_path, base_dir=model_path)
+
+    from gstrain.vroom_core.config import load_vroom_config
+    try:
+        _, model_params, _, _ = load_vroom_config(config_json_path)
+        source_path = model_params.get("source_path")
+        if source_path:
+            return _resolve_path(source_path, base_dir=model_path)
+    except Exception:
+        pass
+
+    return None
 
 
 def _read_extraction_manifest(extraction_index_path):
@@ -306,7 +311,7 @@ def load_colmap_object_point_cloud(*, model_path, object_id, scope,
     source_path = _read_source_path(model_path)
     if source_path is None:
         raise FileNotFoundError(
-            f"Could not determine source_path from {Path(model_path) / 'config.yaml'}"
+            f"Could not determine source_path from config.json in {model_path}"
         )
 
     ply_path = next(

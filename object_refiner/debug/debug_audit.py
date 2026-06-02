@@ -160,7 +160,7 @@ def _run_projection_audit(obj_dir, model_path, object_id, debug_dir, scope=None,
             resolved_ply = (iter_dirs[-1] / "point_cloud.ply") if iter_dirs else (pc_base / "point_cloud.ply")
         else:
             resolved_ply = Path(ply_path)
-        scope, frame, _ = compute_object_scope(str(model_path), int(object_id), ply_path=str(resolved_ply))
+        scope, frame = compute_object_scope(str(model_path), int(object_id), ply_path=str(resolved_ply))
 
     extraction_index = obj_dir / "01_extraction" / "extraction_index.json"
     generation_index = obj_dir / "03_novel_views" / "generation.json"

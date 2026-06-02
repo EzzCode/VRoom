@@ -230,10 +230,10 @@ def make_topdown_plot(scope, frame, out_path,
 
 # ── AABB overlays ──────────────────────────────────────────────────────────────
 
-def render_aabb_overlays(scope, gaussians, pipe_config, out_dir,
+def render_aabb_overlays(scope, gaussians, out_dir,
                          max_views=6):
     saved = []
-    if gaussians is None or pipe_config is None:
+    if gaussians is None:
         return saved
     indices = list(scope.visible_cam_indices)
     if len(indices) > max_views:
@@ -244,7 +244,7 @@ def render_aabb_overlays(scope, gaussians, pipe_config, out_dir,
         cam = make_camera(cam_p["R"], cam_p["T"], cam_p["K"],
                           cam_p["width"], cam_p["height"])
         try:
-            res = render_rgba(gaussians, cam, pipe_config, bg_white=True,
+            res = render_rgba(gaussians, cam, bg_white=True,
                               object_label_id=scope.object_label_id)
         except Exception:
             continue
@@ -266,14 +266,14 @@ def render_aabb_overlays(scope, gaussians, pipe_config, out_dir,
 # ── orchestrator ──────────────────────────────────────────────────────────────
 
 def generate_debug_artifacts(*, scope, frame, debug_dir,
-                             gaussians=None, pipe_config=None,
+                             gaussians=None,
                              max_aabb_views=6):
     debug_dir = Path(debug_dir)
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     rt = coord_roundtrip_test(frame, debug_dir / "coord_roundtrip.json")
     make_topdown_plot(scope, frame, debug_dir / "topdown.png")
-    overlays = render_aabb_overlays(scope, gaussians, pipe_config,
+    overlays = render_aabb_overlays(scope, gaussians,
                                     debug_dir / "aabb_overlays",
                                     max_views=max_aabb_views)
 
@@ -309,14 +309,14 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
-    scope, frame, pipe_config = compute_object_scope(
+    scope, frame = compute_object_scope(
         args.model_path, args.object_id, ply_path=args.ply_path,
     )
-    gaussians, _ = load_gaussians(args.model_path, ply_path=args.ply_path)
+    gaussians = load_gaussians(args.model_path, ply_path=args.ply_path)
     out_dir = Path(args.output_root) / f"obj_{args.object_id}" / "debug" / "scope"
     generate_debug_artifacts(
         scope=scope, frame=frame, debug_dir=out_dir,
-        gaussians=gaussians, pipe_config=pipe_config,
+        gaussians=gaussians,
         max_aabb_views=args.max_aabb_views,
     )
 

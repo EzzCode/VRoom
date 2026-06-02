@@ -1,15 +1,16 @@
-import logging
-from dataclasses import dataclass, field
-from typing import Optional, Dict
 import numpy as np
 import torch
+import functools
+import torch.nn.functional as F
+from dataclasses import dataclass, field
+from typing import Dict
 
 from gstrain.vroom_core.core.model.anchor_field import AnchorCloud, AnchorCloudData
 from gstrain.vroom_core.utilities.gaussian_decoder import GaussianDecoder
-from gstrain.vroom_core.utilities.utils import CheckpointManager, SemanticsManager
+from gstrain.vroom_core.utilities.utils import CheckpointManager, SemanticsManager, projection_matrix
 from gstrain.vroom_core.utilities.render import apply_frustum_culling as _culling
 from gstrain.vroom_core.utilities.render import render as _render
-from gstrain.vroom_core.utilities.utils import projection_matrix
+from gstrain.vroom_core.core.training.orchestration import prepare_gaussian_space_props
 
 
 class Camera:
@@ -134,20 +135,12 @@ def save_vroom_checkpoint(gaussians: VRoomGaussians, ply_path: str, mlp_dir: str
 
 def prefilter_anchors(gaussians: VRoomGaussians, cam: Camera) -> torch.Tensor:
     """Return a boolean mask (N,) of anchors visible from cam."""
-    try:
-        return _culling(cam, gaussians.anchor_cloud, gaussians.gaussian_type).squeeze()
-    except Exception:
-        return torch.ones(
-            gaussians.anchor_cloud.anchors_positions.shape[0],
-            dtype=torch.bool,
-            device="cuda",
-        )
+    return _culling(cam, gaussians.anchor_cloud, gaussians.gaussian_type).squeeze()
 
 
 def render_rgba(
     gaussians: VRoomGaussians,
     cam: Camera,
-    pipe_config,
     bg_white=True,
     object_label_id=None,
     exclude_label_id=None,
@@ -158,14 +151,7 @@ def render_rgba(
     bg = torch.full((3,), 1.0 if bg_white else 0.0, dtype=torch.float32, device="cuda")
 
     if visible_mask is None:
-        try:
-            visible_mask = _culling(cam, gaussians.anchor_cloud, gaussians.gaussian_type).squeeze()
-        except Exception:
-            visible_mask = torch.ones(
-                gaussians.anchor_cloud.anchors_positions.shape[0],
-                dtype=torch.bool,
-                device="cuda",
-            )
+        visible_mask = _culling(cam, gaussians.anchor_cloud, gaussians.gaussian_type).squeeze()
 
     # Combine with label/object mask if requested
     object_mask = None
@@ -187,7 +173,6 @@ def render_rgba(
     )
 
     # Prepare positions and rotations
-    from gstrain.vroom_core.core.training.orchestration import prepare_gaussian_space_props
     gaussian_positions, normalized_rotations = prepare_gaussian_space_props(
         anchor_cloud=gaussians.anchor_cloud,
         visible_anchors_mask=visible_mask,
@@ -231,3 +216,31 @@ def render_rgba(
             })
     return return_pkg
 
+
+def ssim_loss(prediction: torch.Tensor, target: torch.Tensor, window_size: int = 11) -> torch.Tensor:
+    @functools.lru_cache(maxsize=4)
+    def kernel(size: int, channels: int, device_str: str, dtype):
+        dist = torch.distributions.Normal(loc=size // 2, scale=1.5)
+        coords = torch.arange(size, dtype=torch.float32)
+        weights = dist.log_prob(coords).exp()
+        weights = weights / weights.sum()
+        kernel2d = weights[:, None] @ weights[None, :]
+        return kernel2d.unsqueeze(0).unsqueeze(0).expand(channels, 1, size, size).contiguous().to(device=device_str, dtype=dtype)
+
+    if prediction.dim() == 3:
+        prediction = prediction.unsqueeze(0)
+        target = target.unsqueeze(0)
+    prediction = prediction.clamp(0.0, 1.0)
+    target = target.clamp(0.0, 1.0)
+    channels = prediction.shape[1]
+    padding = window_size // 2
+    window = kernel(window_size, channels, str(prediction.device), prediction.dtype)
+    mu_a = F.conv2d(prediction, window, padding=padding, groups=channels)
+    mu_b = F.conv2d(target, window, padding=padding, groups=channels)
+    sigma_a = F.conv2d(prediction * prediction, window, padding=padding, groups=channels) - mu_a.pow(2)
+    sigma_b = F.conv2d(target * target, window, padding=padding, groups=channels) - mu_b.pow(2)
+    sigma_ab = F.conv2d(prediction * target, window, padding=padding, groups=channels) - (mu_a * mu_b)
+    c1, c2 = 0.01 ** 2, 0.03 ** 2
+    numerator = (2.0 * mu_a * mu_b + c1) * (2.0 * sigma_ab + c2)
+    denominator = (mu_a.pow(2) + mu_b.pow(2) + c1) * (sigma_a + sigma_b + c2)
+    return 1.0 - (numerator / denominator).mean()

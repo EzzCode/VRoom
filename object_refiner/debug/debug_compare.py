@@ -56,13 +56,13 @@ def _orbit_cameras(scope, frame, halluc_manifest=None, n_views=8, width=512, hei
     return cameras
 
 
-def _render_rgb(gaussians, pipe_config, camera_spec, object_label_id=None):
+def _render_rgb(gaussians, camera_spec, object_label_id=None):
     cam = make_camera(
         camera_spec["R"], camera_spec["T"], camera_spec["K"],
         camera_spec["width"], camera_spec["height"], uid=int(camera_spec["index"]),
     )
     result = render_rgba(
-        gaussians, cam, pipe_config,
+        gaussians, cam,
         bg_white=True,
         object_label_id=object_label_id,
         training=False,
@@ -77,14 +77,13 @@ def generate_debug_artifacts(
     frame,
     parent_gaussians,
     trained_gaussians,
-    pipe_config,
     object_id,
     debug_dir,
     halluc_manifest=None,
     n_views=8,
 ):
-    if parent_gaussians is None or trained_gaussians is None or pipe_config is None:
-        return {"skipped": True, "reason": "missing parent/trained gaussians or pipe_config"}
+    if parent_gaussians is None or trained_gaussians is None:
+        return {"skipped": True, "reason": "missing parent or trained gaussians"}
 
     debug_dir = Path(debug_dir)
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -92,8 +91,8 @@ def generate_debug_artifacts(
     files = []
 
     for camera in cameras:
-        before = _render_rgb(parent_gaussians, pipe_config, camera, object_label_id=int(object_id))
-        after = _render_rgb(trained_gaussians, pipe_config, camera)
+        before = _render_rgb(parent_gaussians, camera, object_label_id=int(object_id))
+        after = _render_rgb(trained_gaussians, camera)
         separator = np.full((before.shape[0], 6, 3), 255, np.uint8)
         compare = np.hstack([before, separator, after])
 
@@ -165,8 +164,8 @@ def main():
         raise SystemExit("--obj_dir or --output_root is required.")
 
     resolved_ply = _resolve_ply(args.model_path, args.ply_path)
-    scope, frame, pipe_config = compute_object_scope(args.model_path, int(args.object_id), ply_path=str(resolved_ply))
-    parent_gaussians, _ = load_gaussians(args.model_path, ply_path=str(resolved_ply))
+    scope, frame = compute_object_scope(args.model_path, int(args.object_id), ply_path=str(resolved_ply))
+    parent_gaussians = load_gaussians(args.model_path, ply_path=str(resolved_ply))
     trained_gaussians = _load_trained_gaussians(parent_gaussians, obj_dir / "06_model")
     hallucination_index = obj_dir / "03_novel_views" / "generation.json"
     halluc_manifest = None
@@ -179,7 +178,6 @@ def main():
         frame=frame,
         parent_gaussians=parent_gaussians,
         trained_gaussians=trained_gaussians,
-        pipe_config=pipe_config,
         object_id=int(args.object_id),
         halluc_manifest=halluc_manifest,
         debug_dir=obj_dir / "debug" / "compare",

@@ -88,7 +88,7 @@ def _alpha_mask(rgb):
 
 
 
-def _reference_alpha(scope, frame: ObjectFrame, gaussians, pipeline_config, az_deg, el_deg, resolution, up=None):
+def _reference_alpha(scope, frame: ObjectFrame, gaussians, az_deg, el_deg, resolution, up=None):
     
     fov_y = math.radians(FOV_Y_DEG)
     fy = 0.5 * resolution / math.tan(0.5 * fov_y)
@@ -102,7 +102,7 @@ def _reference_alpha(scope, frame: ObjectFrame, gaussians, pipeline_config, az_d
         R, T = look_at(C, scope.centroid, up)
 
     cam = make_camera(R, T, K, resolution, resolution)
-    render = render_rgba(gaussians, cam, pipeline_config, bg_white=True, object_label_id=scope.object_label_id)
+    render = render_rgba(gaussians, cam, bg_white=True, object_label_id=scope.object_label_id)
 
     rgb   = (render["rgb"].detach().clamp(0.0, 1.0).permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
     alpha = render["alpha"].detach().cpu().numpy()
@@ -113,7 +113,7 @@ def _reference_alpha(scope, frame: ObjectFrame, gaussians, pipeline_config, az_d
     return alpha
 
 
-def run_generation(scope: ObjectScope, frame: ObjectFrame, gaussians, pipeline_config, scores, output_dir, reuse_sv3d=False):
+def run_generation(scope: ObjectScope, frame: ObjectFrame, gaussians, scores, output_dir, reuse_sv3d=False):
     output_dir    = Path(output_dir)
     generated_dir = output_dir / "generated"
     sv3d_dir  = output_dir / "sv3d"
@@ -175,7 +175,7 @@ def run_generation(scope: ObjectScope, frame: ObjectFrame, gaussians, pipeline_c
     n_views = len(views)
     n_kept = 0
     for i, view in enumerate(views):
-        ref_alpha = _reference_alpha(scope, frame, gaussians, pipeline_config, view.azimuth_deg, view.elevation_deg, resolution, top_cam_up)
+        ref_alpha = _reference_alpha(scope, frame, gaussians, view.azimuth_deg, view.elevation_deg, resolution, top_cam_up)
 
         mask_ref = ref_alpha > ALPHA_THRESH
         mask_sv3d = _alpha_mask(view.rgb)
