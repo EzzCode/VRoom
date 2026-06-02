@@ -7,12 +7,7 @@ name = "vroom"
 version = "0.1.0"
 requires-python = ">=3.8"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Map top-level import names whose folder names are not valid Python identifiers.
-# "Module1" → "module1", "Module2" → "module2", etc.
-# ──────────────────────────────────────────────────────────────────────────────
-[tool.setuptools.package-dir]
-"module1"          = "Module1"
+
 
 
 # Explicit list of every importable package (folder with __init__.py).
@@ -31,12 +26,20 @@ packages = [
     "gstrain.vroom_core.utilities.training",
     "gstrain.vroom_core.utilities.utils",
 
-    # Module1  →  import module1 ...
-    "module1",
+    # masks_and_tracking  →  import masks_and_tracking ...
+    "masks_and_tracking",
 
-    # object_isolation  →  import object_isolation ...
-    "object_isolation",
-    "object_isolation.core",
-    "object_isolation.core.diffusion_priors",
-    "object_isolation.debug",
+    # object_refiner  →  import object_refiner ...
+    "object_refiner",
+    "object_refiner.utils",
+    "object_refiner.debug",
+]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]
+search_path = [
+    "D:\\conda_envs\\objectgs\\Lib\\site-packages",
 ]

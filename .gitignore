@@ -64,6 +64,8 @@ wandb/
 events.out.tfevents.*
 
 # ─── Python ───────────────────────────────────────────────────────────────────
+\data
+\models
 
 # Python
 __pycache__/
