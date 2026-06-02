@@ -5,10 +5,6 @@
         "dataset_path": "datasets/3dovs/bed",
         "frames": "images",
         "masks": "masks",
-        "resolution": -1,
-        "resolution_scales": [
-            1.0
-        ],
         "dataset_storage_device": "cpu",
         "eval": true,
         "pc_downsampling_ratio": 1,
@@ -20,17 +16,18 @@
             0.0,
             0.0
         ],
-        "camera_scale": 1.0
+        "image_downscale_factor": -1,
+        "multiscale_factors": [
+            1.0
+        ]
     },
     "model": {
         "name": "Neural_Gaussians_Model",
         "gaussian_type": "2D",
-        "feat_dim": 32,
-        "view_dim": 3,
         "gs_per_anchor": 10,
-        "voxel_size": 0.001,
-        "render_mode": "RGB+ED",
-        "tile_size_2dgs": 8
+        "feature_dim": 32,
+        "quantization_size": 0.001,
+        "tile_Size": 8
     },
     "pipeline": {
         "save_iterations": [

@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import struct
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -57,6 +57,8 @@ class RenderCamera(nn.Module):
         data_format: str = "colmap",
         scene_translation: np.ndarray | None = None,
         scene_scale: float = 1.0,
+        args: Optional[Any] = None,
+        alias_merge_map: Optional[dict[int, int]] = None,
     ) -> None:
         super().__init__()
         self.uid = record.uid
@@ -73,6 +75,8 @@ class RenderCamera(nn.Module):
         self.data_device = torch.device(data_device)
         self.znear = 0.01
         self.zfar = 100.0
+        self.args = args
+        self.alias_merge_map = alias_merge_map
 
         rgba = pil_image_to_tensor(record.image, resolution).to(self.data_device)
         self.original_image = rgba[:3].clamp(0.0, 1.0)
@@ -128,11 +132,22 @@ class RenderCamera(nn.Module):
             Path(str(source).replace("images_all", "object_mask")).with_suffix(".png"),
             Path(str(source).replace("images", "object_mask")).with_suffix(".png"),
         ]
+        if self.args is not None:
+            frames_dir = getattr(self.args, "frames", "images")
+            masks_dir = getattr(self.args, "masks", "masks")
+            candidate = Path(str(source).replace(f"/{frames_dir}/", f"/{masks_dir}/")).with_suffix(".png")
+            candidates.insert(0, candidate)
+            candidate2 = Path(str(source).replace(frames_dir, masks_dir)).with_suffix(".png")
+            candidates.insert(0, candidate2)
+
         for candidate in candidates:
             if candidate == source or not candidate.exists():
                 continue
             image = Image.open(candidate).convert("L")
             array = np.array(image.resize(resolution), dtype=np.uint8, copy=True)
+            if self.alias_merge_map is not None:
+                for src_val, dst_val in self.alias_merge_map.items():
+                    array[array == src_val] = dst_val
             return torch.from_numpy(array)
         return torch.zeros((resolution[1], resolution[0]), dtype=torch.uint8)
 
@@ -342,6 +357,19 @@ class SceneBundle:
     ply_path: str
 
 
+def load_points3D_bin_helper(path: Path) -> dict:
+    points = {}
+    with open(path, "rb") as f:
+        (n,) = struct.unpack("<Q", f.read(8))
+        for _ in range(n):
+            blob = struct.unpack("<QdddBBBd", f.read(43))
+            pid, xyz, rgb = blob[0], blob[1:4], blob[4:7]
+            (tlen,) = struct.unpack("<Q", f.read(8))
+            f.seek(8 * tlen, 1)  # Skip 2D-3D tracks
+            points[pid] = (np.array(xyz), np.array(rgb, dtype=np.uint8))
+    return points
+
+
 def discover_colmap_scene(
     root: str, images: str, depths: str, masks: str, add_mask: bool, add_depth: bool
 ) -> SceneLayout:
@@ -354,12 +382,15 @@ def discover_colmap_scene(
         (base / "sparse/0/images.txt", base / "sparse/0/cameras.txt", False),
         (base / "colmap/images.txt", base / "colmap/cameras_undistorted.txt", False),
     ]
+    point_cloud_candidates = []
     if "3dovs" in root or "lerf_ovs" in root:
-        point_cloud_candidates = [base / "sparse/0/points3D_deva.ply"]
+        point_cloud_candidates.append(base / "sparse/0/points3D_deva.ply")
     elif "scannet" in root or "mipnerf360" in root:
-        point_cloud_candidates = [base / "points3D.ply"]
-    else:
-        point_cloud_candidates = [base / "sparse/0/points3D.ply"]
+        point_cloud_candidates.append(base / "points3D.ply")
+    point_cloud_candidates.extend([
+        base / "labeled_output/points3D_labeled.ply",
+        base / "sparse/0/points3D.ply",
+    ])
 
     image_file = camera_file = None
     binary = True
@@ -377,7 +408,20 @@ def discover_colmap_scene(
         (candidate for candidate in point_cloud_candidates if candidate.exists()), None
     )
     if point_cloud_file is None:
-        raise FileNotFoundError(f"No supported point cloud file found under {root}")
+        bin_candidate = base / "sparse/0/points3D.bin"
+        if bin_candidate.exists():
+            ply_path = base / "sparse/0/points3D.ply"
+            try:
+                pts_dict = load_points3D_bin_helper(bin_candidate)
+                xyz = np.array([v[0] for v in pts_dict.values()], dtype=np.float32)
+                rgb = np.array([v[1] for v in pts_dict.values()], dtype=np.float32) / 255.0
+                labels = np.zeros(len(xyz), dtype=np.uint8)
+                write_point_cloud(str(ply_path), xyz, rgb, labels)
+                point_cloud_file = ply_path
+            except Exception as e:
+                raise FileNotFoundError(f"Failed to auto-convert points3D.bin to points3D.ply: {e}")
+        else:
+            raise FileNotFoundError(f"No supported point cloud file (ply or bin) found under {root}")
     depth_param_file = None
     return SceneLayout(
         root=base,
@@ -567,20 +611,20 @@ def load_colmap_bundle(
     )
 
 
-def build_camera(record: FrameRecord, uid: int, resolution_scale, args):
+def build_camera(record: FrameRecord, uid: int, resolution_scale, args, alias_merge_map=None):
     original_width, original_height = record.image.size
-    if args.resolution in [1, 2, 4, 8]:
+    if args.image_downscale_factor in [1, 2, 4, 8]:
         resolution = (
-            round(original_width / (resolution_scale * args.resolution)),
-            round(original_height / (resolution_scale * args.resolution)),
+            round(original_width / (resolution_scale * args.image_downscale_factor)),
+            round(original_height / (resolution_scale * args.image_downscale_factor)),
         )
     else:
-        if args.resolution == -1 and original_width > 1600:
+        if args.image_downscale_factor == -1 and original_width > 1600:
             downsample = original_width / 1600
-        elif args.resolution == -1:
+        elif args.image_downscale_factor == -1:
             downsample = 1.0
         else:
-            downsample = original_width / args.resolution
+            downsample = original_width / args.image_downscale_factor
         scale = float(downsample) * float(resolution_scale)
         resolution = (int(original_width / scale), int(original_height / scale))
     return RenderCamera(
@@ -607,12 +651,14 @@ def build_camera(record: FrameRecord, uid: int, resolution_scale, args):
         data_format=args.data_format,
         scene_translation=np.asarray(args.camera_center, dtype=np.float32),
         scene_scale=float(args.camera_scale),
+        args=args,
+        alias_merge_map=alias_merge_map,
     )
 
 
-def build_camera_list(records, resolution_scale, args):
+def build_camera_list(records, resolution_scale, args, alias_merge_map=None):
     return [
-        build_camera(record, index, resolution_scale, args)
+        build_camera(record, index, resolution_scale, args, alias_merge_map)
         for index, record in enumerate(records)
     ]
 
@@ -645,7 +691,7 @@ class TrainingScene:
         weed_ratio=0.0,
     ):
         self.model_path = args.model_path
-        self.resolution_scales = args.resolution_scales
+        self.multiscale_factors = args.multiscale_factors
         self.anchor_cloud = anchor_cloud
         self.decoder = decoder
         self.weed_ratio = weed_ratio
@@ -675,6 +721,24 @@ class TrainingScene:
         self.train_cameras = {}
         self.test_cameras = {}
 
+        self.alias_merge_map = None
+        merge_map_candidates = [
+            os.path.join(args.dataset_path, "labeled_output", "alias_merge_map.json"),
+            os.path.join(args.dataset_path, "alias_merge_map.json"),
+        ]
+        for candidate in merge_map_candidates:
+            if os.path.exists(candidate):
+                try:
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        raw_map = json.load(f)
+                        self.alias_merge_map = {int(k): int(v) for k, v in raw_map.items()}
+                    if logger:
+                        logger.info(f"Loaded alias merge map from {candidate} with {len(self.alias_merge_map)} entries.")
+                    break
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"Failed to load alias merge map from {candidate}: {e}")
+
         if load_iteration:
             checkpoints = CheckpointManager(self.anchor_cloud, self.decoder)
             iteration_dir = os.path.join(
@@ -694,7 +758,7 @@ class TrainingScene:
                 semantic_manager=None
                 if payload["labels"] is None
                 else SemanticsManager(torch.unique(payload["labels"].view(-1))),
-                voxel_size=float(torch.exp(payload["log_scaling"][:, :3]).mean().item())
+                quantization_size=float(torch.exp(payload["log_scaling"][:, :3]).mean().item())
                 if payload["log_scaling"].numel() > 0
                 else 1.0,
             )
@@ -721,12 +785,12 @@ class TrainingScene:
 
             self.anchor_cloud.initialize_anchors(sampled)
 
-        for scale in self.resolution_scales:
+        for scale in self.multiscale_factors:
             self.train_cameras[scale] = build_camera_list(
-                bundle.train_records, scale, args
+                bundle.train_records, scale, args, self.alias_merge_map
             )
             self.test_cameras[scale] = build_camera_list(
-                bundle.test_records, scale, args
+                bundle.test_records, scale, args, self.alias_merge_map
             )
 
     def _background_from_args(self, args):
@@ -751,12 +815,12 @@ class TrainingScene:
 
     def getTrainCameras(self):
         cameras = []
-        for scale in self.resolution_scales:
+        for scale in self.multiscale_factors:
             cameras.extend(self.train_cameras[scale])
         return cameras
 
     def getTestCameras(self):
         cameras = []
-        for scale in self.resolution_scales:
+        for scale in self.multiscale_factors:
             cameras.extend(self.test_cameras[scale])
         return cameras

@@ -123,11 +123,13 @@ def projection_matrix(
 def compute_anchors_scale_and_rotation(
     anchors_positions: torch.Tensor,
     distances: torch.Tensor,
-    voxel_size: float,
+    quantization_size: float,
     device: torch.device | str = "cuda",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute scale and rotation for anchors based on distances and voxel size"""
-    area_of_effect = distances[:, 1:].mean(dim=-1).clamp(min=max(voxel_size, 1e-6))
+    """Compute scale and rotation for anchors based on distances and quantization size"""
+    area_of_effect = (
+        distances[:, 1:].mean(dim=-1).clamp(min=max(quantization_size, 1e-6))
+    )
     log_scaling = torch.log(area_of_effect.sqrt()).unsqueeze(-1).repeat(1, 6)
     rotations = torch.zeros(
         (anchors_positions.shape[0], 4),
@@ -136,15 +138,6 @@ def compute_anchors_scale_and_rotation(
     )
     rotations[:, 0] = 1.0  # identity quaternion
     return log_scaling, rotations
-
-
-def estimate_voxel_size(knn_distances: torch.Tensor, min_size: float = 1e-6) -> float:
-    """
-    Estimates a voxel size for a uniform grid using knn distances
-    """
-    voxel_size = torch.median(knn_distances[:, 1:]).item()
-    print(f"voxel size calculated = {voxel_size}")
-    return max(voxel_size, min_size)
 
 
 def calc_volumetric_loss(scales: torch.Tensor, volume_lambda: float) -> torch.Tensor:
@@ -239,19 +232,18 @@ class CheckpointManager:
         path: str,
         gaussian_type: str = "3D",
         render_mode: str = "RGB+ED",
-        tile_size_2dgs: int = 8,
+        tile_Size: int = 8,
     ) -> None:
         ensure_directory(path)
         self.decoder.eval()
-        feat_dim = self.decoder.feature_dim
-        view_dim = 3
+        feature_dim = self.decoder.feature_dim
         appearance_dim = 0
 
         opacity_mlp = self.decoder.opacity_network
         covariance_mlp = self.decoder.covariance_network
         color_mlp = self.decoder.color_network
 
-        input_dim = feat_dim + view_dim
+        input_dim = feature_dim + 3
 
         torch.jit.trace(opacity_mlp, torch.rand(1, input_dim, device=self.device)).save(
             os.path.join(path, "opacity_mlp.pt")
@@ -267,12 +259,11 @@ class CheckpointManager:
         torch.save(
             {
                 "n_offsets": self.decoder.number_gaussians_per_anchor,
-                "feat_dim": feat_dim,
-                "view_dim": view_dim,
+                "feature_dim": feature_dim,
                 "appearance_dim": appearance_dim,
                 "gs_attr": gaussian_type,
                 "render_mode": render_mode,
-                "tile_size_2dgs": tile_size_2dgs,
+                "tile_Size": tile_Size,
             },
             os.path.join(path, "vroom_bundle.pt"),
         )
@@ -310,17 +301,16 @@ class CheckpointManager:
         first_color_weight = next(
             param for name, param in color_params.items() if name.endswith("weight")
         )
-        feat_dim = temp["feature"].shape[1]
-        view_dim = first_opacity_weight.shape[1] - feat_dim
-        appearance_dim = first_color_weight.shape[1] - feat_dim - view_dim
+        feature_dim = temp["feature"].shape[1]
+        implicit_view_dim = first_opacity_weight.shape[1] - feature_dim
+        appearance_dim = first_color_weight.shape[1] - feature_dim - implicit_view_dim
         return {
             "n_offsets": int(last_opacity_weight.shape[0]),
-            "feat_dim": int(feat_dim),
-            "view_dim": int(view_dim),
+            "feature_dim": int(feature_dim),
             "appearance_dim": int(appearance_dim),
             "gs_attr": "3D",
             "render_mode": "RGB+ED",
-            "tile_size_2dgs": 8,
+            "tile_Size": 8,
         }
 
     def _stack_prefixed(self, element, prefix: str) -> np.ndarray:

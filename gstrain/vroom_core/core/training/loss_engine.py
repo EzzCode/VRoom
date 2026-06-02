@@ -75,9 +75,14 @@ class LossEngine:
         )
 
     def compute_total_losses(
-        self, render_pkg, viewpoint_cam, anchor_cloud, optimizer_configs, iteration
+        self,
+        rasterizer_output,
+        viewpoint_cam,
+        anchor_cloud,
+        optimizer_configs,
+        iteration,
     ):
-        render = render_pkg["render"]
+        render = rasterizer_output["render"]
         real_image = viewpoint_cam.original_image.to(render.device)
 
         mask = getattr(viewpoint_cam, "object_mask", None)
@@ -86,9 +91,9 @@ class LossEngine:
         else:
             mask = mask.to(render.device)
 
-        model_guess = render_pkg.get("render_semantics")
+        model_guess = rasterizer_output.get("render_semantics")
 
-        scales = render_pkg["scaling"]
+        scales = rasterizer_output["scaling"]
         ssim_weight = getattr(optimizer_configs, "ssim_weight")
         semantic_loss_weight = getattr(optimizer_configs, "semantic_loss_weight")
         volume_reg_weight = getattr(optimizer_configs, "volume_reg_weight")

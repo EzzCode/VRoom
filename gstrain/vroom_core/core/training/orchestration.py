@@ -57,9 +57,8 @@ class TrainingOrchestrator:
         self.anchor_cloud = self.optmizer_configs["anchor_cloud"]
         self.decoder = self.optmizer_configs["decoder"]
         self.gaussian_type = self.rendering_configs.get("gaussian_type", "2D")
-        self.render_mode = self.rendering_configs.get("render_mode", "RGB+ED")
-        self.tile_size_2dgs = self.rendering_configs.get("tile_size_2dgs")
-        self.bg_color = self.pipeline_configs.get("bg_color")
+        self.tile_Size = self.rendering_configs.get("tile_Size")
+        self.background_color = self.pipeline_configs.get("background_color")
         self.dataloader = scene.getTrainCameras()
         self.visualization_interval = self.pipeline_configs.get(
             "visualization_interval", 500
@@ -73,7 +72,7 @@ class TrainingOrchestrator:
         self.CheckPointManager = CheckpointManager(self.anchor_cloud, self.decoder)
 
         self.densifier = DensifcationController(
-            voxel_size=self.anchor_cloud.voxel_size,
+            quantization_size=self.anchor_cloud.quantization_size,
             anchor_cloud=self.anchor_cloud,
             optimizer=None,
             num_gaussians_per_anchor=self.decoder.number_gaussians_per_anchor,
@@ -128,10 +127,9 @@ class TrainingOrchestrator:
             decoded_output=decoded_output,
             gaussian_positions=gaussian_positions,
             normalized_rotations=normalized_rotations,
-            bg_color=self.bg_color,
+            background_color=self.background_color,
             gaussian_type=self.gaussian_type,
-            render_mode=self.render_mode,
-            tile_size_2dgs=self.tile_size_2dgs,
+            tile_Size=self.tile_Size,
             semantics=semantics_pred,
         )
         rasterizer_output["visible_anchors_mask"] = visible_anchors_mask
@@ -140,7 +138,7 @@ class TrainingOrchestrator:
         ]
         loss_engine = LossEngine(self.anchor_cloud.semantic_manager)
         losses = loss_engine.compute_total_losses(
-            render_pkg=rasterizer_output,
+            rasterizer_output=rasterizer_output,
             viewpoint_cam=camera_view,
             anchor_cloud=self.anchor_cloud,
             optimizer_configs=self.optmizer_configs["args"],
@@ -234,8 +232,8 @@ class TrainingOrchestrator:
                     covariance_network=self.covariance_network,
                     color_network=self.color_network,
                     gaussian_type=self.gaussian_type,
-                    render_mode=self.render_mode,
-                    tile_size_2dgs=self.tile_size_2dgs,
+                    render_mode="RGB+ED",
+                    tile_Size=self.tile_Size,
                 )
 
             del step_output

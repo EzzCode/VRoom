@@ -255,7 +255,7 @@ def save_checkpoint(
     color_network,
     gaussian_type,
     render_mode,
-    tile_size_2dgs,
+    tile_Size,
 ):
     """
     Saves a checkpoint for a given iteration.
@@ -271,7 +271,7 @@ def save_checkpoint(
         path=iter_dir,
         gaussian_type=gaussian_type,
         render_mode=render_mode,
-        tile_size_2dgs=tile_size_2dgs,
+        tile_Size=tile_Size,
     )
     torch.save(
         state_snapshot(
@@ -300,7 +300,6 @@ def update_progress_bar(
 ) -> None:
     """Updates the postfix metrics on the tqdm progress bar."""
     total_loss = step_output["total_loss"]
-    psnr = step_output["psnr"]
     progress_bar.set_postfix(
-        {"Loss": f"{total_loss:.4f}", "PSNR": f"{psnr:.2f}", "Anchors": num_anchors}
+        {"Loss": f"{total_loss:.4f}", "Anchors": num_anchors}
     )
