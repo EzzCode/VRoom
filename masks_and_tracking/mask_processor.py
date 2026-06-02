@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-from sam_inference import SAM3TextSegmenter
+from masks_and_tracking.sam_inference import SAM3TextSegmenter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,7 +84,7 @@ def filter_background_masks(
 
 	img_area = float(h * w)
 	areas = stack.reshape(n, -1).sum(axis=1).astype(np.float32)
-	area_ok = (areas / max(1.0, img_area)) <= float(max_area_ratio)
+	area_ok = (areas / max(1.0, img_area)) <= max_area_ratio
 
 	border_len = float((w * 2) + (h * 2) - 4)
 	top_hits = stack[:, 0, :].sum(axis=1)
@@ -96,7 +96,7 @@ def filter_background_masks(
 		left_hits = np.zeros(n, dtype=np.int64)
 		right_hits = np.zeros(n, dtype=np.int64)
 	border_ratio = (top_hits + bottom_hits + left_hits + right_hits) / max(1.0, border_len)
-	border_ok = border_ratio <= float(border_touch_threshold)
+	border_ok = border_ratio <= border_touch_threshold
 
 	keep = area_ok & border_ok
 	idx = np.flatnonzero(keep)
@@ -182,13 +182,15 @@ def merge_by_proximity(
 			for j in range(i + 1, len(merged)):
 				if used[j]:
 					continue
-				if boxes[i] is None or boxes[j] is None:
+				box_i = boxes[i]
+				box_j = boxes[j]
+				if box_i is None or box_j is None:
 					continue
-				gap = _bbox_gap_px(boxes[i], boxes[j])
+				gap = _bbox_gap_px(box_i, box_j)
 				if gap > float(gap_px):
 					continue
 				color_dist = np.linalg.norm(means[i] - means[j]) / hsv_norm
-				if color_dist > float(color_thresh):
+				if color_dist > color_thresh:
 					continue
 
 				base = np.logical_or(base, merged[j])
@@ -217,7 +219,7 @@ def split_disconnected(masks: List[np.ndarray], min_component_area: int = 1) -> 
 			continue
 		for label in range(1, num_labels):
 			comp = labels == label
-			if int(comp.sum()) >= int(min_component_area):
+			if int(comp.sum()) >= min_component_area:
 				out.append(comp)
 
 	return out
@@ -270,7 +272,7 @@ def generate_colors(n: int) -> List[Tuple[int, int, int]]:
 	for i in range(n):
 		hue = int(180 * i / max(n, 1))
 		color = cv2.cvtColor(np.array([[[hue, 200, 255]]], dtype=np.uint8), cv2.COLOR_HSV2BGR)[0][0]
-		colors.append(tuple(int(c) for c in color))
+		colors.append((int(color[0]), int(color[1]), int(color[2])))
 	return colors
 
 
@@ -367,7 +369,7 @@ if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="VRoom SAM3 Text-Prompt Mask Processor")
 	parser.add_argument("--input_dir", required=True, help="Path to input images directory")
 	parser.add_argument("--output_dir", required=True, help="Path to save masks and visualizations")
-	parser.add_argument("--sam_ckpt", default="Module1/models/sam3.pt", help="Ultralytics SAM3 checkpoint name or .pt path")
+	parser.add_argument("--sam_ckpt", default="masks_and_tracking/models/sam3.pt", help="Ultralytics SAM3 checkpoint name or .pt path")
 	parser.add_argument("--device", default="cuda", help="Device ('cuda' or 'cpu')")
 	parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
 	parser.add_argument("--text_prompts", nargs="+", default=["desk", "table", "chair", "couch", "sofa", "cabinet"], help="Open-vocabulary text prompts")

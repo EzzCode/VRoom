@@ -1,14 +1,13 @@
 """
-Module1 End-to-End Runner
+masks_and_tracking End-to-End Runner
 
-This entrypoint coordinates the four-stage processing pipeline:
-1) COLMAP reconstruction
-2) SAM3 mask generation + postprocessing
-3) multi-object tracking from NPZ masks
-4) 3D voting/projection
+This entrypoint coordinates the three-stage processing pipeline:
+1) SAM3 mask generation + postprocessing
+2) multi-object tracking from NPZ masks
+3) 3D voting/projection
 
 Usage:
-    python module1_runner.py --data_path /path/to/scene_folder
+    python -m masks_and_tracking.runner --data_path /path/to/scene_folder
 """
 
 import argparse
@@ -48,22 +47,16 @@ def build_paths(data_path):
 
 def main():
     """Parse CLI arguments, build stage commands, and execute pipeline."""
-    parser = argparse.ArgumentParser(description="Run the full Module1 pipeline")
+    parser = argparse.ArgumentParser(description="Run the masks_and_tracking pipeline")
     parser.add_argument("--data_path", required=True, help="Scene folder containing images/")
 
     parser.add_argument("--dry_run", action="store_true", help="Print commands without executing")
-    parser.add_argument("--force_colmap", action="store_true", help="Pass --force to colmap_runner.py")
-    parser.add_argument("--skip_colmap", action="store_true", help="Skip COLMAP step")
     parser.add_argument("--skip_masks", action="store_true", help="Skip mask_processor step")
     parser.add_argument("--skip_tracking", action="store_true", help="Skip object_tracker step")
     parser.add_argument("--skip_voting", action="store_true", help="Skip vote step")
 
-    # COLMAP
-    parser.add_argument("--camera_model", default="OPENCV", choices=["PINHOLE", "OPENCV", "SIMPLE_RADIAL", "RADIAL"])
-    parser.add_argument("--matcher_type", default="sequential", choices=["exhaustive", "sequential", "spatial"])
-
     # Mask generation
-    parser.add_argument("--sam_ckpt", default="Module1/models/sam3.pt", help="SAM3 checkpoint (e.g., sam3.pt, sam3_b.pt)")
+    parser.add_argument("--sam_ckpt", default="masks_and_tracking/models/sam3.pt", help="SAM3 checkpoint (e.g., sam3.pt, sam3_b.pt)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
     parser.add_argument("--text_prompts", nargs="+", default=["chair", "table", "sofa", "bed", "desk", "cabinet"])
@@ -111,18 +104,7 @@ def main():
 
     py = sys.executable
 
-    # ── Stage 1: COLMAP ──
-    if not args.skip_colmap:
-        colmap_cmd = [
-            py,
-            str(script_dir / "colmap_runner.py"),
-            "--data_path", str(data_path),
-            "--camera_model", args.camera_model,
-            "--matcher_type", args.matcher_type,
-        ]
-        if args.force_colmap:
-            colmap_cmd.append("--force")
-        run_step("COLMAP Reconstruction", colmap_cmd, dry_run=args.dry_run)
+    # COLMAP step has been separated into the 'sfm' module.
 
     # ── Stage 2: Mask Generation ──
     if not args.skip_masks:

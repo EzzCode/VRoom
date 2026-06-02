@@ -13,6 +13,7 @@ import math
 from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from typing import Optional, Union, Tuple
 
 # ── OpenCV Constants ─────────────────────────────────────────────────────────
 COLOR_BGR2GRAY = 6
@@ -56,7 +57,7 @@ class KalmanFilter:
         self.statePre = np.zeros((dynamParams, 1), dtype=np.float32)
         self.errorCovPre = np.eye(dynamParams, dtype=np.float32)
 
-    def predict(self, control: np.ndarray = None) -> np.ndarray:
+    def predict(self, control: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Predicts the next state of the system.
         Formula:
@@ -108,7 +109,7 @@ class KalmanFilter:
 
 # ── Image I/O from Scratch ────────────────────────────────────────────────────
 
-def imread(path: str, flags: int = None) -> np.ndarray:
+def imread(path: str, flags: Optional[int] = None) -> np.ndarray:
     """
     Read an image from disk using PIL and convert it to a standard NumPy array.
     BGR format is returned to match OpenCV's standard.
@@ -342,7 +343,7 @@ def goodFeaturesToTrack(
     qualityLevel: float,
     minDistance: float,
     blockSize: int
-) -> np.ndarray:
+) -> Optional[np.ndarray]:
     """
     Shi-Tomasi Corner Detector implemented completely from scratch.
     Optimized: Employs separable 1D horizontal and 1D vertical box filtering.
@@ -492,10 +493,10 @@ def calcOpticalFlowPyrLK(
     prev_gray: np.ndarray,
     curr_gray: np.ndarray,
     p0: np.ndarray,
-    p1_ignored: np.ndarray,
+    p1_ignored: Optional[np.ndarray],
     winSize: tuple = (21, 21),
     maxLevel: int = 3,
-    criteria: tuple = None
+    criteria: Optional[tuple] = None
 ) -> tuple:
     """
     Fully Vectorized Pyramidal Lucas-Kanade Sparse Optical Flow from scratch.
@@ -655,7 +656,7 @@ def calcOpticalFlowPyrLK(
 def estimateAffinePartial2D(
     from_pts: np.ndarray,
     to_pts: np.ndarray,
-    method: int = None,
+    method: Optional[int] = None,
     ransacReprojThreshold: float = 3.0,
     max_iters: int = 200
 ) -> tuple:
@@ -862,7 +863,7 @@ def putText(
     fontScale: float,
     color: tuple,
     thickness: int = 1,
-    lineType: int = None
+    lineType: Optional[int] = None
 ) -> None:
     """
     Draws text overlay on BGR NumPy canvas using Pillow (ImageDraw).

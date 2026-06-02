@@ -7,12 +7,7 @@ name = "vroom"
 version = "0.1.0"
 requires-python = ">=3.9"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Map top-level import names whose folder names are not valid Python identifiers.
-# "Module1" → "module1", "Module2" → "module2", etc.
-# ──────────────────────────────────────────────────────────────────────────────
-[tool.setuptools.package-dir]
-"module1"          = "Module1"
+
 
 
 # Explicit list of every importable package (folder with __init__.py).
@@ -30,8 +25,8 @@ packages = [
     "gstrain.vroom_core.utils",
     "gstrain.vroom_core.viewer",
 
-    # Module1  →  import module1 ...
-    "module1",
+    # masks_and_tracking  →  import masks_and_tracking ...
+    "masks_and_tracking",
 
     # object_refiner  →  import object_refiner ...
     "object_refiner",

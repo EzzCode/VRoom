@@ -47,7 +47,7 @@ def find_image(images_dir, img_name):
 def find_tracked_id_map(tracked_id_map_dir, img_name):
     """Return the per-frame tracked id-map file for `img_name`, or None.
 
-    The tracked id-map is produced by Module1's object_tracker — a single-channel
+    The tracked id-map is produced by masks_and_tracking's object_tracker — a single-channel
     PNG where each pixel value is the instance label assigned by the tracker.
     Distinct from raw SAM output, which is a stack of per-mask binary arrays
     with no temporal consistency.

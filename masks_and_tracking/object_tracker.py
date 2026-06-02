@@ -25,10 +25,14 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-try:
-	from . import opencv_scratch
-except ImportError:
-	import opencv_scratch
+import typing
+if typing.TYPE_CHECKING:
+	from masks_and_tracking import opencv_scratch
+else:
+	try:
+		from . import opencv_scratch
+	except ImportError:
+		import opencv_scratch
 
 cv = opencv_scratch
 
@@ -110,7 +114,7 @@ def box_iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
 	union = areaA + areaB - inter
 	
 	# Return IoU = intersection / union
-	return 0.0 if union <= 0.0 else float(inter / union)
+	return 0.0 if union <= 0.0 else inter / union
 
 
 def extract_lbp_hist(gray, mask):
@@ -273,7 +277,7 @@ def estimate_camera_motion(prev_bgr, curr_bgr, curr_masks, max_corners=1200):
 	# Invert the foreground mask to get the background mask (bg)
 	bg = cv.bitwise_not(fg)
 	# If not enough background pixels, return identity
-	if int(np.count_nonzero(bg)) < 200:
+	if np.count_nonzero(bg) < 200:
 		return identity_affine()
 
 	# Detect good features to track in the background regions of the previous frame
@@ -889,7 +893,7 @@ def run_pipeline(args):
 
 	meta_path = output_dir / "id_map_meta.json"
 	with open(meta_path, "w", encoding="utf-8") as f:
-		json.dump({"format": "png", "bit_depth": 16, "dtype": "uint16", "background_id": 0, "id_range": [0, int(np.iinfo(np.uint16).max)]}, f, indent=2)
+		json.dump({"format": "png", "bit_depth": 16, "dtype": "uint16", "background_id": 0, "id_range": [0, np.iinfo(np.uint16).max]}, f, indent=2)
 
 	state = {"tracks": {}, "next_id": 1, "prev_bgr": None, "graveyard": {}, "frame_history": []}
 	image_paths = sorted([p for p in input_dir.iterdir() if p.suffix.lower() in [".png", ".jpg", ".jpeg"]])

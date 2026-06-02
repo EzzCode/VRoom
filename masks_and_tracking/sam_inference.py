@@ -67,7 +67,7 @@ class SAM3TextSegmenter:
         self.checkpoint = checkpoint
         self.device = device
         self.text_prompts = text_prompts or ["furniture"]
-        self.min_mask_area = int(min_mask_area)
+        self.min_mask_area = min_mask_area
         self.semantic_predictor = self._load_model()
 
     def _load_model(self):

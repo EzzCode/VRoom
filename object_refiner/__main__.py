@@ -171,7 +171,7 @@ def run(
             )
 
         # TODO(label-alignment): replace this entire block with `tracked_object_id = object_label_id`
-        #   once Module1 and ObjectGS share the same label namespace; delete vote_tracked_object_id() too.
+        #   once masks_and_tracking and ObjectGS share the same label namespace; delete vote_tracked_object_id() too.
         if tracked_object_id is None:
             from object_refiner.utils.helpers import vote_tracked_object_id
             tracked_object_id = vote_tracked_object_id(
@@ -332,7 +332,7 @@ def _parse_args():
     p.add_argument("--tau_alpha", type=float, default=0.4)
     p.add_argument("--tracked_id_map_dir", default="auto",
                    help="'auto', 'none', or path to the per-frame tracked id-map directory "
-                        "(Module1 object_tracker output, e.g. <scene>/tracked/id_maps)")
+                        "(masks_and_tracking object_tracker output, e.g. <scene>/tracked/id_maps)")
     p.add_argument("--tracked_object_id", type=int, default=None,
                    help="Instance label from the tracked id-maps (same integer label that "
                         "vote.py writes into the labeled COLMAP PLY); auto-voted if omitted")

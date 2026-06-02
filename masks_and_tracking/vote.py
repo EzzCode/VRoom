@@ -22,10 +22,23 @@ from collections import Counter, defaultdict
 from plyfile import PlyData, PlyElement
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from colmap_loader import (
-    read_intrinsics_binary, read_extrinsics_binary,
-    read_intrinsics_text, read_extrinsics_text,
-)
+import typing
+if typing.TYPE_CHECKING:
+    from sfm.colmap_loader import (
+        read_intrinsics_binary, read_extrinsics_binary,
+        read_intrinsics_text, read_extrinsics_text,
+    )
+else:
+    try:
+        from sfm.colmap_loader import (
+            read_intrinsics_binary, read_extrinsics_binary,
+            read_intrinsics_text, read_extrinsics_text,
+        )
+    except ImportError:
+        from colmap_loader import (
+            read_intrinsics_binary, read_extrinsics_binary,
+            read_intrinsics_text, read_extrinsics_text,
+        )
 
 
 ##### COLMAP points3D reader (preserves track data for corr voting) ###########

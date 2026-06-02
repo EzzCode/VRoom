@@ -36,8 +36,14 @@ def stream_command(cmd, desc, total=None, pattern=None, log_file=None):
     
     pbar = tqdm(total=total, desc=desc, unit="img", leave=True, dynamic_ncols=True)
     
+    last_val = None
+    last_colmap = None
+    
     try:
-        for line in process.stdout:
+        stdout = process.stdout
+        if stdout is None:
+            raise RuntimeError("Subprocess stdout was not captured")
+        for line in stdout:
             if log_handle:
                 log_handle.write(line)
                 log_handle.flush()
@@ -48,14 +54,14 @@ def stream_command(cmd, desc, total=None, pattern=None, log_file=None):
                 if match:
                     try:
                         current = int(match.group(1))
-                        if hasattr(pbar, 'last_val'):
-                            diff = current - pbar.last_val
+                        if last_val is not None:
+                            diff = current - last_val
                             if diff > 0:
                                 pbar.update(diff)
-                                pbar.last_val = current
+                                last_val = current
                         else:
                             pbar.update(current)
-                            pbar.last_val = current
+                            last_val = current
                     except (ValueError, IndexError):
                         pass
             
@@ -66,14 +72,14 @@ def stream_command(cmd, desc, total=None, pattern=None, log_file=None):
                 if pbar.total != tot:
                     pbar.total = tot
                     pbar.refresh()
-                if hasattr(pbar, 'last_colmap'):
-                    diff = curr - pbar.last_colmap
+                if last_colmap is not None:
+                    diff = curr - last_colmap
                     if diff > 0:
                         pbar.update(diff)
-                        pbar.last_colmap = curr
+                        last_colmap = curr
                 else:
                     pbar.update(curr)
-                    pbar.last_colmap = curr
+                    last_colmap = curr
 
             # Mandatory flush to ensure the tqdm bar actually moves in the parent terminal
             pbar.refresh()
@@ -122,39 +128,38 @@ def main():
 
     # STEP 1: COLMAP
     print("\n[1/3] STAGE: Structure-from-Motion (COLMAP)")
-    colmap_runner = workspace_root / "Module1" / "colmap_runner.py"
+    colmap_runner = workspace_root / "sfm" / "colmap_runner.py"
     stream_command(py_u + [str(colmap_runner), "--data_path", str(data_path)], "SfM Matching", total=total_images)
 
     # STEP 2: SAM3 & Tracking
     print("\n[2/3] STAGE: Semantic Tracking (SAM3 + Tracker)")
-    module1_runner = workspace_root / "Module1" / "module1_runner.py"
-    module1_log_path = data_path / "module1_runner.log"
-    with open(module1_log_path, "w", encoding="utf-8") as f:
-        f.write(f"Module 1 runner logs for dataset: {data_path}\n")
+    masks_and_tracking_log_path = data_path / "masks_and_tracking_runner.log"
+    with open(masks_and_tracking_log_path, "w", encoding="utf-8") as f:
+        f.write(f"Masks and Tracking runner logs for dataset: {data_path}\n")
         f.write(f"Run started at: {datetime.now().isoformat(timespec='seconds')}\n")
-    print(f" Module 1 logs: {module1_log_path}")
+    print(f" Masks and Tracking logs: {masks_and_tracking_log_path}")
     
     stream_command(
-        py_u + [str(module1_runner), "--data_path", str(data_path), "--skip_colmap", "--skip_tracking", "--skip_voting"],
+        py_u + ["-m", "masks_and_tracking.runner", "--data_path", str(data_path), "--skip_tracking", "--skip_voting"],
         "SAM3 Masking",
         total=total_images,
         pattern=r"Frame (\d+)",
-        log_file=module1_log_path
+        log_file=masks_and_tracking_log_path
     )
     
     stream_command(
-        py_u + [str(module1_runner), "--data_path", str(data_path), "--skip_colmap", "--skip_masks", "--skip_voting"],
+        py_u + ["-m", "masks_and_tracking.runner", "--data_path", str(data_path), "--skip_masks", "--skip_voting"],
         "Object Tracking",
         total=total_images,
         pattern=r"Frame (\d+)",
-        log_file=module1_log_path
+        log_file=masks_and_tracking_log_path
     )
 
     stream_command(
-        py_u + [str(module1_runner), "--data_path", str(data_path), "--skip_colmap", "--skip_masks", "--skip_tracking"],
+        py_u + ["-m", "masks_and_tracking.runner", "--data_path", str(data_path), "--skip_masks", "--skip_tracking"],
         "3D Voting",
         total=None,
-        log_file=module1_log_path
+        log_file=masks_and_tracking_log_path
     )
 
     # DYNAMIC CONFIG GENERATION
