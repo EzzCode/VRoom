@@ -9,7 +9,7 @@ SUBDIR ?= baseline
 PROFILE_DIR ?= diff-surfel-rasterization/profiling/$(DATASET)/$(SUBDIR)
 
 clean:
-	cd ./diff-surfel-rasterization && rm -rf build diff_surfel_rasterization.egg-info/
+	cd ./diff-surfel-rasterization && rm -rf build *.egg-info/
 
 build:
 	cd ./diff-surfel-rasterization && CC=gcc-11 CXX=g++-11 pip install -e . 2>&1 | tee build.log

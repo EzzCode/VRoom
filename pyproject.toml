@@ -44,3 +44,8 @@ packages = [
     "object_isolation.core.diffusion_priors",
     "object_isolation.debug",
 ]
+
+[tool.pyrefly]
+project-includes = ["**/*.py*", "**/*.ipynb"]
+project-excludes = ["**/build/**", "**/__pycache__/**", "**/*.so"]
+conda-environment = "gs_env"
