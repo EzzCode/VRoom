@@ -106,7 +106,6 @@ class AnchorCloud(nn.Module):
         Intialize the anchor cloud from the sparse point cloud by quantization
         """
         distances_between_points = self._knn(point_cloud, k=4)
-        distances_between_anchors = self._knn(self.anchors_positions, k=4)
 
         if self.voxel_size is None:
             self.voxel_size = self.estimate_voxel_size(distances_between_points)
@@ -126,6 +125,8 @@ class AnchorCloud(nn.Module):
         )
 
         print(f"Number of Anchors generated {self.anchors_positions.shape[0]} ")
+
+        distances_between_anchors = self._knn(self.anchors_positions, k=4)
 
         # set scale for each anchor
         log_scales = compute_anchors_scale(
