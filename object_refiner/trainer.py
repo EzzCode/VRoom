@@ -6,11 +6,77 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from gstrain.gaussian_renderer.render import prefilter_voxel as _prefilter
-from gstrain.gaussian_renderer.render import render as _gstrain_render
-from gstrain.vroom_core.models.facade import GaussianModel
-from gstrain.vroom_core.training.loss_engine import ssim_loss as _ssim_loss
-from gstrain.vroom_core.training.orchestration import TrainingConfig, PipelineConfig
+from dataclasses import dataclass, field as dc_field
+from typing import List, Optional
+from object_refiner.utils.gstrain_wrapper import prefilter_anchors as _prefilter
+from object_refiner.utils.gstrain_wrapper import render_rgba as _gstrain_render
+from object_refiner.utils.gstrain_bridge import VRoomModel as GaussianModel
+from object_refiner.utils.helpers import ssim_loss as _ssim_loss
+
+@dataclass
+class TrainingConfig:
+    iterations: int = 30_000
+    lambda_dssim: float = 0.2
+    lambda_dreg: float = 0.01
+    lambda_object_loss: float = 0.1
+    lambda_zero_penalty: float = 0.01
+    lambda_sky_opa: float = 0.0
+    lambda_opacity_entropy: float = 0.0
+    lambda_normal: float = 0.0
+    lambda_dist: float = 0.0
+    start_depth: int = 15_000
+    depth_l1_weight_init: float = 1.0
+    depth_l1_weight_final: float = 0.1
+    start_stat: int = 500
+    update_from: int = 1_500
+    update_until: int = 25_000
+    update_interval: int = 100
+    densify_grad_threshold: float = 0.0002
+    min_opacity: float = 0.005
+    success_threshold: float = 0.8
+    densification: bool = True
+    position_lr_init: float = 0.0
+    position_lr_final: float = 0.0
+    position_lr_max_steps: int = 30_000
+    position_lr_delay_mult: float = 0.01
+    offset_lr_init: float = 0.0
+    offset_lr_final: float = 0.0
+    offset_lr_max_steps: int = 30_000
+    offset_lr_delay_mult: float = 0.01
+    feature_lr: float = 0.0
+    scaling_lr: float = 0.0
+    rotation_lr: float = 0.0
+    mlp_opacity_lr_init: float = 0.0
+    mlp_opacity_lr_final: float = 0.0
+    mlp_opacity_lr_max_steps: int = 30_000
+    mlp_opacity_lr_delay_mult: float = 0.01
+    mlp_cov_lr: float = 0.0
+    mlp_cov_lr_init: float = 0.0
+    mlp_cov_lr_final: float = 0.0
+    mlp_cov_lr_max_steps: int = 30_000
+    mlp_cov_lr_delay_mult: float = 0.01
+    mlp_color_lr_init: float = 0.0
+    mlp_color_lr_final: float = 0.0
+    mlp_color_lr_max_steps: int = 30_000
+    mlp_color_lr_delay_mult: float = 0.01
+    appearance_lr_init: float = 0.05
+    appearance_lr_final: float = 0.0005
+    appearance_lr_delay_mult: float = 0.01
+    appearance_lr_max_steps: int = 30_000
+    normal_start_iter: int = 7_000
+    dist_start_iter: int = 3_000
+    grad_clip_norm: Optional[float] = None
+
+@dataclass
+class PipelineConfig:
+    add_prefilter: bool = True
+    no_prefilter_step: int = 1000
+    vis_step: int = 1000
+    shuffle: bool = True
+    weed_ratio: float = 0.0
+    save_explicit: bool = False
+    save_vis: bool = True
+    save_iterations: List[int] = dc_field(default_factory=lambda: [7000, 20000, 25000, 30000])
 
 from .utils.gstrain_wrapper import make_camera
 from .utils.colmap_init import load_colmap_object_point_cloud
@@ -98,14 +164,18 @@ def train_object(
 
                     parent_gaussians.set_anchor_mask(entry["camera"].camera_center, entry["camera"].resolution_scale)
                     try:
-                        vis = _prefilter(entry["camera"], parent_gaussians).squeeze()
+                        vis = _prefilter(parent_gaussians, entry["camera"])
                     except Exception:
                         vis = parent_gaussians._anchor_mask
 
                     pkg = _gstrain_render(
-                        entry["camera"], parent_gaussians, pipeline,
-                        torch.zeros(3, device="cuda"), visible_mask=vis,
-                        training=False, object_mask=obj_mask
+                        parent_gaussians,
+                        entry["camera"],
+                        pipeline,
+                        bg_white=False,
+                        object_label_id=object_id,
+                        training=False,
+                        visible_mask=vis,
                     )
 
                     depth = pkg.get("render_depth")
@@ -216,9 +286,16 @@ def train_object(
 
         gaussians.update_learning_rate(iteration)
         gaussians.set_anchor_mask(camera.camera_center, camera.resolution_scale)
-        vis = _prefilter(camera, gaussians).squeeze() if getattr(pipeline, "add_prefilter", True) else gaussians._anchor_mask
+        vis = _prefilter(gaussians, camera) if getattr(pipeline, "add_prefilter", True) else gaussians._anchor_mask
 
-        pkg = _gstrain_render(camera, gaussians, pipeline, background, visible_mask=vis, training=True)
+        pkg = _gstrain_render(
+            gaussians,
+            camera,
+            pipeline,
+            bg_white=True,
+            training=True,
+            visible_mask=vis,
+        )
         pred = torch.clamp(pkg["render"], 0.0, 1.0)
         
         # Inline conversion of alpha tensor

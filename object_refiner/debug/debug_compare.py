@@ -121,7 +121,7 @@ def generate_debug_artifacts(
 
 
 def _load_trained_gaussians(parent_gaussians, model_dir):
-    from gstrain.vroom_core.models.facade import GaussianModel
+    from object_refiner.utils.gstrain_bridge import VRoomModel as GaussianModel
     from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
 
     model_dir = Path(model_dir)

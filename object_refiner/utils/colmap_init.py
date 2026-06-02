@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 import yaml
 
-from gstrain.vroom_core.utils.geometry import PointCloudSample
+from gstrain.vroom_core.utilities.utils import PointCloudSample
 
 logger = logging.getLogger(__name__)
 

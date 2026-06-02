@@ -2,6 +2,7 @@ import json
 import logging
 from pathlib import Path
 import cv2
+import torch
 import numpy as np
 import re
 
@@ -164,3 +165,35 @@ def load_cache(out_dir, cond_azimuth_deg, cond_elevation_deg):
         raise RuntimeError(f"Manifest at {manifest_path} has no frames.")
     logger.info("Cache reuse: loaded %d frames from %s.", len(views), manifest_path)
     return views
+
+
+import functools
+import torch.nn.functional as F
+
+def ssim_loss(prediction: torch.Tensor, target: torch.Tensor, window_size: int = 11) -> torch.Tensor:
+    @functools.lru_cache(maxsize=4)
+    def kernel(size: int, channels: int, device_str: str, dtype):
+        dist = torch.distributions.Normal(loc=size // 2, scale=1.5)
+        coords = torch.arange(size, dtype=torch.float32)
+        weights = dist.log_prob(coords).exp()
+        weights = weights / weights.sum()
+        kernel2d = weights[:, None] @ weights[None, :]
+        return kernel2d.unsqueeze(0).unsqueeze(0).expand(channels, 1, size, size).contiguous().to(device=device_str, dtype=dtype)
+
+    if prediction.dim() == 3:
+        prediction = prediction.unsqueeze(0)
+        target = target.unsqueeze(0)
+    prediction = prediction.clamp(0.0, 1.0)
+    target = target.clamp(0.0, 1.0)
+    channels = prediction.shape[1]
+    padding = window_size // 2
+    window = kernel(window_size, channels, str(prediction.device), prediction.dtype)
+    mu_a = F.conv2d(prediction, window, padding=padding, groups=channels)
+    mu_b = F.conv2d(target, window, padding=padding, groups=channels)
+    sigma_a = F.conv2d(prediction * prediction, window, padding=padding, groups=channels) - mu_a.pow(2)
+    sigma_b = F.conv2d(target * target, window, padding=padding, groups=channels) - mu_b.pow(2)
+    sigma_ab = F.conv2d(prediction * target, window, padding=padding, groups=channels) - (mu_a * mu_b)
+    c1, c2 = 0.01 ** 2, 0.03 ** 2
+    numerator = (2.0 * mu_a * mu_b + c1) * (2.0 * sigma_ab + c2)
+    denominator = (mu_a.pow(2) + mu_b.pow(2) + c1) * (sigma_a + sigma_b + c2)
+    return 1.0 - (numerator / denominator).mean()

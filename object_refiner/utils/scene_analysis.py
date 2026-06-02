@@ -5,8 +5,7 @@ from typing import Union, Any, cast
 import numpy as np
 import yaml
 from object_refiner.utils.transforms import ObjectFrame
-from gstrain.vroom_core.core.model.facade import GaussianModel
-from gstrain.vroom_core.core.model.semantics import SemanticCodec
+from .gstrain_bridge import VRoomModel as GaussianModel, SemanticCodec
 from .helpers import normalize
 from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
 import logging
