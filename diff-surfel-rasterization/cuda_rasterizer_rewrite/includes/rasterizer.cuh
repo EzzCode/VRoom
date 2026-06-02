@@ -17,15 +17,15 @@
 // 8. sorted_surfel_indices: [n_isects] int32 - sorted surfel indices (saved for backward)
 // ================ Image intermediates ================
 // 9. tile_ranges: [grid_size, 2] int32 - Per-tile [start, end) surfel index ranges
-// 10. contrib_state: [2 * img_H * img_W] int32 - Indices of the last contributing surfel and median depth surfel per pixel
-// 11. transmittance_and_moments: [3 * img_H * img_W] float32 - Final transmittance, first & second moments of depth per pixel
+// 10. contrib_state: [2 , img_H , img_W] int32 - Indices of the last contributing surfel and median depth surfel per pixel
+// 11. transmittance_and_moments: [3 , img_H , img_W] float32 - Final transmittance, first & second moments of depth per pixel
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 rasterize_surfels_fwd(
     const torch::Tensor &points_world_space, // [P, 3] float32  - All points (surfels) in world space
-    const torch::Tensor &scale_vecs,         // [P, 2] float32  - Scale vectors
+    const torch::Tensor &scale_vecs,         // [P, 2] float32  - Scale vectors (world-space scales)
     const float glob_scale_mod,              // Scalar          - Global scale modifier
-    const torch::Tensor &quats,              // [P, 4] float32  - Quaternions
+    const torch::Tensor &quats,              // [P, 4] float32  - Quaternions (world-space rotations)
     const torch::Tensor &opacities,          // [P, 1] float32  - surfel opacities
     const torch::Tensor &w2cam_mat,          // [4, 4] float32  - World to Cam space matrix
     const torch::Tensor &w2clip_mat,         // [4, 4] float32  - World to Clip space matrix
@@ -49,8 +49,8 @@ torch::Tensor rasterize_surfels_fwd_subsequent(
     const torch::Tensor &sorted_surfel_indices, // [n_isects] int32
     const torch::Tensor &tile_ranges,           // [grid_size, 2] int32  (grid_size = ceil(W/16) * ceil(H/16))
     // Re-used output buffers (saves memory)
-    const torch::Tensor &contrib_state,             // [2 * img_H * img_W] int32
-    const torch::Tensor &transmittance_and_moments, // [3 * img_H * img_W] float32
+    const torch::Tensor &contrib_state,             // [2 , img_H , img_W] int32
+    const torch::Tensor &transmittance_and_moments, // [3 , img_H , img_W] float32
     const torch::Tensor &rendered_aux,              // [7, img_H, img_W] float32
     const bool debug = false                        // Scalar
 );
@@ -88,8 +88,8 @@ rasterize_surfels_bwd(
     const torch::Tensor &sorted_surfel_indices, // [n_isects] int32
     // Image buffers
     const torch::Tensor &tile_ranges,               // [grid_size, 2] int32
-    const torch::Tensor &contrib_state,             // [2 * img_H * img_W] int32
-    const torch::Tensor &transmittance_and_moments, // [3 * img_H * img_W] float32
+    const torch::Tensor &contrib_state,             // [2 , img_H , img_W] int32
+    const torch::Tensor &transmittance_and_moments, // [3 , img_H , img_W] float32
     // Input gradients from PyTorch
     const torch::Tensor &grad_rendered_color_feat, // [C, H, W] float32 - Pytorch rendered pixel's gradients (image rendering loss)
     const torch::Tensor &grad_rendered_aux,        // [7, H, W] float32 - Pytorch rendered aux outputs gradients

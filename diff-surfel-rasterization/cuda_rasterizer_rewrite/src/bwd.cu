@@ -10,6 +10,7 @@ namespace cg = cooperative_groups;
 template <uint8_t CHANNELS>
 __global__ void __launch_bounds__(BLOCK_SIZE)
     render_kernel_bwd(
+        // __restrict__ tells the compiler that no two pointers alias the same memory.
         const int img_W, const int img_H,      // Image width and height
         const float *__restrict__ colors_feat, // Concatenation of colors and features per surfel
         const float *__restrict__ background,  // Background values
@@ -94,23 +95,28 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
     int last_contributor_idx = contrib_state[pixel_idx]; // (1-based)
 
     // Track accumulated colors+features behind the current
-    // processed surfel and the immediate previous colors+features
+    // processed surfel
     float residual_color_feat_acc[CHANNELS] = {0};
-    float prev_color_feat[CHANNELS] = {0};
 
     // Track previous surfel's alpha
     float prev_alpha = 0;
 
     // Fetch pytorch-computed pixel gradient and precompute background dot product
-    float grad_pixel_color_feat[CHANNELS];
+    __shared__ float grad_pixel_color_feat[BLOCK_SIZE][CHANNELS];
     float bg_dot_pixel_grad = 0.f;
 
     if (valid_pixel)
     {
         for (int ch = 0; ch < CHANNELS; ch++)
         {
-            grad_pixel_color_feat[ch] = grad_rendered_color_feat[pixel_idx + ch * img_H * img_W];
-            bg_dot_pixel_grad += background[ch] * grad_pixel_color_feat[ch];
+            grad_pixel_color_feat[thread_block_ids.thread_rank()][ch] = grad_rendered_color_feat[pixel_idx +
+                                                                                                 ch * img_H * img_W];
+            // Fused Multiply-Add (FMA)
+            // ldg routes VRAM access through read-only data (texture) cache
+            // which is better for broadcasting to other threads and reducing L1 cache pressure.
+            bg_dot_pixel_grad = __fmaf_rn(__ldg(&background[ch]),
+                                          grad_pixel_color_feat[thread_block_ids.thread_rank()][ch],
+                                          bg_dot_pixel_grad);
         }
     }
 
@@ -136,7 +142,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
     float grad_pixel_distortion;
     float final_m1 = 0; // final first moment of depth
     float final_m2 = 0; // final second moment of depth
-    float prev_grad_transmittance = 0.f;
+    float residual_grad_distortion_acc = 0.f;
 
     // Fetch from VRAM only if the pixel is valid
     if (valid_pixel)
@@ -260,7 +266,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             {
                 // 4. Perspective division to find the exact (u, v) ray-surfel isect
                 // on the surfel's local plane.
-                local_uv = {ray_cross.x / ray_cross.z, ray_cross.y / ray_cross.z}; // OPTIMIZATION LATER: fast div
+                local_uv = {ray_cross.x / ray_cross.z, ray_cross.y / ray_cross.z};
 
                 // 5. Calculate squared distance from the surfel's center (0,0 in surfel's space)
                 dist_3d_sq = (local_uv.x * local_uv.x) + (local_uv.y * local_uv.y);
@@ -294,7 +300,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
             if (valid_surfel)
             {
-                exp_power = exp(power); // OPTIMIZATION LATER: fast exp
+                exp_power = exp(power);
                 alpha = min(.99f, opacity * exp_power);
                 if (alpha < 1.f / 255.f)
                     valid_surfel = false; // Effectively transparent surfel
@@ -319,7 +325,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             if (valid_surfel)
             {
                 // Recover transmittance before blending with the current surfel
-                transmittance = transmittance * inv_one_minus_alpha; // OPTIMIZATION LATER
+                transmittance = transmittance * inv_one_minus_alpha;
 
                 // Blending weight for surfel.
                 // It is also rendered color/feat loss w.r.t. surfel's color/feat.
@@ -327,20 +333,23 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
                 // To compute alpha gradient, we must do so through all its paths.
 
-                // Define the alpha gradient accumulator
+                // Define the alpha (accumulated opacity) gradient accumulator
                 float grad_alpha = 0.f;
 
                 // Path A: Recursively accumulate gradients from colors+features channels
                 for (int ch = 0; ch < CHANNELS; ch++)
                 {
-                    const float c_f = color_feat_batch[batch_surf_idx + ch * color_feat_stride];
-                    residual_color_feat_acc[ch] = prev_alpha * prev_color_feat[ch] +
+                    const float curr_color_feat = color_feat_batch[batch_surf_idx + ch * color_feat_stride];
+                    const float prev_color_feat = (batch_surf_idx > 0) ? color_feat_batch[batch_surf_idx - 1 +
+                                                                                          ch * color_feat_stride]
+                                                                       : 0;
+                    residual_color_feat_acc[ch] = prev_alpha * prev_color_feat +
                                                   (1.f - prev_alpha) * residual_color_feat_acc[ch];
-                    grad_alpha += (c_f - residual_color_feat_acc[ch]) * grad_pixel_color_feat[ch];
-                    prev_color_feat[ch] = c_f;
+                    grad_alpha += (curr_color_feat - residual_color_feat_acc[ch]) *
+                                  grad_pixel_color_feat[thread_block_ids.thread_rank()][ch];
 
                     // Also compute gradients w.r.t. colors+features
-                    grad_colors_feat[ch] = blending_weight * grad_pixel_color_feat[ch];
+                    grad_colors_feat[ch] = blending_weight * grad_pixel_color_feat[thread_block_ids.thread_rank()][ch];
                 }
 
                 // Path B: Accumulate gradients from aux outputs.
@@ -370,20 +379,20 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
                 // 4. Distortion loss gradients
                 {
                     const float normalized_depth = DEPTH_NORM_SCALE *
-                                                   (1 - NEAR_PLANE / depth); // OPTIMIZE LATER? or is it precomputed?
+                                                   (1 - NEAR_PLANE / depth);
                     const float final_alpha_acc = 1.f - final_transmittance;
                     const float grad_distortion_acc = grad_pixel_distortion *
                                                       (final_m2 +
                                                        normalized_depth * normalized_depth * final_alpha_acc -
                                                        2 * normalized_depth * final_m1);
-                    grad_alpha += grad_distortion_acc - prev_grad_transmittance;
-                    prev_grad_transmittance = grad_distortion_acc * alpha +
-                                              (1 - alpha) * prev_grad_transmittance;
+                    grad_alpha += grad_distortion_acc - residual_grad_distortion_acc;
+                    residual_grad_distortion_acc = grad_distortion_acc * alpha +
+                                                   (1 - alpha) * residual_grad_distortion_acc;
                 }
 #endif
                 // Path C: Accumulate gradients from background.
                 grad_alpha *= transmittance;
-                grad_alpha += (-final_transmittance * inv_one_minus_alpha) * bg_dot_pixel_grad; // OPTIMIZATION LATER
+                grad_alpha += (-final_transmittance * inv_one_minus_alpha) * bg_dot_pixel_grad;
 
                 // Update previous alpha
                 prev_alpha = alpha;
@@ -394,7 +403,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
                 // Compute gradients w.r.t. surfel's geometry.
 
                 // NOTE: We decouple depth gradient from geometry
-                // to stabilize training.
+                // to stabilize training. However, depth losses still
+                // flow through opacity gradients.
 
                 const float grad_exp_power = opacity * grad_alpha;
 
@@ -561,8 +571,6 @@ void BWD::render(
         __RENDER_CALL_(8)
         __RENDER_CALL_(16)
         __RENDER_CALL_(32)
-        __RENDER_CALL_(64)
-        __RENDER_CALL_(128)
     default:
         break; // Should never reach here. Python pads / batches to provide only supported sizes
     }
@@ -598,22 +606,21 @@ __forceinline__ __device__ void recompute_splat2pix_intermediates(
         glm::vec4(local_frame_mat[1], 0.0),
         glm::vec4(point_world_space.x, point_world_space.y, point_world_space.z, 1));
 
-    // Create the world to normalized device coordinates (NDC) matrix.
-    // This is just the transposed w2clip_mat.
-    glm::mat4 world2ndc_mat = glm::mat4(
+    // This is just the GLM-formatted w2clip_mat.
+    glm::mat4 glm_world2clip_mat = glm::mat4(
         glm::vec4(w2clip_mat[0], w2clip_mat[4], w2clip_mat[8], w2clip_mat[12]),
         glm::vec4(w2clip_mat[1], w2clip_mat[5], w2clip_mat[9], w2clip_mat[13]),
         glm::vec4(w2clip_mat[2], w2clip_mat[6], w2clip_mat[10], w2clip_mat[14]),
         glm::vec4(w2clip_mat[3], w2clip_mat[7], w2clip_mat[11], w2clip_mat[15]));
 
-    // Create the NDC [-1, 1] to pixel [0, W-1] x [0, H-1] space matrix
-    glm::mat3x4 ndc2pix_mat = glm::mat3x4(
+    // Create the clip to pixel [0, W-1] x [0, H-1] space matrix
+    glm::mat3x4 clip2pix_mat = glm::mat3x4(
         glm::vec4(img_W / 2.f, 0.f, 0.f, (img_W - 1) / 2.f),
         glm::vec4(0.f, img_H / 2.f, 0.f, (img_H - 1) / 2.f),
         glm::vec4(0.f, 0.f, 0.f, 1.f));
 
     // Compute splat to pixel space matrix
-    world2pix_mat = world2ndc_mat * ndc2pix_mat;
+    world2pix_mat = glm_world2clip_mat * clip2pix_mat;
     splat2pix_mat = glm::transpose(splat2world_mat) * world2pix_mat;
 
     // Compute surfel normal in cam space
@@ -634,7 +641,7 @@ __forceinline__ __device__ void grad_compute_aabb(
     // Define the params for projection of surfel to pixel space
     glm::vec3 conic_signature = glm::vec3(cutoff * cutoff, cutoff * cutoff, -1.f);
     float conic_denom = glm::dot(conic_signature, splat2pix_mat[2] * splat2pix_mat[2]);
-    glm::vec3 normalized_signature = (1.f / conic_denom) * conic_signature; // OPTIMIZE LATER
+    glm::vec3 normalized_signature = (1.f / conic_denom) * conic_signature;
 
     // Compute gradient flowing through centers to splat2pix mat cols
     glm::vec3 grad_splat2pix_mat_col0 = grad_projected_center.x * normalized_signature * splat2pix_mat[2];
@@ -647,7 +654,7 @@ __forceinline__ __device__ void grad_compute_aabb(
                                           grad_projected_center.y * splat2pix_mat[1] * splat2pix_mat[2];
     // (grad_conic_denom) * (grad conic_denom w.r.t. splat2pix_mat_col2)
     grad_splat2pix_mat_col2 += (glm::dot(grad_normalized_signature, normalized_signature) * (-1.f / conic_denom)) *
-                               (conic_signature * splat2pix_mat[2] * 2.f); // OPTIMIZE LATER
+                               (conic_signature * splat2pix_mat[2] * 2.f);
 
     // Accumulate into grad_splat2pix_mat
     grad_splat2pix_mat[0] += grad_splat2pix_mat_col0;

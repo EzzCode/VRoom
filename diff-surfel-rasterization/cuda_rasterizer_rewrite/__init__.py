@@ -27,7 +27,7 @@ def _next_supported(n: int) -> int:
     return _SUPPORTED_CHANNELS[-1]
 
 
-class SurfelRasterizationSettings(NamedTuple):
+class _SurfelRasterizationSettings(NamedTuple):
     """
     Surfel rasterizer settings.
     """
@@ -376,7 +376,7 @@ class _RasterizerSubsequent(torch.autograd.Function):
 # Rasterizer Dispatchers
 
 
-def rasterize_surfels_first_pass(
+def _rasterize_surfels_first_pass(
     points_world_space,
     scale_vecs,
     quats,
@@ -402,7 +402,7 @@ def rasterize_surfels_first_pass(
     )
 
 
-def rasterize_surfels_subsequent(
+def _rasterize_surfels_subsequent(
     colors_feat,
     background,
     projected_centers,
@@ -434,7 +434,7 @@ def rasterize_surfels_subsequent(
     )
 
 
-class SurfelRasterizer(nn.Module):
+class _SurfelRasterizer(nn.Module):
     """
     Main Surfel rasterizer entry point
     """
@@ -453,7 +453,7 @@ class SurfelRasterizer(nn.Module):
         background,
         trick_projected_centers,  # for tensor leaf trick
     ):
-        return rasterize_surfels_first_pass(
+        return _rasterize_surfels_first_pass(
             points_world_space,
             scale_vecs,
             quats,
@@ -477,7 +477,7 @@ class SurfelRasterizer(nn.Module):
         transmittance_and_moments,
         rendered_aux,
     ):
-        return rasterize_surfels_subsequent(
+        return _rasterize_surfels_subsequent(
             colors_feat,
             background,
             projected_centers,
@@ -559,7 +559,7 @@ def rasterize_2dgs(
         w2clip_mat = w2cam_mat @ cam2clip_mat
 
         # Create the rasterizer settings object
-        raster_settings = SurfelRasterizationSettings(
+        raster_settings = _SurfelRasterizationSettings(
             glob_scale_mod=1.0,
             w2cam_mat=w2cam_mat,
             w2clip_mat=w2clip_mat,
@@ -569,7 +569,7 @@ def rasterize_2dgs(
         )
 
         # Create the rasterizer object
-        rasterizer = SurfelRasterizer(raster_settings)
+        rasterizer = _SurfelRasterizer(raster_settings)
 
         # Prepare output buffers
         # 1. General Outputs
@@ -593,7 +593,6 @@ def rasterize_2dgs(
         # Trick pytorch inputting this to the autograd function class
         # causing it to receive the calculated gradients for projected_centers
         # in backward pass.
-        # NOTE: USING 2-DIM COULD BE AN ISSUE SO VERIFY.
         trick_projected_centers = torch.zeros(
             (points_world_space.shape[0], 2), requires_grad=True, device=device
         )

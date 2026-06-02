@@ -103,14 +103,6 @@ namespace PytorchAllocators
     // This struct handles all PyTorch tensor allocations in backward pass.
     struct BackwardAllocationContext
     {
-        // These values control if all allocation occurs or not
-        // TO BE IMPLEMENTED LATER
-        // enum class AllocCtrls
-        // {
-        //     FIRST_PASS_ALLOC,
-        //     SUBSEQUENT_ALLOC
-        // };
-
         // Intermediate tensor gradients
         torch::Tensor grad_normal;
 

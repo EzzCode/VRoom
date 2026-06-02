@@ -9,9 +9,9 @@ namespace cg = cooperative_groups;
 // This matrix maps the local surfel plane to the pixel coordinate space.
 __device__ void compute_splat2pix_mat(
     const float3 &point_world_space,  // Surfel coordinate in world space
-    const glm::vec2 scale_vec,        // Scale vector
-    const float glob_scale_mod,       // Scale vector
-    const glm::vec4 quat,             // Quaternion
+    const glm::vec2 scale_vec,        // Scale vector (world-space scale)
+    const float glob_scale_mod,       // Scale vector global modifier
+    const glm::vec4 quat,             // Quaternion (world-space rotation)
     const float *w2cam_mat,           // World to Cam space matrix
     const float *w2clip_mat,          // World to Clip space matrix
     const int img_W, const int img_H, // Image width and height
@@ -30,22 +30,21 @@ __device__ void compute_splat2pix_mat(
         glm::vec4(local_frame_mat[1], 0.0),
         glm::vec4(point_world_space.x, point_world_space.y, point_world_space.z, 1));
 
-    // Create the world to normalized device coordinates (NDC) matrix.
-    // This is just the transposed w2clip_mat.
-    glm::mat4 world2ndc_mat = glm::mat4(
+    // This is just GLM-formatted w2clip_mat.
+    glm::mat4 glm_world2clip_mat = glm::mat4(
         glm::vec4(w2clip_mat[0], w2clip_mat[4], w2clip_mat[8], w2clip_mat[12]),
         glm::vec4(w2clip_mat[1], w2clip_mat[5], w2clip_mat[9], w2clip_mat[13]),
         glm::vec4(w2clip_mat[2], w2clip_mat[6], w2clip_mat[10], w2clip_mat[14]),
         glm::vec4(w2clip_mat[3], w2clip_mat[7], w2clip_mat[11], w2clip_mat[15]));
 
-    // Create the NDC [-1, 1] to pixel [0, W-1] x [0, H-1] space matrix
-    glm::mat3x4 ndc2pix_mat = glm::mat3x4(
+    // Create the clip to pixel [0, W-1] x [0, H-1] space matrix
+    glm::mat3x4 clip2pix_mat = glm::mat3x4(
         glm::vec4(img_W / 2.f, 0.f, 0.f, (img_W - 1) / 2.f),
         glm::vec4(0.f, img_H / 2.f, 0.f, (img_H - 1) / 2.f),
         glm::vec4(0.f, 0.f, 0.f, 1.f));
 
     // Compute splat to pixel space matrix
-    splat2pix_mat = glm::transpose(splat2world_mat) * world2ndc_mat * ndc2pix_mat;
+    splat2pix_mat = glm::transpose(splat2world_mat) * glm_world2clip_mat * clip2pix_mat;
 
     // Compute surfel normal in cam space
     normal = rotate_vector({local_frame_mat[2].x, local_frame_mat[2].y, local_frame_mat[2].z}, w2cam_mat);
@@ -67,7 +66,7 @@ __device__ bool compute_aabb(
     float conic_denom = glm::dot(conic_signature, splat2pix_mat[2] * splat2pix_mat[2]);
     if (conic_denom == 0) // sanity check
         return false;
-    glm::vec3 normalized_signature = (1.f / conic_denom) * conic_signature; // OPTIMIZE LATER
+    glm::vec3 normalized_signature = (1.f / conic_denom) * conic_signature;
     glm::vec2 center_pixel_glm = glm::vec2(
         glm::dot(normalized_signature, splat2pix_mat[0] * splat2pix_mat[2]),
         glm::dot(normalized_signature, splat2pix_mat[1] * splat2pix_mat[2]));
@@ -76,7 +75,7 @@ __device__ bool compute_aabb(
     glm::vec2 surfel_radii_glm_0 = center_pixel_glm * center_pixel_glm -
                                    glm::vec2(glm::dot(normalized_signature, splat2pix_mat[0] * splat2pix_mat[0]),
                                              glm::dot(normalized_signature, splat2pix_mat[1] * splat2pix_mat[1]));
-    glm::vec2 surfel_radii_glm = glm::sqrt(glm::max(glm::vec2(1e-4f, 1e-4f), surfel_radii_glm_0)); // OPTIMIZE LATER
+    glm::vec2 surfel_radii_glm = glm::sqrt(glm::max(glm::vec2(1e-4f, 1e-4f), surfel_radii_glm_0));
 
     // Assign outputs
     center_pixel = {center_pixel_glm.x, center_pixel_glm.y};
@@ -111,7 +110,7 @@ __global__ void preprocess_kernel_fwd(
     if (surfel_idx >= surfel_count)
         return;
 
-    // Zero default init
+    // Zero default init. Used to cull invalid surfels later.
     asymmetric_radii_buff[surfel_idx] = 0;
     surfels_tiles_touched_buff[surfel_idx] = 0;
 
@@ -154,10 +153,11 @@ __global__ void preprocess_kernel_fwd(
     float2 center_pixel;
     int2 surfel_radii;
     {
+        // Local scope trick for optimizing register usage
+        
         // Define pixel cutoff. 3 standard deviations of the gaussian (surfel).
         constexpr float cutoff = 3.f;
 
-        // Local scope trick for optimizing register usage
         float2 unclamped_surfel_radii;
         if (!compute_aabb(splat2pix_mat, cutoff, center_pixel, unclamped_surfel_radii))
             return;
@@ -368,7 +368,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
             // 4. Perspective division to find the exact (u, v) ray-surfel isect
             // on the surfel's local plane.
-            const float2 local_uv = {ray_cross.x / ray_cross.z, ray_cross.y / ray_cross.z}; // OPTIMIZATION LATER: fast div
+            const float2 local_uv = {ray_cross.x / ray_cross.z, ray_cross.y / ray_cross.z};
 
             // 5. Calculate squared distance from the surfel's center (0,0 in surfel's space)
             const float dist_3d_sq = (local_uv.x * local_uv.x) + (local_uv.y * local_uv.y);
@@ -396,7 +396,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             if (power > 0.f)
                 continue; // Opacity can only decrease as center-ray_isect dist increases
 
-            float alpha = min(.99f, opacity * exp(power)); // OPTIMIZATION LATER: fast exp
+            float alpha = min(.99f, opacity * exp(power));
             if (alpha < 1.f / 255.f)
                 continue; // Effectively transparent surfel
 
@@ -415,7 +415,9 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             // Compute aux outputs
             // 1. Compute distortion loss and depth moments
             float alpha_acc = 1.f - transmittance;
-            float normalized_depth = DEPTH_NORM_SCALE * (1 - NEAR_PLANE / depth); // OPTIMIZE LATER? or is it precomputed?
+            float normalized_depth = DEPTH_NORM_SCALE * (1 - NEAR_PLANE / depth);
+            // 1.1. instead of computing distortion loss between each pair of surfels in O(N^2),
+            // we track first and seconds moments of depth
             distortion_acc += blending_weight * (normalized_depth * normalized_depth * alpha_acc +
                                                  m2_acc - 2 * normalized_depth * m1_acc);
             m1_acc += normalized_depth * blending_weight;
@@ -439,6 +441,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             // Finally, compute rendered colors and features
             for (int ch = 0; ch < CHANNELS; ch++)
                 // Fused Multiply-Add (FMA). Could be replaced with -O3 compiler option.
+                // ldg routes VRAM access through read-only data (texture) cache which is better for broadcasting to other threads
                 color_feat_acc[ch] = __fmaf_rn(__ldg(&colors_feat[surfel_idx_batch[batch_surf_idx] * CHANNELS + ch]), blending_weight, color_feat_acc[ch]);
 
             // Update transmittance
@@ -457,7 +460,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
         // blend the background with the pixel and store the computed colors+feat
         for (int ch = 0; ch < CHANNELS; ch++)
-            rendered_color_feat_buff[ch * img_H * img_W + pixel_idx] = color_feat_acc[ch] + transmittance * background[ch];
+            // Fused Multiply-Add (FMA) with read-only cache broadcast
+            rendered_color_feat_buff[ch * img_H * img_W + pixel_idx] = __fmaf_rn(transmittance, __ldg(&background[ch]), color_feat_acc[ch]);
 
         // Store last contributor
         contrib_state_buff[pixel_idx] = last_contributor_idx;
@@ -473,7 +477,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
         contrib_state_buff[pixel_idx + img_H * img_W] = median_contrib_idx;
         // 3. Depths
         rendered_aux_buff[pixel_idx + img_H * img_W * DEPTH_OFFSET] = depth_acc;
-        // 4. Accumulated Alphas
+        // 4. Accumulated Alphas (accumulated opacity)
         rendered_aux_buff[pixel_idx + img_H * img_W * ALPHA_OFFSET] = 1.f - transmittance;
         // 5. Normals
         rendered_aux_buff[pixel_idx + img_H * img_W * (NORMAL_OFFSET + 0)] = normal_acc.x;
@@ -534,8 +538,6 @@ void FWD::render(
         __RENDER_CALL_(8)
         __RENDER_CALL_(16)
         __RENDER_CALL_(32)
-        __RENDER_CALL_(64)
-        __RENDER_CALL_(128)
     default:
         break; // Should never reach here. Python pads / batches to provide only supported sizes
     }
