@@ -143,16 +143,8 @@ def estimate_voxel_size(knn_distances: torch.Tensor, min_size: float = 1e-6) -> 
     Estimates a voxel size for a uniform grid using knn distances
     """
     voxel_size = torch.median(knn_distances[:, 1:]).item()
+    print(f"voxel size calculated = {voxel_size}")
     return max(voxel_size, min_size)
-
-
-def compute_psnr(prediction: torch.Tensor, target: torch.Tensor) -> float:
-    """Compute Peak Signal-to-Noise Ratio (PSNR) between prediction and target tensors."""
-    target = target.to(prediction.device)
-    mse = torch.mean((prediction - target) ** 2)
-    if mse == 0:
-        return float("inf")
-    return float(20 * torch.log10(1.0 / torch.sqrt(mse)))
 
 
 def calc_volumetric_loss(scales: torch.Tensor, volume_lambda: float) -> torch.Tensor:
