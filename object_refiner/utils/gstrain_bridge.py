@@ -49,10 +49,10 @@ class VRoomModel(nn.Module):
     def __init__(
         self,
         gs_attr: str,
-        feat_dim: int,
+        feature_dim: int,
         view_dim: int,
         appearance_dim: int,
-        n_offsets: int,
+        gaussians_per_anchor: int,
         voxel_size: float,
         render_mode: str,
         tile_size_2dgs: int,
@@ -62,10 +62,10 @@ class VRoomModel(nn.Module):
 
         # Config attrs used by renderer / wrapper
         self.gs_attr = gs_attr
-        self.feat_dim = feat_dim
+        self.feature_dim = feature_dim
         self.view_dim = view_dim
         self.appearance_dim = appearance_dim
-        self.n_offsets = n_offsets
+        self.gaussians_per_anchor = gaussians_per_anchor
         self.voxel_size = voxel_size
         self.render_mode = render_mode
         self.tile_size_2dgs = tile_size_2dgs
@@ -78,13 +78,13 @@ class VRoomModel(nn.Module):
 
         # Real gstrain objects
         self.anchor_cloud = AnchorCloud(
-            gaussians_per_anchor=n_offsets,
-            feature_dim=feat_dim,
+            gaussians_per_anchor=gaussians_per_anchor,
+            feature_dim=feature_dim,
             voxel_size=voxel_size,
             device=self.device,
         )
         self.decoder = GaussianDecoder(
-            feature_dim=feat_dim,
+            feature_dim=feature_dim,
             anchor_cloud=self.anchor_cloud,
         ).to(self.device)
         self.checkpoint_manager = CheckpointManager(self.anchor_cloud, self.decoder)
@@ -202,35 +202,6 @@ class VRoomModel(nn.Module):
     # ------------------------------------------------------------------
 
     def training_setup(self, opt) -> None:
-        # Map legacy LR names → new Optimizer attribute names
-        opt.anchor_pos_lr_init = getattr(opt, "position_lr_init", 0.0)
-        opt.anchor_pos_lr_final = getattr(opt, "position_lr_final", 0.0)
-        opt.anchor_pos_lr_max_steps = getattr(opt, "position_lr_max_steps", opt.iterations)
-        opt.anchor_pos_lr_delay_mult = getattr(opt, "position_lr_delay_mult", 0.01)
-
-        opt.gaussian_offset_lr_init = getattr(opt, "offset_lr_init", 0.0)
-        opt.gaussian_offset_lr_final = getattr(opt, "offset_lr_final", 0.0)
-        opt.gaussian_offset_lr_max_steps = getattr(opt, "offset_lr_max_steps", opt.iterations)
-        opt.gaussian_offset_lr_delay_mult = getattr(opt, "offset_lr_delay_mult", 0.01)
-
-        opt.anchor_feat_lr = getattr(opt, "feature_lr", 0.0)
-        opt.anchor_scale_lr = getattr(opt, "scaling_lr", 0.0)
-        opt.anchor_rot_lr = getattr(opt, "rotation_lr", 0.0)
-
-        opt.decoder_opacity_lr_init = getattr(opt, "mlp_opacity_lr_init", 0.0)
-        opt.decoder_opacity_lr_final = getattr(opt, "mlp_opacity_lr_final", 0.0)
-        opt.decoder_opacity_lr_max_steps = getattr(opt, "mlp_opacity_lr_max_steps", opt.iterations)
-        opt.decoder_opacity_lr_delay_mult = getattr(opt, "mlp_opacity_lr_delay_mult", 0.01)
-
-        opt.decoder_cov_lr_init = getattr(opt, "mlp_cov_lr_init", getattr(opt, "mlp_cov_lr", 0.0))
-        opt.decoder_cov_lr_final = getattr(opt, "mlp_cov_lr_final", getattr(opt, "mlp_cov_lr", 0.0))
-        opt.decoder_cov_lr_max_steps = getattr(opt, "mlp_cov_lr_max_steps", opt.iterations)
-        opt.decoder_cov_lr_delay_mult = getattr(opt, "mlp_cov_lr_delay_mult", 0.01)
-
-        opt.decoder_color_lr_init = getattr(opt, "mlp_color_lr_init", 0.0)
-        opt.decoder_color_lr_final = getattr(opt, "mlp_color_lr_final", 0.0)
-        opt.decoder_color_lr_max_steps = getattr(opt, "mlp_color_lr_max_steps", opt.iterations)
-        opt.decoder_color_lr_delay_mult = getattr(opt, "mlp_color_lr_delay_mult", 0.01)
 
         configs = {
             "optimization": {

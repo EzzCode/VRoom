@@ -122,6 +122,7 @@ def generate_debug_artifacts(
 
 def _load_trained_gaussians(parent_gaussians, model_dir):
     from object_refiner.utils.gstrain_bridge import VRoomModel as GaussianModel
+    from object_refiner.utils.config_compat import adapt_legacy_model_config
     from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
 
     model_dir = Path(model_dir)
@@ -129,15 +130,17 @@ def _load_trained_gaussians(parent_gaussians, model_dir):
         k: getattr(parent_gaussians, k, GAUSSIAN_MODEL_DEFAULTS[k])
         for k in GAUSSIAN_MODEL_DEFAULTS
     } if parent_gaussians is not None else GAUSSIAN_MODEL_DEFAULTS
+    kwargs = adapt_legacy_model_config(kwargs)
+
     gaussians = GaussianModel(
-        gs_attr=str(kwargs["gs_attr"]),
-        feat_dim=int(kwargs["feat_dim"]),
-        view_dim=int(kwargs["view_dim"]),
-        appearance_dim=int(kwargs["appearance_dim"]),
-        n_offsets=int(kwargs["n_offsets"]),
-        voxel_size=float(kwargs["voxel_size"]),
-        render_mode=str(kwargs["render_mode"]),
-        tile_size_2dgs=int(kwargs["tile_size_2dgs"]),
+        gs_attr=str(kwargs.get("gs_attr", "2D")),
+        feature_dim=int(kwargs.get("feature_dim", 32)),
+        view_dim=int(kwargs.get("view_dim", 3)),
+        appearance_dim=int(kwargs.get("appearance_dim", 0)),
+        gaussians_per_anchor=int(kwargs.get("gaussians_per_anchor", 10)),
+        voxel_size=float(kwargs.get("voxel_size", 0.001)),
+        render_mode=str(kwargs.get("render_mode", "RGB+ED")),
+        tile_size_2dgs=int(kwargs.get("tile_size_2dgs", 8)),
     )
     gaussians.load_ply(str(model_dir / "point_cloud.ply"))
     gaussians.load_mlp_checkpoints(str(model_dir))

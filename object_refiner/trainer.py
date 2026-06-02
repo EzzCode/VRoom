@@ -11,73 +11,10 @@ from typing import List, Optional
 from object_refiner.utils.gstrain_wrapper import prefilter_anchors as _prefilter
 from object_refiner.utils.gstrain_wrapper import render_rgba as _gstrain_render
 from object_refiner.utils.gstrain_bridge import VRoomModel as GaussianModel
+from object_refiner.utils.config_compat import adapt_legacy_model_config, adapt_legacy_training_config
 from object_refiner.utils.helpers import ssim_loss as _ssim_loss
 
-@dataclass
-class TrainingConfig:
-    iterations: int = 30_000
-    lambda_dssim: float = 0.2
-    lambda_dreg: float = 0.01
-    lambda_object_loss: float = 0.1
-    lambda_zero_penalty: float = 0.01
-    lambda_sky_opa: float = 0.0
-    lambda_opacity_entropy: float = 0.0
-    lambda_normal: float = 0.0
-    lambda_dist: float = 0.0
-    start_depth: int = 15_000
-    depth_l1_weight_init: float = 1.0
-    depth_l1_weight_final: float = 0.1
-    start_stat: int = 500
-    update_from: int = 1_500
-    update_until: int = 25_000
-    update_interval: int = 100
-    densify_grad_threshold: float = 0.0002
-    min_opacity: float = 0.005
-    success_threshold: float = 0.8
-    densification: bool = True
-    position_lr_init: float = 0.0
-    position_lr_final: float = 0.0
-    position_lr_max_steps: int = 30_000
-    position_lr_delay_mult: float = 0.01
-    offset_lr_init: float = 0.0
-    offset_lr_final: float = 0.0
-    offset_lr_max_steps: int = 30_000
-    offset_lr_delay_mult: float = 0.01
-    feature_lr: float = 0.0
-    scaling_lr: float = 0.0
-    rotation_lr: float = 0.0
-    mlp_opacity_lr_init: float = 0.0
-    mlp_opacity_lr_final: float = 0.0
-    mlp_opacity_lr_max_steps: int = 30_000
-    mlp_opacity_lr_delay_mult: float = 0.01
-    mlp_cov_lr: float = 0.0
-    mlp_cov_lr_init: float = 0.0
-    mlp_cov_lr_final: float = 0.0
-    mlp_cov_lr_max_steps: int = 30_000
-    mlp_cov_lr_delay_mult: float = 0.01
-    mlp_color_lr_init: float = 0.0
-    mlp_color_lr_final: float = 0.0
-    mlp_color_lr_max_steps: int = 30_000
-    mlp_color_lr_delay_mult: float = 0.01
-    appearance_lr_init: float = 0.05
-    appearance_lr_final: float = 0.0005
-    appearance_lr_delay_mult: float = 0.01
-    appearance_lr_max_steps: int = 30_000
-    normal_start_iter: int = 7_000
-    dist_start_iter: int = 3_000
-    grad_clip_norm: Optional[float] = None
-
-@dataclass
-class PipelineConfig:
-    add_prefilter: bool = True
-    no_prefilter_step: int = 1000
-    vis_step: int = 1000
-    shuffle: bool = True
-    weed_ratio: float = 0.0
-    save_explicit: bool = False
-    save_vis: bool = True
-    save_iterations: List[int] = dc_field(default_factory=lambda: [7000, 20000, 25000, 30000])
-
+from argparse import Namespace
 from .utils.gstrain_wrapper import make_camera
 from .utils.colmap_init import load_colmap_object_point_cloud
 from .constants import GAUSSIAN_MODEL_DEFAULTS
@@ -149,9 +86,9 @@ def train_object(
             "depth_valid": None,
         })
     if isinstance(pipeline_config, dict):
-        pipeline = PipelineConfig(**pipeline_config)
+        pipeline = Namespace(**pipeline_config)
     else:
-        raise RuntimeError("Invalid pipeline configuration")
+        pipeline = pipeline_config if pipeline_config is not None else Namespace()
 
     # Render parent depth targets
     if depth_weight > 0.0 and parent_gaussians is not None:
@@ -208,16 +145,17 @@ def train_object(
         k: getattr(parent_gaussians, k, GAUSSIAN_MODEL_DEFAULTS[k])
         for k in GAUSSIAN_MODEL_DEFAULTS
     } if parent_gaussians is not None else GAUSSIAN_MODEL_DEFAULTS.copy()
+    kwargs = adapt_legacy_model_config(kwargs)
 
     gaussians = GaussianModel(
-        gs_attr=str(kwargs["gs_attr"]),
-        feat_dim=int(kwargs["feat_dim"]),
-        view_dim=int(kwargs["view_dim"]),
-        appearance_dim=int(kwargs["appearance_dim"]),
-        n_offsets=int(kwargs["n_offsets"]),
-        voxel_size=float(kwargs["voxel_size"]),
-        render_mode=str(kwargs["render_mode"]),
-        tile_size_2dgs=int(kwargs["tile_size_2dgs"]),
+        gs_attr=str(kwargs.get("gs_attr", "2D")),
+        feature_dim=int(kwargs.get("feature_dim", 32)),
+        view_dim=int(kwargs.get("view_dim", 3)),
+        appearance_dim=int(kwargs.get("appearance_dim", 0)),
+        gaussians_per_anchor=int(kwargs.get("gaussians_per_anchor", 10)),
+        voxel_size=float(kwargs.get("voxel_size", 0.001)),
+        render_mode=str(kwargs.get("render_mode", "RGB+ED")),
+        tile_size_2dgs=int(kwargs.get("tile_size_2dgs", 8)),
     )
     object.__setattr__(gaussians, "explicit_gs", False)
     gaussians.weed_ratio = 0.0
@@ -228,10 +166,9 @@ def train_object(
     gaussians.initialize_anchors(pcd, spatial_extent, logger=logger)
 
     # load training configs
-    opt = TrainingConfig()
-    for k, v in getattr(scope, "optim_params", {}).items():
-        if hasattr(opt, k):
-            setattr(opt, k, v)
+    opt = Namespace(**getattr(scope, "optim_params", {}))
+    if not hasattr(opt, "lambda_dreg"):
+        opt.lambda_dreg = 0.01
 
     #freeze anchor
     opt.iterations = n_iterations
@@ -250,6 +187,8 @@ def train_object(
     opt.mlp_cov_lr_init = opt.mlp_cov_lr_final = config.mlp_cov_lr * lr_scale
     opt.mlp_color_lr_init = config.mlp_color_lr_init * lr_scale
     opt.mlp_color_lr_final = config.mlp_color_lr_final * lr_scale
+
+    opt = adapt_legacy_training_config(opt)
 
     opt.densification = enable_densification
     if enable_densification:
