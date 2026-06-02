@@ -348,6 +348,12 @@ def discover_colmap_scene(
 ) -> SceneLayout:
     base = Path(root)
     image_dir = base / images
+    if not image_dir.exists() or not os.listdir(image_dir):
+        for candidate in ["images", "images_all", "frames", ""]:
+            fallback_dir = base / candidate
+            if fallback_dir.exists() and os.listdir(fallback_dir):
+                image_dir = fallback_dir
+                break
     mask_dir = None
     depth_dir = None
     metadata_candidates = [
@@ -538,12 +544,7 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
 def split_records(
     records: list[FrameRecord], llffhold: int
 ) -> tuple[list[FrameRecord], list[FrameRecord]]:
-    train = [record for record in records if "test" not in record.image_name]
-    test = [record for record in records if "test" in record.image_name]
-    if not train and records:
-        train = records
-        test = []
-    return train, test
+    return records, []
 
 
 def load_colmap_bundle(

@@ -3,7 +3,7 @@
         "dataset_name": "replica",
         "save_dir": "training_results",
         "dataset_path": "datasets/replica",
-        "frames": "frames",
+        "frames": "images",
         "masks": "masks",
         "resolution": -1,
         "resolution_scales": [
