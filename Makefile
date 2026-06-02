@@ -3,7 +3,6 @@
 # Default variables - can be easily overridden from the command line
 DATASET ?= 3dovs
 CONFIG ?= gstrain/config/vroom/2d/$(DATASET)/config.json
-SCENE ?= bed
 GPU ?= 0
 SUBDIR ?= baseline
 PROFILE_DIR ?= diff-surfel-rasterization/profiling/$(DATASET)/$(SUBDIR)

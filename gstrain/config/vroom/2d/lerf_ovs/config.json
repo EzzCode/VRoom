@@ -2,7 +2,7 @@
     "experiment": {
         "dataset_name": "lerf_ovs",
         "save_dir": "2d_crossentropy_loss_zero_penalty",
-        "dataset_path": "datasets/lerf_ovs",
+        "dataset_path": "datasets/scannetpp_ovs/0d2ee665be",
         "frames": "images",
         "masks": "masks",
         "dataset_storage_device": "cpu",
@@ -33,6 +33,9 @@
     "pipeline": {
         "save_iterations": [
             7000,
+            15000,
+            20000,
+            25000,
             30000
         ],
         "visualization_interval": 1000

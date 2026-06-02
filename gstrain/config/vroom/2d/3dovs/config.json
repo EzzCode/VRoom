@@ -32,6 +32,9 @@
     "pipeline": {
         "save_iterations": [
             7000,
+            15000,
+            20000,
+            25000,
             30000
         ],
         "visualization_interval": 1000

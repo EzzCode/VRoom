@@ -2,8 +2,8 @@
     "experiment": {
         "dataset_name": "replica",
         "save_dir": "2d_crossentropy_loss_0.1",
-        "dataset_path": "datasets/replica",
-        "frames": "frames",
+        "dataset_path": "datasets/replica/replica/office_0",
+        "frames": "images",
         "masks": "masks",
         "dataset_storage_device": "cpu",
         "pc_downsampling_ratio": 1,
@@ -31,6 +31,9 @@
     "pipeline": {
         "save_iterations": [
             7000,
+            15000,
+            20000,
+            25000,
             30000
         ],
         "visualization_interval": 1000
