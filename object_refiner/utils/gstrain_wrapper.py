@@ -1,7 +1,12 @@
 import logging
+from dataclasses import dataclass, field
+from typing import Optional, Dict
 import numpy as np
 import torch
 
+from gstrain.vroom_core.core.model.anchor_field import AnchorCloud, AnchorCloudData
+from gstrain.vroom_core.utilities.gaussian_decoder import GaussianDecoder
+from gstrain.vroom_core.utilities.utils import CheckpointManager, SemanticsManager
 from gstrain.vroom_core.utilities.render import apply_frustum_culling as _culling
 from gstrain.vroom_core.utilities.render import render as _render
 from gstrain.vroom_core.utilities.utils import projection_matrix
@@ -45,17 +50,103 @@ def make_camera(R, T, K, width, height, uid=0):
     return Camera(R, T, K, width, height, uid=uid)
 
 
-def prefilter_anchors(gaussians, cam):
+@dataclass
+class VRoomGaussians:
+    anchor_cloud: AnchorCloud
+    decoder: GaussianDecoder
+    checkpoint_manager: CheckpointManager
+    gaussian_type: str
+    feature_dim: int
+    gaussians_per_anchor: int
+    voxel_size: float
+    render_mode: str
+    tile_size_2dgs: int
+    optim_params: Dict = field(default_factory=dict)
+
+
+def build_vroom_gaussians(kwargs: dict, device="cuda") -> VRoomGaussians:
+    gaussian_type = str(kwargs.get("gaussian_type", "2D"))
+    feature_dim = int(kwargs.get("feature_dim", 32))
+    gaussians_per_anchor = int(kwargs.get("gaussians_per_anchor", 10))
+    voxel_size = float(kwargs.get("voxel_size", 0.001))
+    render_mode = str(kwargs.get("render_mode", "RGB+ED"))
+    tile_size_2dgs = int(kwargs.get("tile_size_2dgs", 8))
+
+    anchor_cloud = AnchorCloud(
+        gaussians_per_anchor=gaussians_per_anchor,
+        feature_dim=feature_dim,
+        voxel_size=voxel_size,
+        device=device,
+    )
+    decoder = GaussianDecoder(
+        feature_dim=feature_dim,
+        anchor_cloud=anchor_cloud,
+    ).to(device)
+    checkpoint_manager = CheckpointManager(anchor_cloud, decoder)
+
+    return VRoomGaussians(
+        anchor_cloud=anchor_cloud,
+        decoder=decoder,
+        checkpoint_manager=checkpoint_manager,
+        gaussian_type=gaussian_type,
+        feature_dim=feature_dim,
+        gaussians_per_anchor=gaussians_per_anchor,
+        voxel_size=voxel_size,
+        render_mode=render_mode,
+        tile_size_2dgs=tile_size_2dgs,
+    )
+
+
+def load_vroom_checkpoint(gaussians: VRoomGaussians, ply_path: str, mlp_dir: str) -> None:
+    payload = gaussians.checkpoint_manager.load_anchor_field(ply_path)
+
+    if payload["log_scaling"].numel() > 0:
+        voxel_size = float(torch.exp(payload["log_scaling"][:, :3]).mean().item())
+    else:
+        avs = gaussians.anchor_cloud.voxel_size
+        voxel_size = float(avs) if avs is not None and avs > 0 else 1.0
+
+    seeds = AnchorCloudData(
+        anchors_positions=payload["anchor"],
+        gaussians_offsets=payload["offset"],
+        anchor_features=payload["feature"],
+        anchors_log_scales=payload["log_scaling"],
+        anchors_rotations=payload["rotation"],
+        labels=payload["labels"],
+        semantic_manager=None
+        if payload["labels"] is None
+        else SemanticsManager(torch.unique(payload["labels"].view(-1))),
+        voxel_size=voxel_size,
+    )
+    gaussians.anchor_cloud.set_anchors_cloud(seeds)
+    gaussians.checkpoint_manager.load_decoder(mlp_dir)
+
+
+def save_vroom_checkpoint(gaussians: VRoomGaussians, ply_path: str, mlp_dir: str) -> None:
+    gaussians.checkpoint_manager.save_anchor_cloud(ply_path)
+    gaussians.checkpoint_manager.save_decoder(
+        mlp_dir,
+        gaussian_type=gaussians.gaussian_type,
+        render_mode=gaussians.render_mode,
+        tile_size_2dgs=gaussians.tile_size_2dgs,
+    )
+
+
+def prefilter_anchors(gaussians: VRoomGaussians, cam: Camera) -> torch.Tensor:
     """Return a boolean mask (N,) of anchors visible from cam."""
     try:
         return _culling(cam, gaussians.anchor_cloud, gaussians.gaussian_type).squeeze()
     except Exception:
-        return gaussians._anchor_mask
+        return torch.ones(
+            gaussians.anchor_cloud.anchors_positions.shape[0],
+            dtype=torch.bool,
+            device="cuda",
+        )
 
 
 def render_rgba(
-    gaussians,
-    cam,
+    gaussians: VRoomGaussians,
+    cam: Camera,
     pipe_config,
     bg_white=True,
     object_label_id=None,
@@ -70,14 +161,20 @@ def render_rgba(
         try:
             visible_mask = _culling(cam, gaussians.anchor_cloud, gaussians.gaussian_type).squeeze()
         except Exception:
-            visible_mask = gaussians._anchor_mask
+            visible_mask = torch.ones(
+                gaussians.anchor_cloud.anchors_positions.shape[0],
+                dtype=torch.bool,
+                device="cuda",
+            )
 
     # Combine with label/object mask if requested
     object_mask = None
     if object_label_id is not None:
-        object_mask = (gaussians.label_ids.squeeze() == int(object_label_id))
+        if gaussians.anchor_cloud.semantic_labels is not None:
+            object_mask = (gaussians.anchor_cloud.semantic_labels.squeeze() == int(object_label_id))
     elif exclude_label_id is not None:
-        object_mask = (gaussians.label_ids.squeeze() != int(exclude_label_id))
+        if gaussians.anchor_cloud.semantic_labels is not None:
+            object_mask = (gaussians.anchor_cloud.semantic_labels.squeeze() != int(exclude_label_id))
 
     if object_mask is not None:
         visible_mask = visible_mask & object_mask.to(visible_mask.device)
@@ -133,3 +230,4 @@ def render_rgba(
                 "render_distort": pkg.get("render_distort"),
             })
     return return_pkg
+

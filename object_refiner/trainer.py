@@ -6,12 +6,12 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from dataclasses import dataclass, field as dc_field
-from typing import List, Optional
 from object_refiner.utils.gstrain_wrapper import prefilter_anchors as _prefilter
 from object_refiner.utils.gstrain_wrapper import render_rgba as _gstrain_render
-from object_refiner.utils.gstrain_bridge import VRoomModel as GaussianModel
+from object_refiner.utils.gstrain_wrapper import build_vroom_gaussians, save_vroom_checkpoint
 from object_refiner.utils.helpers import ssim_loss as _ssim_loss
+from gstrain.vroom_core.core.model.density import DensifcationController
+from gstrain.vroom_core.utilities.training import Optimizer as GstrainOptimizer
 
 from argparse import Namespace
 from .utils.gstrain_wrapper import make_camera
@@ -92,46 +92,43 @@ def train_object(
     # Render parent depth targets
     if depth_weight > 0.0 and parent_gaussians is not None:
         with torch.no_grad():
-            obj_mask = parent_gaussians.label_ids.squeeze() == object_id
-            if obj_mask.any():
-                for entry in entries:
-                    if entry["source"] != "real":
-                        continue
+            if parent_gaussians.anchor_cloud.semantic_labels is not None:
+                obj_mask = parent_gaussians.anchor_cloud.semantic_labels.squeeze() == object_id
+                if obj_mask.any():
+                    for entry in entries:
+                        if entry["source"] != "real":
+                            continue
 
-                    parent_gaussians.set_anchor_mask(entry["camera"].camera_center, entry["camera"].resolution_scale)
-                    try:
                         vis = _prefilter(parent_gaussians, entry["camera"])
-                    except Exception:
-                        vis = parent_gaussians._anchor_mask
 
-                    pkg = _gstrain_render(
-                        parent_gaussians,
-                        entry["camera"],
-                        pipeline,
-                        bg_white=False,
-                        object_label_id=object_id,
-                        training=False,
-                        visible_mask=vis,
-                    )
+                        pkg = _gstrain_render(
+                            parent_gaussians,
+                            entry["camera"],
+                            pipeline,
+                            bg_white=False,
+                            object_label_id=object_id,
+                            training=False,
+                            visible_mask=vis,
+                        )
 
-                    depth = pkg.get("render_depth")
-                    if depth is None:
-                        continue
-                    depth = cast(Any, depth)
-                    depth = depth[0:1] if depth.ndim == 3 else depth.unsqueeze(0) if depth.ndim == 2 else None
-                    if depth is None:
-                        continue
+                        depth = pkg.get("render_depth")
+                        if depth is None:
+                            continue
+                        depth = cast(Any, depth)
+                        depth = depth[0:1] if depth.ndim == 3 else depth.unsqueeze(0) if depth.ndim == 2 else None
+                        if depth is None:
+                            continue
 
-                    alpha = pkg.get("render_alphas")
-                    if alpha is None:
-                        continue
-                    alpha = cast(Any, alpha)
-                    alpha = alpha[0:1] if alpha.ndim == 3 else alpha.unsqueeze(0) if alpha.ndim == 2 else alpha
+                        alpha = pkg.get("render_alphas")
+                        if alpha is None:
+                            continue
+                        alpha = cast(Any, alpha)
+                        alpha = alpha[0:1] if alpha.ndim == 3 else alpha.unsqueeze(0) if alpha.ndim == 2 else alpha
 
-                    valid = ((entry["target_mask"] > 0.5) & (alpha > depth_alpha_threshold) & torch.isfinite(depth) & (depth > 0.0)).float()
-                    if int(valid.sum().item()) >= 64:
-                        entry["depth_target"] = depth.detach()
-                        entry["depth_valid"] = valid.detach()
+                        valid = ((entry["target_mask"] > 0.5) & (alpha > depth_alpha_threshold) & torch.isfinite(depth) & (depth > 0.0)).float()
+                        if int(valid.sum().item()) >= 64:
+                            entry["depth_target"] = depth.detach()
+                            entry["depth_valid"] = valid.detach()
 
     pcd, _ = load_colmap_object_point_cloud(
         model_path=model_path, object_id=object_id, scope=scope,
@@ -145,21 +142,11 @@ def train_object(
         for k in GAUSSIAN_MODEL_DEFAULTS
     } if parent_gaussians is not None else GAUSSIAN_MODEL_DEFAULTS.copy()
 
-    gaussians = GaussianModel(
-        gaussian_type=str(kwargs.get("gaussian_type", "2D")),
-        feature_dim=int(kwargs.get("feature_dim", 32)),
-        gaussians_per_anchor=int(kwargs.get("gaussians_per_anchor", 10)),
-        voxel_size=float(kwargs.get("voxel_size", 0.001)),
-        render_mode=str(kwargs.get("render_mode", "RGB+ED")),
-        tile_size_2dgs=int(kwargs.get("tile_size_2dgs", 8)),
-    )
-    object.__setattr__(gaussians, "explicit_gs", False)
-    gaussians.weed_ratio = 0.0
-    gaussians.set_appearance(len(entries))
+    gaussians = build_vroom_gaussians(kwargs)
 
     # Initialize anchors
     spatial_extent = max(scope.radius, float(np.linalg.norm(scope.aabb_max - scope.aabb_min)))
-    gaussians.initialize_anchors(pcd, spatial_extent, logger=logger)
+    gaussians.anchor_cloud.initialize_anchors(pcd)
 
     # load training configs
     opt = Namespace(**getattr(scope, "optim_params", {}))
@@ -208,11 +195,28 @@ def train_object(
     opt.update_from = max(50, min(1500, n_iterations // 4))
     opt.update_interval = max(25, min(100, n_iterations // 20))
 
-    gaussians.training_setup(opt)
-    optimizer = gaussians.optimizer
+    configs = {
+        "optimization": {
+            "args": opt,
+            "spatial_lr_scale": spatial_extent,
+            "anchor_cloud": gaussians.anchor_cloud,
+            "decoder": gaussians.decoder,
+        }
+    }
+    densifier = DensifcationController(
+        voxel_size=gaussians.anchor_cloud.voxel_size,
+        anchor_cloud=gaussians.anchor_cloud,
+        optimizer=None,
+        num_gaussians_per_anchor=gaussians.decoder.number_gaussians_per_anchor,
+    )
+    opt_wrapper = GstrainOptimizer(configs["optimization"], densifier)
+    opt_wrapper.setup()
+    densifier.optimizer = opt_wrapper
+    optimizer = opt_wrapper.optimizer
+
     if optimizer is None:
         raise RuntimeError("Optimizer is not initialized")
-    initial_scaling = gaussians._scaling.detach().clone()
+    initial_scaling = gaussians.anchor_cloud.anchors_log_scales.detach().clone()
 
     background = torch.ones(3, dtype=torch.float32, device="cuda")
     loss_hist, depth_hist = [], []
@@ -230,9 +234,15 @@ def train_object(
         weight = entry["weight"]
         rgb_scale = 1.0 if entry["source"] == "real" else generated_rgb_scale
 
-        gaussians.update_learning_rate(iteration)
-        gaussians.set_anchor_mask(camera.camera_center, camera.resolution_scale)
-        vis = _prefilter(gaussians, camera) if getattr(pipeline, "add_prefilter", True) else gaussians._anchor_mask
+        opt_wrapper.step_learning_rate(iteration)
+        if getattr(pipeline, "add_prefilter", True):
+            vis = _prefilter(gaussians, camera)
+        else:
+            vis = torch.ones(
+                gaussians.anchor_cloud.anchors_positions.shape[0],
+                dtype=torch.bool,
+                device="cuda",
+            )
 
         pkg = _gstrain_render(
             gaussians,
@@ -259,8 +269,8 @@ def train_object(
         
         scale_reg = pkg["scaling"].prod(dim=1).mean() if pkg["scaling"].numel() else torch.tensor(0.0, device="cuda")
         scale_drift = (
-            (gaussians._scaling - initial_scaling).pow(2).mean()
-            if gaussians._scaling.shape == initial_scaling.shape
+            (gaussians.anchor_cloud.anchors_log_scales - initial_scaling).pow(2).mean()
+            if gaussians.anchor_cloud.anchors_log_scales.shape == initial_scaling.shape
             else torch.tensor(0.0, device="cuda")
         )
 
@@ -289,18 +299,35 @@ def train_object(
 
         with torch.no_grad():
             if opt.update_until > iteration > opt.start_stat:
-                gaussians.training_statis(opt, pkg, pred.shape[2], pred.shape[1])
+                rendered_2d_points = pkg.get("rendered_2d_points")
+                points_grad_detached = None
+                if rendered_2d_points is not None and rendered_2d_points.grad is not None:
+                    points_grad_detached = rendered_2d_points.grad.detach().clone()
+
+                densifier.update_densification_state(
+                    visibility_mask=pkg["visible_anchors_mask"],
+                    negative_opacity_filter=pkg["negative_opacity_filter"],
+                    opacity=pkg["opacity"],
+                    points_grad=points_grad_detached,
+                    width=pred.shape[2],
+                    height=pred.shape[1],
+                )
+
                 densify_count += 1
                 if (
                     opt.densification
                     and densify_count % opt.update_interval == 0
-                    and gaussians._anchor.shape[0] < max_anchor_count
+                    and gaussians.anchor_cloud.anchors_positions.shape[0] < max_anchor_count
                 ):
-                    gaussians.run_densify(opt, iteration)
+                    densifier.growing_operation()
+                    densifier.pruning_operation(
+                        opacity_threshold=getattr(opt, "min_opacity", 0.005)
+                    )
+                    densifier.reset_state()
             optimizer.step()
-            if gaussians._scaling.shape == initial_scaling.shape:
-                gaussians._scaling.data.clamp_(max=initial_scaling.max().item())
-            gaussians._offset.data.clamp_(min=-max_offset_abs, max=max_offset_abs)
+            if gaussians.anchor_cloud.anchors_log_scales.shape == initial_scaling.shape:
+                gaussians.anchor_cloud.anchors_log_scales.data.clamp_(max=initial_scaling.max().item())
+            gaussians.anchor_cloud.gaussians_offsets.data.clamp_(min=-max_offset_abs, max=max_offset_abs)
 
         loss_hist.append(float(total.detach().item()))
         depth_hist.append(float(depth_loss.detach().item()))
@@ -309,16 +336,16 @@ def train_object(
                 "loss": f"{loss_hist[-1]:.4f}",
                 "depth": f"{depth_hist[-1]:.4f}",
                 "src": entry["source"],
-                "anchors": gaussians._anchor.shape[0],
+                "anchors": gaussians.anchor_cloud.anchors_positions.shape[0],
             })
 
-    gaussians.eval()
-    gaussians.save_ply(str(model_dir / "point_cloud.ply"))
-    gaussians.save_mlp_checkpoints(str(model_dir))
+    gaussians.decoder.eval()
+    gaussians.anchor_cloud.eval()
+    save_vroom_checkpoint(gaussians, str(model_dir / "point_cloud.ply"), str(model_dir))
 
     tail = loss_hist[-min(50, len(loss_hist)):]
     summary = {
-        "n_final_anchors": gaussians._anchor.shape[0],
+        "n_final_anchors": gaussians.anchor_cloud.anchors_positions.shape[0],
         "final_loss": float(np.mean(tail)) if tail else 0.0,
     }
     return {"gaussians": gaussians, "summary": summary}

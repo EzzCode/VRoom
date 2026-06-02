@@ -121,7 +121,7 @@ def generate_debug_artifacts(
 
 
 def _load_trained_gaussians(parent_gaussians, model_dir):
-    from object_refiner.utils.gstrain_bridge import VRoomModel as GaussianModel
+    from object_refiner.utils.gstrain_wrapper import build_vroom_gaussians, load_vroom_checkpoint
     from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
 
     model_dir = Path(model_dir)
@@ -130,19 +130,10 @@ def _load_trained_gaussians(parent_gaussians, model_dir):
         for k in GAUSSIAN_MODEL_DEFAULTS
     } if parent_gaussians is not None else GAUSSIAN_MODEL_DEFAULTS
 
-    gaussians = GaussianModel(
-        gaussian_type=str(kwargs.get("gaussian_type", "2D")),
-        feature_dim=int(kwargs.get("feature_dim", 32)),
-        gaussians_per_anchor=int(kwargs.get("gaussians_per_anchor", 10)),
-        voxel_size=float(kwargs.get("voxel_size", 0.001)),
-        render_mode=str(kwargs.get("render_mode", "RGB+ED")),
-        tile_size_2dgs=int(kwargs.get("tile_size_2dgs", 8)),
-    )
-    gaussians.load_ply(str(model_dir / "point_cloud.ply"))
-    gaussians.load_mlp_checkpoints(str(model_dir))
-    object.__setattr__(gaussians, "explicit_gs", False)
-    gaussians.weed_ratio = 0.0
-    gaussians.set_eval()
+    gaussians = build_vroom_gaussians(kwargs)
+    load_vroom_checkpoint(gaussians, str(model_dir / "point_cloud.ply"), str(model_dir))
+    gaussians.anchor_cloud.eval()
+    gaussians.decoder.eval()
     return gaussians
 
 

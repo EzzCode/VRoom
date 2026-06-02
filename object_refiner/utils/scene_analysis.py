@@ -5,10 +5,12 @@ from typing import Union, Any, cast
 import numpy as np
 import yaml
 from object_refiner.utils.transforms import ObjectFrame
-from .gstrain_bridge import VRoomModel as GaussianModel, SemanticCodec
+from .gstrain_wrapper import build_vroom_gaussians, load_vroom_checkpoint
+from gstrain.vroom_core.utilities.utils import SemanticsManager
 from .helpers import normalize
 from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
 import logging
+import torch
 logger = logging.getLogger(__name__)
 
 
@@ -86,30 +88,22 @@ def load_gaussians(model_path: Union[str, Path], ply_path=None):
     }
 
     resolved_ply = Path(ply_path) if ply_path else model_path / "point_cloud.ply"
-    model = GaussianModel(
-        gaussian_type=str(model_kwargs.get("gaussian_type", "2D")),
-        feature_dim=int(model_kwargs.get("feature_dim", 32)),
-        gaussians_per_anchor=int(model_kwargs.get("gaussians_per_anchor", 10)),
-        voxel_size=float(model_kwargs.get("voxel_size", 0.001)),
-        render_mode=str(model_kwargs.get("render_mode", "RGB+ED")),
-        tile_size_2dgs=int(model_kwargs.get("tile_size_2dgs", 8)),
-    )
-    model.load_ply(str(resolved_ply))                    # load anchors + label_ids
-    model.load_mlp_checkpoints(str(resolved_ply.parent)) # load MLPs (same dir as PLY)
-    if model.label_ids is None:
+    model = build_vroom_gaussians(model_kwargs)
+    load_vroom_checkpoint(model, str(resolved_ply), str(resolved_ply.parent))
+    if model.anchor_cloud.semantic_labels is None:
         raise ValueError(
-            f"Model at {model_path} does not have label_ids; cannot compute object scope."
+            f"Model at {model_path} does not have semantic labels; cannot compute object scope."
         )
-    model.id_encoder = SemanticCodec.from_labels(model.label_ids.view(-1))
-    object.__setattr__(model, "explicit_gs", False)   # training flag
-    model.weed_ratio = 0.0      # disable anchor pruning
-    model.set_eval()
+    unique_labels = torch.unique(model.anchor_cloud.semantic_labels.view(-1))
+    object.__setattr__(model, "id_encoder", SemanticsManager(unique_labels))
+    model.anchor_cloud.eval()
+    model.decoder.eval()
     model.optim_params = config.get("optim_params", {})
 
     logger.info(
-        "Loaded GaussianModel from %s with %d anchors and label IDs: %s",
-        model_path, len(model.get_anchor),
-        sorted(np.unique(model.label_ids.cpu().numpy()).tolist()),
+        "Loaded VRoomGaussians from %s with %d anchors and label IDs: %s",
+        model_path, len(model.anchor_cloud.anchors_positions),
+        sorted(np.unique(model.anchor_cloud.semantic_labels.cpu().numpy()).tolist()),
     )
     return model, pipeline_params
 
@@ -190,8 +184,8 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
         raise FileNotFoundError(f"PLY not found: {resolved_ply}")
 
     gaussians, pipe_config = load_gaussians(str(model_path), ply_path=str(resolved_ply))
-    all_anchors = gaussians.get_anchor.detach().cpu().numpy().astype(np.float32)
-    label_ids = cast(Any, gaussians.label_ids).detach().cpu().numpy().reshape(-1).astype(np.int64)
+    all_anchors = gaussians.anchor_cloud.anchors_positions.detach().cpu().numpy().astype(np.float32)
+    label_ids = cast(Any, gaussians.anchor_cloud.semantic_labels).detach().cpu().numpy().reshape(-1).astype(np.int64)
 
     object_mask = (label_ids == object_label_id)
     if not object_mask.any():
