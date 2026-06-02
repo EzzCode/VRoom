@@ -97,25 +97,26 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
     // Track accumulated colors+features behind the current
     // processed surfel
     float residual_color_feat_acc[CHANNELS] = {0};
+    float prev_color_feat[CHANNELS] = {0};
 
     // Track previous surfel's alpha
     float prev_alpha = 0;
 
     // Fetch pytorch-computed pixel gradient and precompute background dot product
-    __shared__ float grad_pixel_color_feat[BLOCK_SIZE][CHANNELS];
+    float grad_pixel_color_feat[CHANNELS];
     float bg_dot_pixel_grad = 0.f;
 
     if (valid_pixel)
     {
         for (int ch = 0; ch < CHANNELS; ch++)
         {
-            grad_pixel_color_feat[thread_block_ids.thread_rank()][ch] = grad_rendered_color_feat[pixel_idx +
+            grad_pixel_color_feat[ch] = grad_rendered_color_feat[pixel_idx +
                                                                                                  ch * img_H * img_W];
             // Fused Multiply-Add (FMA)
             // ldg routes VRAM access through read-only data (texture) cache
             // which is better for broadcasting to other threads and reducing L1 cache pressure.
             bg_dot_pixel_grad = __fmaf_rn(__ldg(&background[ch]),
-                                          grad_pixel_color_feat[thread_block_ids.thread_rank()][ch],
+                                          grad_pixel_color_feat[ch],
                                           bg_dot_pixel_grad);
         }
     }
@@ -340,16 +341,14 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
                 for (int ch = 0; ch < CHANNELS; ch++)
                 {
                     const float curr_color_feat = color_feat_batch[batch_surf_idx + ch * color_feat_stride];
-                    const float prev_color_feat = (batch_surf_idx > 0) ? color_feat_batch[batch_surf_idx - 1 +
-                                                                                          ch * color_feat_stride]
-                                                                       : 0;
-                    residual_color_feat_acc[ch] = prev_alpha * prev_color_feat +
+                    residual_color_feat_acc[ch] = prev_alpha * prev_color_feat[ch] +
                                                   (1.f - prev_alpha) * residual_color_feat_acc[ch];
                     grad_alpha += (curr_color_feat - residual_color_feat_acc[ch]) *
-                                  grad_pixel_color_feat[thread_block_ids.thread_rank()][ch];
+                                  grad_pixel_color_feat[ch];
+                    prev_color_feat[ch] = curr_color_feat;
 
                     // Also compute gradients w.r.t. colors+features
-                    grad_colors_feat[ch] = blending_weight * grad_pixel_color_feat[thread_block_ids.thread_rank()][ch];
+                    grad_colors_feat[ch] = blending_weight * grad_pixel_color_feat[ch];
                 }
 
                 // Path B: Accumulate gradients from aux outputs.
