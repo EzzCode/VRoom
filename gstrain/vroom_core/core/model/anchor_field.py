@@ -50,8 +50,8 @@ class AnchorCloud(nn.Module):
         self.visibility_mask = torch.empty((0,), dtype=torch.bool, device=self.device)
         self.semantic_manager = semantic_manager
         self.feature_dim = feature_dim
-        self.anchors_positions = (
-            nn.Parameter(torch.empty((0, 3), dtype=torch.float32, device=self.device)),
+        self.anchors_positions = nn.Parameter(
+            torch.empty((0, 3), dtype=torch.float32, device=self.device)
         )
 
         self.anchor_features = nn.Parameter(
