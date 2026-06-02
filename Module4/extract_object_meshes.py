@@ -1,4 +1,5 @@
 import argparse
+import gc
 import json
 import os
 import time
@@ -12,6 +13,7 @@ from export_ply import export_ply_binary
 from generate_sdf import fuse_tsdf
 from marching_cubes import run_marching_cubes
 from utils import remove_small_components, compute_depth_trunc, unproject_to_3d
+from ply_to_glb import save_glb
 
 # 1. Parse arguments
 
@@ -35,17 +37,19 @@ parser.add_argument("--trunc_factor", type=float, default=5.0,
                        " (default: 5.0)")
 parser.add_argument("--min_obs",      type=int,   default=3,
                      help="Min cameras that must observe a voxel to keep it (default: 3).")
-parser.add_argument("--min_component",type=float, default=0.05,
+parser.add_argument("--min_component",type=float, default=0.15,
                      help="Remove mesh fragments smaller than this fraction of" \
-                     " the largest component (default: 0.05)")
+                     " the largest component (default: 0.15)")
 parser.add_argument("--smooth_sigma", type=float, default=0.8,
-                     help="Gaussian smoothing sigma applied to TSDF grid before marching cubes"
+                     help="Gaussian smoothing sigma applied to TSDF grid before" \
+                     " marching cubes"
                      " (default: 0.8). Try 0.5-2.0 in voxel units.")
 parser.add_argument("--depth_margin", type=float, default=1.1,
                      help="Depth truncation margin multiplier (default: 1.1).")
 parser.add_argument("--depth_percentile", type=float, default=99.0,
-                     help="Percentile of valid object depth values used to compute depth truncation (default: 99.0).")
-parser.add_argument("--label",        type=int,   default=None,
+                     help="Percentile of valid object depth values used to compute" \
+                     " depth truncation (default: 99.0).")
+parser.add_argument("--label", type=int,   default=None,
                      help="Process only this label ID (default: None (all labels))")
 args = parser.parse_args()
 
@@ -84,6 +88,8 @@ curr_directory = os.path.dirname(__file__)
 input_dir = os.path.join(curr_directory, "inputs")
 output_dir = os.path.join(curr_directory, "objects")
 os.makedirs(output_dir, exist_ok=True) # create output directory if it doesn't exist
+output_glb_dir = os.path.join(curr_directory, "objects_glb") # glb for mobile app
+os.makedirs(output_glb_dir, exist_ok=True)
 
 # Load cameras
 with open(os.path.join(input_dir, "cameras.json"), 'r') as f:
@@ -110,8 +116,8 @@ for i, cam in enumerate(cameras):
 
     depth_maps_raw.append(np.load(os.path.join(input_dir, "raw_depth", f"{i:05d}.npy")))
     rgba = np.array(Image.open(os.path.join(input_dir, "renders", f"{i:05d}.png")))
-    # Drop alpha channel and convert to [0,1] range
-    color_images_raw.append(rgba[:, :, :3].astype(np.float64) / 255.0)
+    # Drop alpha channel
+    color_images_raw.append(rgba[:, :, :3])
     semantic_maps.append(np.array(Image.open(os.path.join(input_dir, "semantic", f"{i:05d}.png"))))
 
     # Load intrinsics and extrinsics
@@ -213,7 +219,7 @@ for label_id in sorted_labels:
         if len(pts) > 0:
             if len(pts) > 5000: # if too many points, randomly sample to speed up
                 # We don't need all points for bounding box calculation
-                sampled_indices = np.random.choice(len(pts), size=5000, replace=False)
+                sampled_indices = np.random.default_rng(42).choice(len(pts), size=5000, replace=False)
                 pts = pts[sampled_indices]
             all_world_pts.append(pts)
 
@@ -241,7 +247,6 @@ for label_id in sorted_labels:
 
     voxel_size = grid_size.max() / N # max to make sure object fits in grid
     trunc_margin = voxel_size * TRUNC_FACTOR # tsdf truncation margin
-    depth_trunc = BBOX_DEPTH_TRUNC
     print("Grid:", str(N) + "^3, voxel =", round(voxel_size, 4), "trunc =", round(trunc_margin, 4))
 
     # 5.5: Run TSDF fusion
@@ -253,8 +258,7 @@ for label_id in sorted_labels:
         voxel_size=voxel_size,
         trunc_margin=trunc_margin,
         color_images=masked_colors,
-        grid_origin=grid_min,
-        depth_trunc=depth_trunc
+        grid_origin=grid_min
     )
     print("TSDF fusion:", round(time.time() - t_fusion, 2), "s")
 
@@ -290,16 +294,25 @@ for label_id in sorted_labels:
     print("After cleanup:", len(vertices), "vertices,", len(triangles), "triangles")
         
     # 5.10: Scale and translate vertices from grid coordinates back to world coordinates
-    verts_arr = np.array(vertices) * voxel_size + grid_min # vectorized scaling
-
-    # Turn the array of vertices back into a list of tuples to be used in export
-    # Example: if verts_arr[i] = [x, y, z], then scaled_vertices[i] = (x, y, z)
+    verts_arr = vertices * voxel_size + grid_min # vectorized scaling
     scaled_vertices = [tuple(v) for v in verts_arr]
 
     # 5.11: Export mesh to PLY file
     ply_path = os.path.join(output_dir, f"object_{label_id:03d}.ply")
     export_ply_binary(scaled_vertices, triangles, ply_path, vertex_colors=vertex_colors)
     print("Saved", ply_path)
+
+    # 5.12: Export mesh to GLB file (for mobile AR)
+    glb_path = os.path.join(output_glb_dir, f"object_{label_id:03d}.glb")
+    save_glb(verts_arr, triangles, vertex_colors, glb_path)
+    print("Saved", glb_path)
+
+    # 5.13: Clenaup
+    del masked_depths, masked_colors, active_intrinsics, active_extrinsics, all_world_pts
+    del fused_grid, fused_colors, obs_count
+    del vertices, triangles, vertex_colors, verts_arr, scaled_vertices
+    gc.collect()
+    torch.cuda.empty_cache()
 
 total_end_time = time.time()
 total_time = total_end_time - start_time

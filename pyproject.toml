@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vroom"
 version = "0.1.0"
-requires-python = ">=3.9"
+requires-python = ">=3.8"
 
 
 
@@ -16,14 +16,15 @@ requires-python = ">=3.9"
 packages = [
     # gstrain  →  import gstrain ...
     "gstrain",
-    "gstrain.gaussian_renderer",
     "gstrain.vroom_core",
-    "gstrain.vroom_core.data",
-    "gstrain.vroom_core.export",
-    "gstrain.vroom_core.models",
-    "gstrain.vroom_core.training",
-    "gstrain.vroom_core.utils",
-    "gstrain.vroom_core.viewer",
+    "gstrain.vroom_core.core",
+    "gstrain.vroom_core.core.model",
+    "gstrain.vroom_core.core.training",
+    "gstrain.vroom_core.utilities",
+    "gstrain.vroom_core.utilities.data_utils",
+    "gstrain.vroom_core.utilities.gaussian_renderer",
+    "gstrain.vroom_core.utilities.training",
+    "gstrain.vroom_core.utilities.utils",
 
     # masks_and_tracking  →  import masks_and_tracking ...
     "masks_and_tracking",
