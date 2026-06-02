@@ -8,7 +8,6 @@ import torch.nn as nn
 
 from gstrain.vroom_core.utilities.utils import (
     compute_anchors_scale_and_rotation,
-    estimate_quantization_size,
     SemanticsManager,
 )
 
@@ -77,7 +76,7 @@ class AnchorCloud(nn.Module):
         )
 
     @property
-    def num_anchors(self) -> int:
+    def num_anchors(self):
         return self.anchors_positions.shape[0]
 
     def initialize_anchors(self, point_cloud_sampled):
@@ -91,10 +90,18 @@ class AnchorCloud(nn.Module):
                 else None
             )
         else:
-            raise ("no points in point cloud")
+            raise ValueError("no points in point cloud")
 
         anchor_cloud = self._generate_anchors(points, labels)
         self.set_anchors_cloud(anchor_cloud)
+
+    def estimate_quantization_size(self, knn_distances, min_size=1e-6):
+        """
+        Estimates a quantization size for a uniform grid using knn distances
+        """
+        quantization_size = torch.median(knn_distances[:, 1:]).item()
+        print(f"quantization size calculated = {quantization_size}")
+        return max(quantization_size, min_size)
 
     def _generate_anchors(self, point_cloud, point_labels):
         """
@@ -103,7 +110,9 @@ class AnchorCloud(nn.Module):
         distances_between_points = self._knn(point_cloud, k=4)
 
         if self.quantization_size is None:
-            self.quantization_size = estimate_quantization_size(distances_between_points)
+            self.quantization_size = self.estimate_quantization_size(
+                distances_between_points
+            )
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
@@ -207,7 +216,7 @@ class AnchorCloud(nn.Module):
                 anchor_labels[voxel_index] = torch.argmax(counts)
         return anchor_labels
 
-    def set_anchors_cloud(self, data: AnchorCloudData) -> None:
+    def set_anchors_cloud(self, data: AnchorCloudData):
         """set the anchor cloud"""
         self.anchors_positions = nn.Parameter(
             data.anchors_positions.clone().detach().to(self.device).requires_grad_(True)
@@ -240,13 +249,13 @@ class AnchorCloud(nn.Module):
 
     def append(
         self,
-        anchors_positions: torch.Tensor,
-        gaussians_offsets: torch.Tensor,
-        anchor_features: torch.Tensor,
-        anchors_log_scales: torch.Tensor,
-        anchors_rotations: torch.Tensor,
-        labels: Optional[torch.Tensor],
-    ) -> None:
+        anchors_positions,
+        gaussians_offsets,
+        anchor_features,
+        anchors_log_scales,
+        anchors_rotations,
+        labels,
+    ):
         """Appends new anchors to the anchor cloud after growing process"""
         self.anchors_positions = nn.Parameter(
             torch.cat(
@@ -294,7 +303,7 @@ class AnchorCloud(nn.Module):
                     torch.unique(self.semantic_labels.view(-1))
                 )
 
-    def prune(self, prune_mask: torch.Tensor) -> None:
+    def prune(self, prune_mask):
         """Prunes the anchor cloud after pruning process"""
         keep = ~prune_mask
         self.anchors_positions = nn.Parameter(

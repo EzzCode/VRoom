@@ -143,11 +143,10 @@ def main():
         "pipeline": {
             **pipeline_params,
             "output_dir": run_dir,
-            "bg_color": scene.background,
+            "background_color": scene.background,
         },
         "rendering": {
             "gaussian_type": model_kwargs.get("gaussian_type", "3D"),
-            "render_mode": model_kwargs.get("render_mode", "RGB+ED"),
             "tile_Size": model_kwargs.get("tile_Size", 8),
         },
         "densifier": cfg.get("densifier", {}),

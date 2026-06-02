@@ -25,7 +25,6 @@
         "name": "Neural_Gaussians_Model",
         "gaussian_type": "2D",
         "gs_per_anchor": 10,
-        "render_mode": "RGB+ED",
         "feature_dim": 32,
         "quantization_size": 0.001,
         "tile_Size": 8

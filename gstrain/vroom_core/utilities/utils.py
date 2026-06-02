@@ -127,7 +127,9 @@ def compute_anchors_scale_and_rotation(
     device: torch.device | str = "cuda",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute scale and rotation for anchors based on distances and quantization size"""
-    area_of_effect = distances[:, 1:].mean(dim=-1).clamp(min=max(quantization_size, 1e-6))
+    area_of_effect = (
+        distances[:, 1:].mean(dim=-1).clamp(min=max(quantization_size, 1e-6))
+    )
     log_scaling = torch.log(area_of_effect.sqrt()).unsqueeze(-1).repeat(1, 6)
     rotations = torch.zeros(
         (anchors_positions.shape[0], 4),
@@ -136,15 +138,6 @@ def compute_anchors_scale_and_rotation(
     )
     rotations[:, 0] = 1.0  # identity quaternion
     return log_scaling, rotations
-
-
-def estimate_quantization_size(knn_distances: torch.Tensor, min_size: float = 1e-6) -> float:
-    """
-    Estimates a quantization size for a uniform grid using knn distances
-    """
-    quantization_size = torch.median(knn_distances[:, 1:]).item()
-    print(f"quantization size calculated = {quantization_size}")
-    return max(quantization_size, min_size)
 
 
 def calc_volumetric_loss(scales: torch.Tensor, volume_lambda: float) -> torch.Tensor:
