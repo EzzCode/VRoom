@@ -10,9 +10,7 @@
             1.0
         ],
         "dataset_storage_device": "cpu",
-        "eval": true,
         "pc_downsampling_ratio": 1,
-        "add_mask": false,
         "llffhold": 8,
         "pretrained_checkpoint": "",
         "camera_center": [
@@ -26,11 +24,9 @@
         "name": "Neural_Gaussians_Model",
         "gaussian_type": "3D",
         "feat_dim": 32,
-        "view_dim": 3,
         "gs_per_anchor": 10,
         "voxel_size": 0.001,
-        "render_mode": "RGB+ED",
-        "tile_size_2dgs": 8
+        "tile_size_rasterizer": 8
     },
     "pipeline": {
         "save_iterations": [

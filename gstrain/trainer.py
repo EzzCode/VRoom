@@ -11,7 +11,7 @@ import torch
 from gstrain.vroom_core.core.model.anchor_field import AnchorCloud
 from gstrain.vroom_core.utilities.gaussian_decoder import GaussianDecoder
 from gstrain.vroom_core.core.training.orchestration import TrainingOrchestrator
-from gstrain.vroom_core.utilities.utils import seed_everything, CheckpointManager
+from gstrain.vroom_core.utilities.utils import seed_everything
 from gstrain.vroom_core.utilities.data_utils import TrainingScene
 from gstrain.vroom_core.config import load_vroom_config
 
@@ -31,9 +31,7 @@ def _build_dataset_args(model_params: dict, dataset_path: str, run_dir: str):
         masks=model_params.get("masks", "masks"),
         dataset_storage_device=model_params.get("dataset_storage_device", "cuda"),
         data_format=model_params.get("data_format", "colmap"),
-        eval=model_params.get("eval", False),
         llffhold=model_params.get("llffhold", 8),
-        add_mask=model_params.get("add_mask", False),
         add_depth=model_params.get("add_depth", False),
         white_background=model_params.get("white_background", False),
         random_background=model_params.get("random_background", False),
@@ -112,6 +110,8 @@ def main():
         voxel_size=model_kwargs.get("voxel_size", None),
         gaussians_per_anchor=model_kwargs.get("gs_per_anchor", 5),
         feature_dim=model_kwargs.get("feat_dim", 32),
+        k_knn=model_kwargs.get("k_knn", 4),
+        knn_chunk_size=model_kwargs.get("knn_chunk_size", 2048),
     )
     decoder = GaussianDecoder(
         feature_dim=model_kwargs.get("feat_dim", 32),
@@ -143,12 +143,12 @@ def main():
         "pipeline": {
             **pipeline_params,
             "output_dir": run_dir,
-            "bg_color": scene.background,
+            "background_color": scene.background,
         },
         "rendering": {
             "gaussian_type": model_kwargs.get("gaussian_type", "3D"),
             "render_mode": model_kwargs.get("render_mode", "RGB+ED"),
-            "tile_size_2dgs": model_kwargs.get("tile_size_2dgs", 8),
+            "tile_size_rasterizer": model_kwargs.get("tile_size_rasterizer", 8),
         },
         "densifier": cfg.get("densifier", {}),
     }

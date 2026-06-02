@@ -57,8 +57,8 @@ class TrainingOrchestrator:
         self.decoder = self.optmizer_configs["decoder"]
         self.gaussian_type = self.rendering_configs.get("gaussian_type", "2D")
         self.render_mode = self.rendering_configs.get("render_mode", "RGB+ED")
-        self.tile_size_2dgs = self.rendering_configs.get("tile_size_2dgs")
-        self.bg_color = self.pipeline_configs.get("bg_color")
+        self.tile_size_rasterizer = self.rendering_configs.get("tile_size_rasterizer")
+        self.background_color = self.pipeline_configs.get("background_color")
         self.dataloader = scene.getTrainCameras()
         self.visualization_interval = self.pipeline_configs.get(
             "visualization_interval", 500
@@ -76,6 +76,7 @@ class TrainingOrchestrator:
             anchor_cloud=self.anchor_cloud,
             optimizer=None,
             num_gaussians_per_anchor=self.decoder.number_gaussians_per_anchor,
+            densifier_configs=self.densifier_configs,
         )
         self.optimizer = Optimizer(self.optmizer_configs, self.densifier)
         self.densifier.optimizer = self.optimizer
@@ -127,10 +128,10 @@ class TrainingOrchestrator:
             decoded_output=decoded_output,
             gaussian_positions=gaussian_positions,
             normalized_rotations=normalized_rotations,
-            bg_color=self.bg_color,
+            background_color=self.background_color,
             gaussian_type=self.gaussian_type,
             render_mode=self.render_mode,
-            tile_size_2dgs=self.tile_size_2dgs,
+            tile_size_rasterizer=self.tile_size_rasterizer,
             semantics=semantics_pred,
         )
         rasterizer_output["visible_anchors_mask"] = visible_anchors_mask
@@ -234,7 +235,7 @@ class TrainingOrchestrator:
                     color_network=self.color_network,
                     gaussian_type=self.gaussian_type,
                     render_mode=self.render_mode,
-                    tile_size_2dgs=self.tile_size_2dgs,
+                    tile_size_rasterizer=self.tile_size_rasterizer,
                 )
 
             del step_output

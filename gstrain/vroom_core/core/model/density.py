@@ -1,11 +1,10 @@
-import math
 import torch
 
 from gstrain.vroom_core.utilities.training import extend_optimizer, prune_optimizer
 
 
 class DensifcationController:
-    def __init__(self, voxel_size, anchor_cloud, optimizer, num_gaussians_per_anchor=5):
+    def __init__(self, voxel_size, anchor_cloud, optimizer, num_gaussians_per_anchor=5, densifier_configs=None):
         self.gaussian_gradients_acc = None
         self.gaussian_visits = None
         self.anchor_opacity_acc = None
@@ -14,6 +13,7 @@ class DensifcationController:
         self.anchor_cloud = anchor_cloud
         self.optimizer = optimizer
         self.num_gaussians_per_anchor = num_gaussians_per_anchor
+        self.densifier_configs = densifier_configs or {}
 
     def reset_state(self):
         """Reset the state of the densifcation controller"""
@@ -188,21 +188,21 @@ class DensifcationController:
             # apply random elimination to avoid too many anchors spawining
             # priorty is given for higher thresholds/levels
             if level == 1:  # 50% survive
-                ratio_of_voxels_to_keep = 0.5
+                ratio_of_voxels_to_keep = self.densifier_configs.get("ratio_voxels_L2", 0.5)
                 random_mask = (
                     torch.rand_like(average_gradient_per_voxel)
                     < ratio_of_voxels_to_keep
                 ).bool()
                 above_threshold_mask = above_threshold_mask & random_mask
             elif level == 2:  # 60%
-                ratio_of_voxels_to_keep = 0.6
+                ratio_of_voxels_to_keep = self.densifier_configs.get("ratio_voxels_L3", 0.6)
                 random_mask = (
                     torch.rand_like(average_gradient_per_voxel)
                     < ratio_of_voxels_to_keep
                 ).bool()
                 above_threshold_mask = above_threshold_mask & random_mask
             elif level == 3:  # 80%
-                ratio_of_voxels_to_keep = 0.8
+                ratio_of_voxels_to_keep = self.densifier_configs.get("ratio_voxels_L4", 0.8)
                 random_mask = (
                     torch.rand_like(average_gradient_per_voxel)
                     < ratio_of_voxels_to_keep
@@ -330,7 +330,7 @@ class DensifcationController:
                 anchor_label = class_counts.view(n_new, n_classes).argmax(dim=1)
 
             anchor_scale = quantization_size
-            log_scale_val = 0.5 * math.log(max(anchor_scale, 1e-6))
+            log_scale_val = float(torch.tensor(anchor_scale).log().item())
             anchor_log_scales = torch.full(
                 (n_new, 6), log_scale_val, dtype=torch.float32, device=device
             )

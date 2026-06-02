@@ -248,7 +248,7 @@ def save_checkpoint(
     color_network,
     gaussian_type,
     render_mode,
-    tile_size_2dgs,
+    tile_size_rasterizer,
 ):
     """
     Saves a checkpoint for a given iteration.
@@ -264,7 +264,7 @@ def save_checkpoint(
         path=iter_dir,
         gaussian_type=gaussian_type,
         render_mode=render_mode,
-        tile_size_2dgs=tile_size_2dgs,
+        tile_size_rasterizer=tile_size_rasterizer,
     )
     torch.save(
         state_snapshot(

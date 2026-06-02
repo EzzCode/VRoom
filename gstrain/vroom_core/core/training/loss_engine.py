@@ -76,8 +76,10 @@ class LossEngine:
         return 1 - (numerator / denominator).mean()
 
     def calc_semantic_loss(self, mask, model_guess):
-        mask_label_idx = self.semantic_manager.build_lookup_table(mask)
-        model_guess = model_guess.unsqueeze(0)
+        mask_label_idx = self.semantic_manager.build_lookup_table(
+            mask
+        )  # map each label in the pixel into known indices
+        model_guess = model_guess.unsqueeze(0)  # classes x width x height
         mask_label_idx = mask_label_idx.unsqueeze(0)
         return F.cross_entropy(
             model_guess, mask_label_idx, ignore_index=0, reduction="mean"

@@ -9,10 +9,10 @@ def render(
     decoded_output,
     gaussian_positions,
     normalized_rotations,
-    bg_color,
-    gaussian_type="3D",
+    background_color,
+    gaussian_type="2D",
     render_mode="RGB+ED",
-    tile_size_2dgs=8,
+    tile_size_rasterizer=8,
     semantics=None,
 ):
     xyz = gaussian_positions
@@ -22,7 +22,7 @@ def render(
     rot = normalized_rotations
 
     render_device = xyz.device
-    bg_color = bg_color.to(render_device)
+    background_color = background_color.to(render_device)
     K = torch.tensor(
         [
             [viewpoint_camera.fx, 0, viewpoint_camera.cx],
@@ -47,9 +47,9 @@ def render(
             Ks=K[None],
             width=int(viewpoint_camera.image_width),
             height=int(viewpoint_camera.image_height),
-            backgrounds=bg_color[None],
+            backgrounds=background_color[None],
             packed=False,
-            render_mode=render_mode,
+            render_mode="RGB+ED",
             features=semantics.detach() if semantics is not None else None,
         )
     elif gaussian_type == "2D":
@@ -70,7 +70,7 @@ def render(
             Ks=K[None],
             width=int(viewpoint_camera.image_width),
             height=int(viewpoint_camera.image_height),
-            backgrounds=bg_color[None],
+            backgrounds=background_color[None],
             near_plane=0.01,
             far_plane=100.0,
         )

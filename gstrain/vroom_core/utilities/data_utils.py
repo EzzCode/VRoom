@@ -343,11 +343,11 @@ class SceneBundle:
 
 
 def discover_colmap_scene(
-    root: str, images: str, depths: str, masks: str, add_mask: bool, add_depth: bool
+    root: str, images: str, depths: str, masks: str, add_depth: bool
 ) -> SceneLayout:
     base = Path(root)
     image_dir = base / images
-    mask_dir = (base / masks) if add_mask else None
+    mask_dir = None
     depth_dir = None
     metadata_candidates = [
         (base / "sparse/0/images.bin", base / "sparse/0/cameras.bin", True),
@@ -532,13 +532,8 @@ def read_camera_records(layout: SceneLayout) -> list[FrameRecord]:
 
 
 def split_records(
-    records: list[FrameRecord], eval_mode: bool, llffhold: int
+    records: list[FrameRecord], llffhold: int
 ) -> tuple[list[FrameRecord], list[FrameRecord]]:
-    if eval_mode:
-        return (
-            [record for index, record in enumerate(records) if index % llffhold != 0],
-            [record for index, record in enumerate(records) if index % llffhold == 0],
-        )
     return (
         [record for record in records if "test" not in record.image_name],
         [record for record in records if "test" in record.image_name],
@@ -547,17 +542,15 @@ def split_records(
 
 def load_colmap_bundle(
     root: str,
-    eval_mode: bool,
     images: str,
     depths: str,
     masks: str,
-    add_mask: bool,
     add_depth: bool,
     llffhold: int = 32,
 ) -> SceneBundle:
-    layout = discover_colmap_scene(root, images, depths, masks, add_mask, add_depth)
+    layout = discover_colmap_scene(root, images, depths, masks, add_depth)
     records = read_camera_records(layout)
-    train_records, test_records = split_records(records, eval_mode, llffhold)
+    train_records, test_records = split_records(records, llffhold)
     return SceneBundle(
         point_cloud=load_point_cloud(str(layout.point_cloud_file)),
         train_records=train_records,
@@ -658,11 +651,9 @@ class TrainingScene:
 
         bundle = load_colmap_bundle(
             args.dataset_path,
-            args.eval,
             args.frames,
             args.depths,
             args.masks,
-            args.add_mask,
             args.add_depth,
             args.llffhold,
         )

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -9,32 +8,8 @@ import torch.nn as nn
 
 from gstrain.vroom_core.utilities.utils import (
     SemanticsManager,
+    compute_anchors_scale,
 )
-
-
-def compute_anchors_scale(
-    anchors_positions: torch.Tensor,
-    voxel_size: float,
-    device: torch.device | str = "cuda",
-) -> torch.Tensor:
-    """Compute scale for anchors based on voxel size"""
-    log_scale_val = 0.5 * math.log(max(voxel_size, 1e-6))
-    return torch.full(
-        (anchors_positions.shape[0], 6),
-        log_scale_val,
-        dtype=torch.float32,
-        device=device,
-    )
-
-
-def estimate_voxel_size(knn_distances: torch.Tensor, min_size: float = 1e-6) -> float:
-    """
-    Estimates a voxel size for a uniform grid using knn distances
-    """
-    voxel_size = torch.median(knn_distances).item()
-    voxel_size = max(voxel_size, min_size)
-    print(f"Calculated voxel size = {voxel_size}")
-    return voxel_size
 
 
 @dataclass
@@ -62,9 +37,13 @@ class AnchorCloud(nn.Module):
         density_mode=False,
         semantic_manager=None,
         device="cuda",
+        k_knn=4,
+        knn_chunk_size=2048,
     ):
         super().__init__()
         self.device = device
+        self.k_knn = k_knn
+        self.knn_chunk_size = knn_chunk_size
         self.gaussians_per_anchor = gaussians_per_anchor
         self.voxel_size = voxel_size
         self.density_mode = density_mode
@@ -113,14 +92,24 @@ class AnchorCloud(nn.Module):
         anchor_cloud = self._generate_anchors(points, labels)
         self.set_anchors_cloud(anchor_cloud)
 
+    def estimate_voxel_size(knn_distances: torch.Tensor, min_size=1e-6):
+        """
+        Estimates a voxel size for a uniform dgrid using knn distances
+        """
+        voxel_size = torch.median(knn_distances).item()
+        voxel_size = max(voxel_size, min_size)
+        print(f"Calculated voxel size = {voxel_size}")
+        return voxel_size
+
     def _generate_anchors(self, point_cloud, point_labels):
         """
         Intialize the anchor cloud from the sparse point cloud by quantization
         """
         distances_between_points = self._knn(point_cloud, k=4)
+        distances_between_anchors = self._knn(self.anchors_positions, k=4)
 
         if self.voxel_size is None:
-            self.voxel_size = estimate_voxel_size(distances_between_points)
+            self.voxel_size = self.estimate_voxel_size(distances_between_points)
 
         # voxelize the point cloud
         unique_voxels, inversed_indices = self._quantize_cloud(
@@ -141,6 +130,7 @@ class AnchorCloud(nn.Module):
         # set scale for each anchor
         log_scales = compute_anchors_scale(
             self.anchors_positions,
+            distances_between_anchors,
             self.voxel_size,
             self.device,
         )
@@ -178,10 +168,15 @@ class AnchorCloud(nn.Module):
             voxel_size=self.voxel_size,
         )
 
-    def _knn(self, point_cloud, k, chunk_size=2048):
+    def _knn(self, point_cloud, k=None, chunk_size=None):
         """finds the k nearest neighbors of each point in the point cloud"""
+        if k is None:
+            k = self.k_knn
+        if chunk_size is None:
+            chunk_size = self.knn_chunk_size
         with torch.no_grad():
             final_distances = torch.empty((point_cloud.shape[0], k), device=self.device)
+            # calculate the distance between each chunk and the point cloud points using broadcasting
             for i in range(0, point_cloud.shape[0], chunk_size):
                 end = min(i + chunk_size, point_cloud.shape[0])
                 chunk = point_cloud[i:end]

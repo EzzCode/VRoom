@@ -120,11 +120,6 @@ def projection_matrix(
     return matrix
 
 
-
-
-
-
-
 class CheckpointManager:
     def __init__(self, anchor_cloud, decoder) -> None:
         self.anchor_cloud = anchor_cloud
@@ -211,7 +206,7 @@ class CheckpointManager:
         path: str,
         gaussian_type: str = "3D",
         render_mode: str = "RGB+ED",
-        tile_size_2dgs: int = 8,
+        tile_size_rasterizer: int = 8,
     ) -> None:
         ensure_directory(path)
         self.decoder.eval()
@@ -244,7 +239,7 @@ class CheckpointManager:
                 "appearance_dim": appearance_dim,
                 "gs_attr": gaussian_type,
                 "render_mode": render_mode,
-                "tile_size_2dgs": tile_size_2dgs,
+                "tile_size_rasterizer": tile_size_rasterizer,
             },
             os.path.join(path, "vroom_bundle.pt"),
         )
@@ -292,7 +287,7 @@ class CheckpointManager:
             "appearance_dim": int(appearance_dim),
             "gs_attr": "3D",
             "render_mode": "RGB+ED",
-            "tile_size_2dgs": 8,
+            "tile_size_rasterizer": 8,
         }
 
     def _stack_prefixed(self, element, prefix: str) -> np.ndarray:
@@ -341,15 +336,17 @@ class SemanticsManager:
             mask_match, labels_indices, torch.zeros_like(labels_indices)
         )
 
-        return labels_indices
+        return labels_indices  # size of number of anchors
 
     def one_hot_encode(self, labels_indices):
         return F.one_hot(labels_indices, num_classes=self.num_classes)
 
-    def one_hot_decode(self, one_hot, num_classes):
-        indices = torch.argmax(one_hot, dim=1)
-        self.label_ids = self.label_ids.to(one_hot.device)
-        return self.label_ids[indices]
-
     def update_current_num_classes(self, labels):
         self.num_classes = len(torch.unique(labels))
+
+
+def compute_anchors_scale(anchors_positions, distances, voxel_size, device):
+    """Compute scale for anchors based on distances between anchors"""
+    area_of_effect = distances[:, 1:].mean(dim=-1).clamp(min=max(voxel_size, 1e-6))
+    log_scaling = torch.log(area_of_effect.sqrt()).unsqueeze(-1).repeat(1, 6)
+    return log_scaling

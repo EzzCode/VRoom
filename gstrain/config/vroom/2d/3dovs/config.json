@@ -1,7 +1,7 @@
 {
     "experiment": {
         "dataset_name": "3dovs",
-        "save_dir": "2d_crossentropy_loss_01",
+        "save_dir": "training_results",
         "dataset_path": "datasets/3dovs/bed",
         "frames": "images",
         "masks": "masks",
@@ -10,9 +10,7 @@
             1.0
         ],
         "dataset_storage_device": "cpu",
-        "eval": true,
         "pc_downsampling_ratio": 1,
-        "add_mask": false,
         "llffhold": 8,
         "pretrained_checkpoint": "",
         "camera_center": [
@@ -26,11 +24,11 @@
         "name": "Neural_Gaussians_Model",
         "gaussian_type": "2D",
         "feat_dim": 32,
-        "view_dim": 3,
         "gs_per_anchor": 10,
         "voxel_size": 0.001,
-        "render_mode": "RGB+ED",
-        "tile_size_2dgs": 8
+        "tile_size_rasterizer": 8,
+        "k_knn": 4,
+        "knn_chunk_size": 2048
     },
     "pipeline": {
         "save_iterations": [
@@ -77,6 +75,9 @@
         "desification_start": 1500,
         "desification_end": 30000,
         "densification_interval": 100,
-        "min_opacity": 0.005
+        "min_opacity": 0.005,
+        "ratio_voxels_L2": 0.5,
+        "ratio_voxels_L3": 0.6,
+        "ratio_voxels_L4": 0.8
     }
 }
