@@ -3,6 +3,17 @@ import torch.nn.functional as F
 from gstrain.vroom_core.utilities.utils import calc_volumetric_loss
 
 
+def create_gaussian_window(window_size, channel, device, dtype, sigma=1.5):
+    with torch.no_grad():
+        coords = torch.arange(window_size, dtype=dtype, device=device)
+        mean = (window_size - 1) / 2.0
+        gauss = torch.exp(-((coords - mean) ** 2) / (2 * sigma ** 2))
+        gauss = gauss / gauss.sum()
+        gauss_2d = torch.outer(gauss, gauss)
+        window = gauss_2d.expand(channel, 1, window_size, window_size).contiguous()
+    return window
+
+
 class LossEngine:
     def __init__(self, semantic_manager):
         self.semantic_manager = semantic_manager
@@ -18,17 +29,23 @@ class LossEngine:
         padding,
         luminance_stabilizer,
         contrast_stabilizer,
+        sigma=1.5,
     ):
-        # because avg_pool2d requires 4D inputs (Num of batches, color channels, height, width)
+        # because conv2d requires 4D inputs (Num of batches, color channels, height, width)
         render_4d = render.unsqueeze(0)
         real_image_4d = real_image.unsqueeze(0)
 
+        channels = render_4d.shape[1]
+        window = create_gaussian_window(
+            window_size, channels, render.device, render.dtype, sigma=sigma
+        )
+
         # Represents the average luminance (mu)
-        mean_filter_render = F.avg_pool2d(
-            render_4d, kernel_size=window_size, stride=1, padding=padding
+        mean_filter_render = F.conv2d(
+            render_4d, window, stride=1, padding=padding, groups=channels
         )  # mu x
-        mean_filter_real = F.avg_pool2d(
-            real_image_4d, kernel_size=window_size, stride=1, padding=padding
+        mean_filter_real = F.conv2d(
+            real_image_4d, window, stride=1, padding=padding, groups=channels
         )  # mu y
 
         mean_filter_render_squared = mean_filter_render**2  # (mu x)^2
@@ -38,17 +55,18 @@ class LossEngine:
         mean_product = mean_filter_render * mean_filter_real  # (mu x) * (mu y)
 
         # variance calculation: E(x^2) - E(x)^2
-        real_img_squared_avg = F.avg_pool2d(
-            real_image_4d**2, kernel_size=window_size, stride=1, padding=padding
+        real_img_squared_avg = F.conv2d(
+            real_image_4d**2, window, stride=1, padding=padding, groups=channels
         )  # E(x^2)
-        render_squared_avg = F.avg_pool2d(
-            render_4d**2, kernel_size=window_size, stride=1, padding=padding
+        render_squared_avg = F.conv2d(
+            render_4d**2, window, stride=1, padding=padding, groups=channels
         )  # E(y^2)
-        real_and_render_avg = F.avg_pool2d(
+        real_and_render_avg = F.conv2d(
             render_4d * real_image_4d,
-            kernel_size=window_size,
+            window,
             stride=1,
             padding=padding,
+            groups=channels,
         )  # E(xy)
 
         variance_real_image = real_img_squared_avg - mean_filter_real_squared
