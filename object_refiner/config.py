@@ -28,16 +28,17 @@ class ObjectTrainingConfig:
     max_offset_abs: float = 0.45
     
     # Base Optimization Learning Rates (will be scaled by lr_scale)
-    offset_lr_init: float = 0.0040
-    offset_lr_final: float = 0.00005
-    feature_lr: float = 0.0075
-    scaling_lr: float = 0.0015
-    rotation_lr: float = 0.0020
-    mlp_opacity_lr_init: float = 0.0020
-    mlp_opacity_lr_final: float = 0.000020
-    mlp_cov_lr: float = 0.0040
-    mlp_color_lr_init: float = 0.0080
-    mlp_color_lr_final: float = 0.000050
+    gaussian_offset_lr_init: float = 0.0040
+    gaussian_offset_lr_final: float = 0.00005
+    anchor_feat_lr: float = 0.0075
+    anchor_scale_lr: float = 0.0015
+    anchor_rot_lr: float = 0.0020
+    decoder_opacity_lr_init: float = 0.0020
+    decoder_opacity_lr_final: float = 0.000020
+    decoder_cov_lr_init: float = 0.0040
+    decoder_cov_lr_final: float = 0.0040
+    decoder_color_lr_init: float = 0.0080
+    decoder_color_lr_final: float = 0.000050
     
     # Pipeline specific
     generated_weight: float = 1.0

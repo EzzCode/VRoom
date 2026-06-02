@@ -15,11 +15,9 @@ WS_CLIP_MIN        = 0.05   # world-scale ratio clamp (lower)
 WS_CLIP_MAX        = 2.0    # world-scale ratio clamp (upper)
 
 GAUSSIAN_MODEL_DEFAULTS = {
-    "gs_attr": "2D",
-    "feat_dim": 32,
-    "view_dim": 3,
-    "appearance_dim": 0,
-    "n_offsets": 10,
+    "gaussian_type": "2D",
+    "feature_dim": 32,
+    "gaussians_per_anchor": 10,
     "voxel_size": 0.001,
     "render_mode": "RGB+ED",
     "tile_size_2dgs": 8,

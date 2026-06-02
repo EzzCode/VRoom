@@ -41,17 +41,12 @@ class SemanticCodec(SemanticsManager):
 class VRoomModel(nn.Module):
     """
     Composite model for object_refiner that holds native gstrain objects.
-
-    Parameters match the old GaussianModel API so existing callers need no
-    changes except importing VRoomModel instead.
     """
 
     def __init__(
         self,
-        gs_attr: str,
+        gaussian_type: str,
         feature_dim: int,
-        view_dim: int,
-        appearance_dim: int,
         gaussians_per_anchor: int,
         voxel_size: float,
         render_mode: str,
@@ -61,10 +56,8 @@ class VRoomModel(nn.Module):
         self.device = "cuda"
 
         # Config attrs used by renderer / wrapper
-        self.gs_attr = gs_attr
+        self.gaussian_type = gaussian_type
         self.feature_dim = feature_dim
-        self.view_dim = view_dim
-        self.appearance_dim = appearance_dim
         self.gaussians_per_anchor = gaussians_per_anchor
         self.voxel_size = voxel_size
         self.render_mode = render_mode
@@ -164,7 +157,7 @@ class VRoomModel(nn.Module):
     def save_mlp_checkpoints(self, path: str) -> None:
         self.checkpoint_manager.save_decoder(
             path,
-            gaussian_type=self.gs_attr,
+            gaussian_type=self.gaussian_type,
             render_mode=self.render_mode,
             tile_size_2dgs=self.tile_size_2dgs,
         )

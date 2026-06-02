@@ -11,7 +11,6 @@ from typing import List, Optional
 from object_refiner.utils.gstrain_wrapper import prefilter_anchors as _prefilter
 from object_refiner.utils.gstrain_wrapper import render_rgba as _gstrain_render
 from object_refiner.utils.gstrain_bridge import VRoomModel as GaussianModel
-from object_refiner.utils.config_compat import adapt_legacy_model_config, adapt_legacy_training_config
 from object_refiner.utils.helpers import ssim_loss as _ssim_loss
 
 from argparse import Namespace
@@ -145,13 +144,10 @@ def train_object(
         k: getattr(parent_gaussians, k, GAUSSIAN_MODEL_DEFAULTS[k])
         for k in GAUSSIAN_MODEL_DEFAULTS
     } if parent_gaussians is not None else GAUSSIAN_MODEL_DEFAULTS.copy()
-    kwargs = adapt_legacy_model_config(kwargs)
 
     gaussians = GaussianModel(
-        gs_attr=str(kwargs.get("gs_attr", "2D")),
+        gaussian_type=str(kwargs.get("gaussian_type", "2D")),
         feature_dim=int(kwargs.get("feature_dim", 32)),
-        view_dim=int(kwargs.get("view_dim", 3)),
-        appearance_dim=int(kwargs.get("appearance_dim", 0)),
         gaussians_per_anchor=int(kwargs.get("gaussians_per_anchor", 10)),
         voxel_size=float(kwargs.get("voxel_size", 0.001)),
         render_mode=str(kwargs.get("render_mode", "RGB+ED")),
@@ -170,25 +166,36 @@ def train_object(
     if not hasattr(opt, "lambda_dreg"):
         opt.lambda_dreg = 0.01
 
-    #freeze anchor
+    # freeze anchor positions (since we are refining offsets/MLP weights)
     opt.iterations = n_iterations
-    opt.position_lr_init = opt.position_lr_final = opt.appearance_lr_init = opt.appearance_lr_final = 0.0
-    opt.position_lr_max_steps = opt.offset_lr_max_steps = opt.mlp_opacity_lr_max_steps = opt.mlp_cov_lr_max_steps = opt.mlp_color_lr_max_steps = opt.appearance_lr_max_steps = n_iterations
+    opt.anchor_pos_lr_init = opt.anchor_pos_lr_final = 0.0
+    opt.anchor_pos_lr_max_steps = n_iterations
+    opt.anchor_pos_lr_delay_mult = 0.01
 
     # learning rates scaled by lr_scale
-    opt.offset_lr_init = config.offset_lr_init * lr_scale
-    opt.offset_lr_final = config.offset_lr_final * lr_scale
-    opt.feature_lr = config.feature_lr * lr_scale
-    opt.scaling_lr = config.scaling_lr * lr_scale
-    opt.rotation_lr = config.rotation_lr * lr_scale
+    opt.gaussian_offset_lr_init = config.gaussian_offset_lr_init * lr_scale
+    opt.gaussian_offset_lr_final = config.gaussian_offset_lr_final * lr_scale
+    opt.gaussian_offset_lr_max_steps = n_iterations
+    opt.gaussian_offset_lr_delay_mult = 0.01
 
-    opt.mlp_opacity_lr_init = config.mlp_opacity_lr_init * lr_scale
-    opt.mlp_opacity_lr_final = config.mlp_opacity_lr_final * lr_scale
-    opt.mlp_cov_lr_init = opt.mlp_cov_lr_final = config.mlp_cov_lr * lr_scale
-    opt.mlp_color_lr_init = config.mlp_color_lr_init * lr_scale
-    opt.mlp_color_lr_final = config.mlp_color_lr_final * lr_scale
+    opt.anchor_feat_lr = config.anchor_feat_lr * lr_scale
+    opt.anchor_scale_lr = config.anchor_scale_lr * lr_scale
+    opt.anchor_rot_lr = config.anchor_rot_lr * lr_scale
 
-    opt = adapt_legacy_training_config(opt)
+    opt.decoder_opacity_lr_init = config.decoder_opacity_lr_init * lr_scale
+    opt.decoder_opacity_lr_final = config.decoder_opacity_lr_final * lr_scale
+    opt.decoder_opacity_lr_max_steps = n_iterations
+    opt.decoder_opacity_lr_delay_mult = 0.01
+
+    opt.decoder_cov_lr_init = config.decoder_cov_lr_init * lr_scale
+    opt.decoder_cov_lr_final = config.decoder_cov_lr_final * lr_scale
+    opt.decoder_cov_lr_max_steps = n_iterations
+    opt.decoder_cov_lr_delay_mult = 0.01
+
+    opt.decoder_color_lr_init = config.decoder_color_lr_init * lr_scale
+    opt.decoder_color_lr_final = config.decoder_color_lr_final * lr_scale
+    opt.decoder_color_lr_max_steps = n_iterations
+    opt.decoder_color_lr_delay_mult = 0.01
 
     opt.densification = enable_densification
     if enable_densification:

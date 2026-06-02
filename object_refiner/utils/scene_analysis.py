@@ -5,7 +5,6 @@ from typing import Union, Any, cast
 import numpy as np
 import yaml
 from object_refiner.utils.transforms import ObjectFrame
-from object_refiner.utils.config_compat import adapt_legacy_model_config
 from .gstrain_bridge import VRoomModel as GaussianModel, SemanticCodec
 from .helpers import normalize
 from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
@@ -85,14 +84,11 @@ def load_gaussians(model_path: Union[str, Path], ply_path=None):
         k: kwargs.get(k, GAUSSIAN_MODEL_DEFAULTS[k])
         for k in GAUSSIAN_MODEL_DEFAULTS
     }
-    model_kwargs = adapt_legacy_model_config(model_kwargs)
 
     resolved_ply = Path(ply_path) if ply_path else model_path / "point_cloud.ply"
     model = GaussianModel(
-        gs_attr=str(model_kwargs.get("gs_attr", "2D")),
+        gaussian_type=str(model_kwargs.get("gaussian_type", "2D")),
         feature_dim=int(model_kwargs.get("feature_dim", 32)),
-        view_dim=int(model_kwargs.get("view_dim", 3)),
-        appearance_dim=int(model_kwargs.get("appearance_dim", 0)),
         gaussians_per_anchor=int(model_kwargs.get("gaussians_per_anchor", 10)),
         voxel_size=float(model_kwargs.get("voxel_size", 0.001)),
         render_mode=str(model_kwargs.get("render_mode", "RGB+ED")),

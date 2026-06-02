@@ -48,7 +48,7 @@ def make_camera(R, T, K, width, height, uid=0):
 def prefilter_anchors(gaussians, cam):
     """Return a boolean mask (N,) of anchors visible from cam."""
     try:
-        return _culling(cam, gaussians.anchor_cloud, gaussians.gs_attr).squeeze()
+        return _culling(cam, gaussians.anchor_cloud, gaussians.gaussian_type).squeeze()
     except Exception:
         return gaussians._anchor_mask
 
@@ -68,7 +68,7 @@ def render_rgba(
 
     if visible_mask is None:
         try:
-            visible_mask = _culling(cam, gaussians.anchor_cloud, gaussians.gs_attr).squeeze()
+            visible_mask = _culling(cam, gaussians.anchor_cloud, gaussians.gaussian_type).squeeze()
         except Exception:
             visible_mask = gaussians._anchor_mask
 
@@ -105,7 +105,7 @@ def render_rgba(
         gaussian_positions=gaussian_positions,
         normalized_rotations=normalized_rotations,
         bg_color=bg,
-        gaussian_type=gaussians.gs_attr,
+        gaussian_type=gaussians.gaussian_type,
         render_mode=gaussians.render_mode,
         tile_size_2dgs=gaussians.tile_size_2dgs,
     )
@@ -126,7 +126,7 @@ def render_rgba(
             "negative_opacity_filter": decoded_output["negative_opacity_filter"],
             "render_depth": pkg.get("render_depth"),
         })
-        if gaussians.gs_attr == "2D":
+        if gaussians.gaussian_type == "2D":
             return_pkg.update({
                 "render_normals": pkg.get("render_normals"),
                 "render_normals_from_depth": pkg.get("render_normals_from_depth"),
