@@ -13,7 +13,7 @@ from .helpers import normalize
 
 
 def look_at(eye, target, up):
-    """Axes: x-right, y-down, z-forward (right hand)
+    """Axis: x-right, y-down, z-forward (right hand)
     a camera matrix pointing at the object"""
     eye = np.asarray(eye, dtype=np.float32)
     forward = normalize(np.asarray(target) - eye)
@@ -53,7 +53,6 @@ def orbit_position(azimuth_deg, elevation_deg):
 
 @dataclass
 class ObjectFrame:
-    """Coordinate frame anchored to an object: bridges World, Local, and Virtual spaces."""
     centroid: np.ndarray   
     up: np.ndarray         
     base_dir: np.ndarray   
@@ -82,18 +81,18 @@ class ObjectFrame:
         pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
         R = self.R
         if R is None:
-            raise RuntimeError("Rotation matrix R is not initialized")
+            raise RuntimeError("matrix R is not initialized")
         return (R @ (pts - self.centroid).T).T
 
     def local_to_world(self, pts):
         pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
         R = self.R
         if R is None:
-            raise RuntimeError("Rotation matrix R is not initialized")
+            raise RuntimeError(" matrix R is not initialized")
         return (R.T @ pts.T).T + self.centroid
 
     def virtual_to_world_camera(self, azimuth_deg, elevation_deg):
-        """Returns (R_w2c, T_w2c, camera_pos_world) for a Virtual orbit view."""
+        """Returns (R_w2c, T_w2c, camera_pos_world)"""
         c_V = orbit_position(azimuth_deg, elevation_deg)
         c_L = (R_L2V.T @ c_V) * self.radius
         c_W = self.local_to_world(c_L.reshape(1, 3))[0]

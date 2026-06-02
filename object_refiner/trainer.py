@@ -1,4 +1,5 @@
 import logging
+import dataclasses
 from pathlib import Path
 from typing import Any, cast
 import numpy as np
@@ -8,11 +9,9 @@ from tqdm.auto import tqdm
 
 from object_refiner.utils.gstrain_wrapper import prefilter_anchors as _prefilter
 from object_refiner.utils.gstrain_wrapper import render_rgba as _gstrain_render
-from object_refiner.utils.gstrain_wrapper import build_vroom_gaussians, save_vroom_checkpoint, ssim_loss as _ssim_loss
+from object_refiner.utils.gstrain_wrapper import build_vroom_gaussians, save_vroom_checkpoint, ssim_loss
 from gstrain.vroom_core.core.model.density import DensifcationController
 from gstrain.vroom_core.utilities.training import Optimizer as GstrainOptimizer
-
-from argparse import Namespace
 from .utils.gstrain_wrapper import make_camera
 from .utils.colmap_init import load_colmap_object_point_cloud
 from .constants import GAUSSIAN_MODEL_DEFAULTS
@@ -34,24 +33,6 @@ def train_object(
 ):
     if not built_views:
         raise RuntimeError("No views provided.")
-
-    n_iterations = config.iterations
-    lr_scale = config.lr_scale
-    max_init_points = config.max_init_points
-    colmap_init_target_points = config.colmap_init_target_points
-    rgb_weight = config.rgb_weight
-    generated_rgb_scale = config.generated_rgb_scale
-    alpha_weight = config.alpha_weight
-    outside_alpha_weight = config.outside_alpha_weight
-    depth_weight = config.depth_weight
-    depth_start_iter = config.depth_start_iter
-    depth_front_weight = config.depth_front_weight
-    depth_back_weight = config.depth_back_weight
-    depth_alpha_threshold = config.depth_alpha_threshold
-    enable_densification = config.enable_densification
-    max_anchor_count = config.max_anchor_count
-    densify_grad_threshold = config.densify_grad_threshold
-    max_offset_abs = config.max_offset_abs
 
     model_dir = Path(output_dir) / "06_model"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -84,7 +65,7 @@ def train_object(
         })
 
     # Render parent depth targets
-    if depth_weight > 0.0 and parent_gaussians is not None:
+    if config.depth_weight > 0.0 and parent_gaussians is not None:
         with torch.no_grad():
             if parent_gaussians.anchor_cloud.semantic_labels is not None:
                 obj_mask = parent_gaussians.anchor_cloud.semantic_labels.squeeze() == object_id
@@ -93,18 +74,18 @@ def train_object(
                         if entry["source"] != "real":
                             continue
 
-                        vis = _prefilter(parent_gaussians, entry["camera"])
+                        visible = _prefilter(parent_gaussians, entry["camera"])
 
-                        pkg = _gstrain_render(
+                        render = _gstrain_render(
                             parent_gaussians,
                             entry["camera"],
                             bg_white=False,
                             object_label_id=object_id,
                             training=False,
-                            visible_mask=vis,
+                            visible_mask=visible,
                         )
 
-                        depth = pkg.get("render_depth")
+                        depth = render.get("render_depth")
                         if depth is None:
                             continue
                         depth = cast(Any, depth)
@@ -112,21 +93,21 @@ def train_object(
                         if depth is None:
                             continue
 
-                        alpha = pkg.get("render_alphas")
+                        alpha = render.get("render_alphas")
                         if alpha is None:
                             continue
                         alpha = cast(Any, alpha)
                         alpha = alpha[0:1] if alpha.ndim == 3 else alpha.unsqueeze(0) if alpha.ndim == 2 else alpha
 
-                        valid = ((entry["target_mask"] > 0.5) & (alpha > depth_alpha_threshold) & torch.isfinite(depth) & (depth > 0.0)).float()
+                        valid = ((entry["target_mask"] > 0.5) & (alpha > config.depth_alpha_threshold) & torch.isfinite(depth) & (depth > 0.0)).float()
                         if int(valid.sum().item()) >= 64:
                             entry["depth_target"] = depth.detach()
                             entry["depth_valid"] = valid.detach()
 
-    pcd, _ = load_colmap_object_point_cloud(
+    point_cloud, _ = load_colmap_object_point_cloud(
         model_path=model_path, object_id=object_id, scope=scope,
         extraction_index_path=extraction_index_path,
-        max_points=max_init_points, target_points=colmap_init_target_points,
+        max_points=config.max_init_points, target_points=config.colmap_init_target_points,
     )
 
     # Load model hyper-parameters from parent gaussians or use defaults
@@ -139,54 +120,9 @@ def train_object(
 
     # Initialize anchors
     spatial_extent = max(scope.radius, float(np.linalg.norm(scope.aabb_max - scope.aabb_min)))
-    gaussians.anchor_cloud.initialize_anchors(pcd)
+    gaussians.anchor_cloud.initialize_anchors(point_cloud)
 
-    # load training configs
-    opt = Namespace(**getattr(scope, "optim_params", {}))
-    if not hasattr(opt, "lambda_dreg"):
-        opt.lambda_dreg = 0.01
-
-    # freeze anchor positions (since we are refining offsets/MLP weights)
-    opt.iterations = n_iterations
-    opt.anchor_pos_lr_init = opt.anchor_pos_lr_final = 0.0
-    opt.anchor_pos_lr_max_steps = n_iterations
-    opt.anchor_pos_lr_delay_mult = 0.01
-
-    # learning rates scaled by lr_scale
-    opt.gaussian_offset_lr_init = config.gaussian_offset_lr_init * lr_scale
-    opt.gaussian_offset_lr_final = config.gaussian_offset_lr_final * lr_scale
-    opt.gaussian_offset_lr_max_steps = n_iterations
-    opt.gaussian_offset_lr_delay_mult = 0.01
-
-    opt.anchor_feat_lr = config.anchor_feat_lr * lr_scale
-    opt.anchor_scale_lr = config.anchor_scale_lr * lr_scale
-    opt.anchor_rot_lr = config.anchor_rot_lr * lr_scale
-
-    opt.decoder_opacity_lr_init = config.decoder_opacity_lr_init * lr_scale
-    opt.decoder_opacity_lr_final = config.decoder_opacity_lr_final * lr_scale
-    opt.decoder_opacity_lr_max_steps = n_iterations
-    opt.decoder_opacity_lr_delay_mult = 0.01
-
-    opt.decoder_cov_lr_init = config.decoder_cov_lr_init * lr_scale
-    opt.decoder_cov_lr_final = config.decoder_cov_lr_final * lr_scale
-    opt.decoder_cov_lr_max_steps = n_iterations
-    opt.decoder_cov_lr_delay_mult = 0.01
-
-    opt.decoder_color_lr_init = config.decoder_color_lr_init * lr_scale
-    opt.decoder_color_lr_final = config.decoder_color_lr_final * lr_scale
-    opt.decoder_color_lr_max_steps = n_iterations
-    opt.decoder_color_lr_delay_mult = 0.01
-
-    opt.densification = enable_densification
-    if enable_densification:
-        opt.update_until = n_iterations
-    else:
-        opt.update_until = 0
-    opt.densify_grad_threshold = densify_grad_threshold
-
-    opt.start_stat = max(25, min(500, n_iterations // 8))
-    opt.update_from = max(50, min(1500, n_iterations // 4))
-    opt.update_interval = max(25, min(100, n_iterations // 20))
+    opt = config.get_optim_args()
 
     configs = {
         "optimization": {
@@ -197,7 +133,7 @@ def train_object(
         }
     }
     densifier = DensifcationController(
-        voxel_size=gaussians.anchor_cloud.voxel_size,
+        quantization_size=gaussians.anchor_cloud.quantization_size,
         anchor_cloud=gaussians.anchor_cloud,
         optimizer=None,
         num_gaussians_per_anchor=gaussians.decoder.number_gaussians_per_anchor,
@@ -218,14 +154,14 @@ def train_object(
     rng = np.random.default_rng(0)
     densify_count = 0
 
-    progress = tqdm(range(1, n_iterations + 1), desc=f"obj {object_id}", dynamic_ncols=True)
+    progress = tqdm(range(1, config.iterations + 1), desc=f"obj {object_id}", dynamic_ncols=True)
     for iteration in progress:
         if (iteration - 1) % len(order) == 0:
             rng.shuffle(order)
         entry = entries[order[(iteration - 1) % len(order)]]
         camera, target_image, target_mask = entry["camera"], entry["target_image"], entry["target_mask"]
         weight = entry["weight"]
-        rgb_scale = 1.0 if entry["source"] == "real" else generated_rgb_scale
+        rgb_scale = 1.0 if entry["source"] == "real" else config.generated_rgb_scale
 
         opt_wrapper.step_learning_rate(iteration)
         vis = _prefilter(gaussians, camera)
@@ -250,7 +186,7 @@ def train_object(
         rgb_fg = (diff * target_mask).sum() / (3.0 * n_fg)
         rgb_bg = (diff * (1.0 - target_mask)).sum() / (3.0 * n_bg)
         
-        ssim_l = _ssim_loss((pred * target_mask).unsqueeze(0), (target_image * target_mask).unsqueeze(0))
+        ssim_l = ssim_loss((pred * target_mask).unsqueeze(0), (target_image * target_mask).unsqueeze(0))
         
         scale_reg = pkg["scaling"].prod(dim=1).mean() if pkg["scaling"].numel() else torch.tensor(0.0, device="cuda")
         scale_drift = (
@@ -259,9 +195,9 @@ def train_object(
             else torch.tensor(0.0, device="cuda")
         )
 
-        total = weight * rgb_weight * rgb_scale * (0.8 * rgb_fg + 0.2 * ssim_l + 0.2 * rgb_bg)
-        total += alpha_weight * (target_mask * (1.0 - alpha)).mean()
-        total += outside_alpha_weight * ((1.0 - target_mask) * alpha).mean()
+        total = weight * config.rgb_weight * rgb_scale * (0.8 * rgb_fg + 0.2 * ssim_l + 0.2 * rgb_bg)
+        total += config.alpha_weight * (target_mask * (1.0 - alpha)).mean()
+        total += config.outside_alpha_weight * ((1.0 - target_mask) * alpha).mean()
         total += opt.lambda_dreg * scale_reg + 0.01 * scale_drift
 
         # Inline conversion of depth
@@ -272,12 +208,12 @@ def train_object(
             pd = cast(Any, pd)
             pd = pd[0:1] if pd.ndim == 3 else pd.unsqueeze(0) if pd.ndim == 2 else pd
 
-        if depth_weight > 0.0 and iteration >= depth_start_iter and dt is not None and dv is not None and pd is not None:
+        if config.depth_weight > 0.0 and iteration >= config.depth_start_iter and dt is not None and dv is not None and pd is not None:
             rel = (pd - dt) / dt.detach().abs().clamp_min(1e-3)
             depth_loss = (
-                (depth_front_weight * F.relu(-rel) + depth_back_weight * F.relu(rel)) * dv
+                (config.depth_front_weight * F.relu(-rel) + config.depth_back_weight * F.relu(rel)) * dv
             ).sum() / dv.sum().clamp_min(1.0)
-            total += depth_weight * depth_loss
+            total += config.depth_weight * depth_loss
 
         optimizer.zero_grad(set_to_none=True)
         total.backward()
@@ -302,7 +238,7 @@ def train_object(
                 if (
                     opt.densification
                     and densify_count % opt.update_interval == 0
-                    and gaussians.anchor_cloud.anchors_positions.shape[0] < max_anchor_count
+                    and gaussians.anchor_cloud.anchors_positions.shape[0] < config.max_anchor_count
                 ):
                     densifier.growing_operation()
                     densifier.pruning_operation(
@@ -312,11 +248,11 @@ def train_object(
             optimizer.step()
             if gaussians.anchor_cloud.anchors_log_scales.shape == initial_scaling.shape:
                 gaussians.anchor_cloud.anchors_log_scales.data.clamp_(max=initial_scaling.max().item())
-            gaussians.anchor_cloud.gaussians_offsets.data.clamp_(min=-max_offset_abs, max=max_offset_abs)
+            gaussians.anchor_cloud.gaussians_offsets.data.clamp_(min=-config.max_offset_abs, max=config.max_offset_abs)
 
         loss_hist.append(float(total.detach().item()))
         depth_hist.append(float(depth_loss.detach().item()))
-        if iteration == 1 or iteration % 10 == 0 or iteration == n_iterations:
+        if iteration == 1 or iteration % 10 == 0 or iteration == config.iterations:
             progress.set_postfix({
                 "loss": f"{loss_hist[-1]:.4f}",
                 "depth": f"{depth_hist[-1]:.4f}",

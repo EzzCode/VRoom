@@ -43,10 +43,8 @@ def _rgba_to_rgb_mask(rgba):
     return rgb, mask
 
 
-def build_views(generation_log_path, extraction_path,
-                             scope, frame, cloud_points,
-                             real_weight=1.0, generated_weight=1.0,
-                             up_override=None):
+def build_views(generation_log_path, extraction_path, scope, frame, cloud_points,
+                             real_weight=1.0, generated_weight=1.0, up_override=None):
 
 
     generation_log_path = Path(generation_log_path)
@@ -225,7 +223,7 @@ def build_views(generation_log_path, extraction_path,
         K_view[0, 0] = float(K_sv3d[0, 0] / world_scale)
         K_view[1, 1] = float(K_sv3d[1, 1] / world_scale)
 
-        # Center the projected point cloud bbox with mask 
+        #center the projected point cloud bbox with mask 
         ys, xs = np.where(mask)
         if len(xs) > 0:
             # project with adjusted focal lengths

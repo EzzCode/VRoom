@@ -3,7 +3,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-
+from object_refiner.constants import HF_CACHE_DIR as _hf_cache_dir
 import numpy as np
 import torch
 from PIL import Image
@@ -11,7 +11,6 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 _SV3D_REPO = "chenguolin/sv3d-diffusers"
-_hf_cache_dir = r"A:\hf_cache"
 
 @dataclass
 class HallucinatedView:

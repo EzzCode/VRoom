@@ -59,7 +59,7 @@ class VRoomGaussians:
     gaussian_type: str
     feature_dim: int
     gaussians_per_anchor: int
-    voxel_size: float
+    quantization_size: float
     render_mode: str
     tile_size_2dgs: int
     optim_params: Dict = field(default_factory=dict)
@@ -69,14 +69,14 @@ def build_vroom_gaussians(kwargs: dict, device="cuda") -> VRoomGaussians:
     gaussian_type = str(kwargs.get("gaussian_type", "2D"))
     feature_dim = int(kwargs.get("feature_dim", 32))
     gaussians_per_anchor = int(kwargs.get("gaussians_per_anchor", 10))
-    voxel_size = float(kwargs.get("voxel_size", 0.001))
+    quantization_size = float(kwargs.get("quantization_size", 0.001))
     render_mode = str(kwargs.get("render_mode", "RGB+ED"))
     tile_size_2dgs = int(kwargs.get("tile_size_2dgs", 8))
 
     anchor_cloud = AnchorCloud(
         gaussians_per_anchor=gaussians_per_anchor,
         feature_dim=feature_dim,
-        voxel_size=voxel_size,
+        quantization_size=quantization_size,
         device=device,
     )
     decoder = GaussianDecoder(
@@ -92,7 +92,7 @@ def build_vroom_gaussians(kwargs: dict, device="cuda") -> VRoomGaussians:
         gaussian_type=gaussian_type,
         feature_dim=feature_dim,
         gaussians_per_anchor=gaussians_per_anchor,
-        voxel_size=voxel_size,
+        quantization_size=quantization_size,
         render_mode=render_mode,
         tile_size_2dgs=tile_size_2dgs,
     )
@@ -102,10 +102,10 @@ def load_vroom_checkpoint(gaussians: VRoomGaussians, ply_path: str, mlp_dir: str
     payload = gaussians.checkpoint_manager.load_anchor_field(ply_path)
 
     if payload["log_scaling"].numel() > 0:
-        voxel_size = float(torch.exp(payload["log_scaling"][:, :3]).mean().item())
+        quantization_size = float(torch.exp(payload["log_scaling"][:, :3]).mean().item())
     else:
-        avs = gaussians.anchor_cloud.voxel_size
-        voxel_size = float(avs) if avs is not None and avs > 0 else 1.0
+        avs = gaussians.anchor_cloud.quantization_size
+        quantization_size = float(avs) if avs is not None and avs > 0 else 1.0
 
     seeds = AnchorCloudData(
         anchors_positions=payload["anchor"],
@@ -117,7 +117,7 @@ def load_vroom_checkpoint(gaussians: VRoomGaussians, ply_path: str, mlp_dir: str
         semantic_manager=None
         if payload["labels"] is None
         else SemanticsManager(torch.unique(payload["labels"].view(-1))),
-        voxel_size=voxel_size,
+        quantization_size=quantization_size,
     )
     gaussians.anchor_cloud.set_anchors_cloud(seeds)
     gaussians.checkpoint_manager.load_decoder(mlp_dir)
@@ -129,7 +129,7 @@ def save_vroom_checkpoint(gaussians: VRoomGaussians, ply_path: str, mlp_dir: str
         mlp_dir,
         gaussian_type=gaussians.gaussian_type,
         render_mode=gaussians.render_mode,
-        tile_size_2dgs=gaussians.tile_size_2dgs,
+        tile_Size=gaussians.tile_size_2dgs,
     )
 
 
@@ -186,10 +186,9 @@ def render_rgba(
         decoded_output=decoded_output,
         gaussian_positions=gaussian_positions,
         normalized_rotations=normalized_rotations,
-        bg_color=bg,
+        background_color=bg,
         gaussian_type=gaussians.gaussian_type,
-        render_mode=gaussians.render_mode,
-        tile_size_2dgs=gaussians.tile_size_2dgs,
+        tile_Size=gaussians.tile_size_2dgs,
     )
 
     rgb = torch.clamp(pkg["render"], 0.0, 1.0)

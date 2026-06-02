@@ -1,15 +1,16 @@
+import torch
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union, Any, cast
 import numpy as np
 from gstrain.vroom_core.config import load_vroom_config
-from object_refiner.utils.transforms import ObjectFrame
-from .gstrain_wrapper import build_vroom_gaussians, load_vroom_checkpoint
 from gstrain.vroom_core.utilities.utils import SemanticsManager
+from .gstrain_wrapper import build_vroom_gaussians, load_vroom_checkpoint
+from object_refiner.utils.transforms import ObjectFrame
 from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS
 from .helpers import normalize
-import torch
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -64,48 +65,52 @@ def load_gaussians(model_path: Union[str, Path], ply_path=None):
     if not config_path.exists():
         raise FileNotFoundError(f"config.json not found at {config_path}")
 
-    try:
-        _, model_params, optim_params, _ = load_vroom_config(config_path)
-        config = {"optim_params": optim_params}
-    except Exception as e:
-        raise ValueError(f"Error parsing config at {config_path}: {e}")
+    _, model_params, optim_params, _ = load_vroom_config(config_path)
+    config = {"optim_params": optim_params}
 
+    if model_params is None or optim_params is None:
+        raise ValueError(f"model_params or optim_params missing in config at {config_path}")
+    
     # model_params: { 'model_config': { 'name': 'GaussianModel', 'kwargs': { ... } } }
     model_config = model_params.get("model_config")
     if not model_config:
-        raise KeyError("Could not find 'model_config' in model_params")
+        raise ValueError("Could not find 'model_config' in model_params")
 
     kwargs = model_config.get("kwargs", {})
     if kwargs is None:
         raise ValueError(f"model_config.kwargs is missing in config file")
 
-    model_kwargs = {
-        k: kwargs.get(k, GAUSSIAN_MODEL_DEFAULTS[k])
-        for k in GAUSSIAN_MODEL_DEFAULTS
-    }
+    model_kwargs = {}
+    for k in GAUSSIAN_MODEL_DEFAULTS:
+        model_kwargs[k] = kwargs.get(k, GAUSSIAN_MODEL_DEFAULTS[k])
 
-    resolved_ply = Path(ply_path) if ply_path else model_path / "point_cloud.ply"
+    if ply_path:
+        resolved_ply = Path(ply_path)
+    else:
+        resolved_ply = model_path / "point_cloud.ply"
+
     model = build_vroom_gaussians(model_kwargs)
     load_vroom_checkpoint(model, str(resolved_ply), str(resolved_ply.parent))
+
     if model.anchor_cloud.semantic_labels is None:
         raise ValueError(
-            f"Model at {model_path} does not have semantic labels; cannot compute object scope."
+            f"Model at {model_path} does not have semantic labels"
         )
-    unique_labels = torch.unique(model.anchor_cloud.semantic_labels.view(-1))
-    object.__setattr__(model, "id_encoder", SemanticsManager(unique_labels))
+    
+    labels = torch.unique(model.anchor_cloud.semantic_labels.view(-1))
+    object.__setattr__(model, "id_encoder", SemanticsManager(labels))
     model.anchor_cloud.eval()
     model.decoder.eval()
     model.optim_params = config.get("optim_params", {})
 
     logger.info(
         "Loaded Gaussians from %s with %d anchors and %d unique label IDs: %s",
-        model_path, len(model.anchor_cloud.anchors_positions),unique_labels.shape[0],unique_labels.tolist(),
+        model_path, len(model.anchor_cloud.anchors_positions),labels.shape[0],labels.tolist(),
     )
     return model
 
 
-def count_anchors(cam: dict, points: np.ndarray):
-    """Count how many points are visible in cam"""
+def count_anchors(cam, points):
     eps = 1e-6
     z_thresh = 0.01
     R, T, K = cam["R"], cam["T"], cam["K"]
@@ -123,17 +128,8 @@ def count_anchors(cam: dict, points: np.ndarray):
 
 
 
-def get_up_vector(cameras: list[dict]) -> np.ndarray:
-    """world up vector from the average camera image up"""
-    up = []
-    for cam in cameras:
-        # image up points in the -Y camera direction.
-        up.append(-cam["R"][1, :])
-    return normalize(np.mean(up, axis=0))
-
-
-def get_horizontal_vector(cam_centers: np.ndarray, centroid: np.ndarray, up: np.ndarray):
-    """Horizontal direction pointing toward the median camera location. to establish an orbit angle around the object."""
+def get_horizontal_vector(cam_centers, centroid, up):
+    """Horizontal direction pointing toward the median camera location to make an orbit angle around the object."""
     eps = 1e-6
     # directions from object centroid to cameras
     center_to_cam = cam_centers - centroid.reshape(1, 3)
@@ -143,12 +139,12 @@ def get_horizontal_vector(cam_centers: np.ndarray, centroid: np.ndarray, up: np.
     norm = np.linalg.norm(dh, axis=1)
     dh = dh[norm > eps]
     if len(dh) == 0:
-        raise ValueError("Cannot determine horizontal direction: all cameras are aligned with up vector.")
+        raise ValueError("Cannot determine horizontal direction. all cameras are aligned with up vector.")
     dh = np.median(dh, axis=0)
     #remove any still existant up component 
     dh = dh - float(np.dot(dh, up)) * up
     if np.linalg.norm(dh) < eps:
-        raise ValueError("Cannot determine horizontal direction: camera direction is too close to up vector.")
+        raise ValueError("Cannot determine horizontal direction is too close to up vector.")
     return normalize(dh)
 
 
@@ -220,7 +216,13 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
 
     camera_centers = np.asarray(visible_centers, dtype=np.float32)
 
-    up = get_up_vector(cameras)
+    up = []
+    #from the average camera image up
+    for cam in cameras:
+        # image up points in the -Y camera direction.
+        up.append(-cam["R"][1, :])
+    up = normalize(np.mean(up, axis=0))
+    
     starting_direction = get_horizontal_vector(camera_centers, centroid, up)
 
     # radius is median distance from camera to centroid
@@ -244,9 +246,16 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
         cameras=cameras,
         optim_params=getattr(gaussians, "optim_params", {}),
     )
-    obj_frame = _build_coordinate_frames(scope)
+    
+    object_frame = ObjectFrame(
+        centroid=scope.centroid,
+        up=scope.up,
+        base_dir=scope.base_dir,
+        radius=scope.radius,
+    )
+
     for ci in visible_index:
-        az, el = obj_frame.world_to_virtual(cameras[ci]["position"])
+        az, el = object_frame.world_to_virtual(cameras[ci]["position"])
         cameras[ci]["azimuth_deg"] = az % 360.0
         cameras[ci]["elevation_deg"] = el
     
@@ -256,15 +265,5 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
         np.round(scope.centroid, 3).tolist(), scope.radius,
         len(scope.visible_cam_indices), len(cameras),
     )
-    return scope, obj_frame
+    return scope, object_frame
 
-def _build_coordinate_frames(object_scope: ObjectScope):
-    """Build coordinate frames for object isolation training."""
-    obj_frame = ObjectFrame(
-        centroid=object_scope.centroid,
-        up=object_scope.up,
-        base_dir=object_scope.base_dir,
-        radius=object_scope.radius,
-    )
-
-    return obj_frame

@@ -252,7 +252,7 @@ def run(
             object_id=obj_id,
             generation_path=obj_dir / "03_novel_views" / "generation.json",
             output_dir=output_root,
-            halluc_manifest=halluc_manifest,
+            generation_log=halluc_manifest,
             gaussians=gaussians,
             scope=scope,
             frame=frame,
