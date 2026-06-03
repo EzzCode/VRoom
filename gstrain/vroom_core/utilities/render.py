@@ -1,6 +1,4 @@
-import gsplat
 import torch
-from gsplat.cuda._wrapper import fully_fused_projection
 from cuda_rasterizer import rasterize_2dgs, frustum_cull_2dgs
 
 
@@ -10,7 +8,7 @@ def render(
     gaussian_positions,
     normalized_rotations,
     background_color,
-    gaussian_type="3D",
+    gaussian_type="2D",
     tile_Size=8,
     semantics=None,
 ):
@@ -35,59 +33,43 @@ def render(
         viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()
     )
 
-    if gaussian_type == "3D":
-        render_colors, render_alphas, render_semantics, info = gsplat.rasterization(
-            means=xyz,
-            quats=rot,
-            scales=scaling,
-            opacities=opacity.squeeze(-1),
-            colors=color,
-            viewmats=viewmat[None],
-            Ks=K[None],
-            width=int(viewpoint_camera.image_width),
-            height=int(viewpoint_camera.image_height),
-            backgrounds=background_color[None],
-            packed=False,
-            render_mode="RGB+ED",
-            features=semantics.detach() if semantics is not None else None,
-        )
-    elif gaussian_type == "2D":
-        # diff-surfel-rasterization wrapper processes N channels by looping in chunks of 3.
-        # Format: [R, G, B, S1, ..., SF, D]
-        if semantics is not None:
-            combined_colors = torch.cat([color, semantics.detach()], dim=-1)
-        else:
-            combined_colors = color
+    if gaussian_type != "2D":
+        raise ValueError(f"gaussian_type {gaussian_type} is not supported, use 2D")
 
-        (rendered, render_alphas), info = rasterize_2dgs(
-            points_world_space=xyz,
-            quats=rot,
-            scale_vecs=scaling,
-            opacities=opacity.squeeze(-1),
-            colors_feat=combined_colors,
-            w2cam_mats=viewmat[None],
-            cam_intrinsics=K[None],
-            img_W=int(viewpoint_camera.image_width),
-            img_H=int(viewpoint_camera.image_height),
-            backgrounds=background_color[None],
-            near_plane=0.01,
-            far_plane=100.0,
-        )
-
-        # Unify output: Pack RGB + Depth into the standard 4-channel slot
-        # and isolate semantics.
-        render_colors = torch.cat([rendered[..., :3], rendered[..., -1:]], dim=-1)
-        render_semantics = rendered[..., 3:-1]
-        if render_semantics.shape[-1] == 0:
-            render_semantics = None
-
-        # Extract 2DGS specific maps from info
-        render_normals = info["normals_rend"]
-        render_normals_from_depth = info["normals_surf"]
-        render_distort = info["render_distloss"]
-        render_median = torch.zeros_like(render_alphas)
+    # diff-surfel-rasterization wrapper processes N channels by looping in chunks of 3.
+    # Format: [R, G, B, S1, ..., SF, D]
+    if semantics is not None:
+        combined_colors = torch.cat([color, semantics.detach()], dim=-1)
     else:
-        raise ValueError(f"Unknown gaussian_type: {gaussian_type}")
+        combined_colors = color
+
+    (rendered, render_alphas), info = rasterize_2dgs(
+        points_world_space=xyz,
+        quats=rot,
+        scale_vecs=scaling,
+        opacities=opacity.squeeze(-1),
+        colors_feat=combined_colors,
+        w2cam_mats=viewmat[None],
+        cam_intrinsics=K[None],
+        img_W=int(viewpoint_camera.image_width),
+        img_H=int(viewpoint_camera.image_height),
+        backgrounds=background_color[None],
+        near_plane=0.01,
+        far_plane=100.0,
+    )
+
+    # Unify output: Pack RGB + Depth into the standard 4-channel slot
+    # and isolate semantics.
+    render_colors = torch.cat([rendered[..., :3], rendered[..., -1:]], dim=-1)
+    render_semantics = rendered[..., 3:-1]
+    if render_semantics.shape[-1] == 0:
+        render_semantics = None
+
+    # Extract 2DGS specific maps from info
+    render_normals = info["normals_rend"]
+    render_normals_from_depth = info["normals_surf"]
+    render_distort = info["render_distloss"]
+    render_median = torch.zeros_like(render_alphas)
 
     if render_colors.shape[-1] == 4:
         colors, depths = render_colors[..., 0:3], render_colors[..., 3:4]
@@ -129,7 +111,7 @@ def render(
     return return_dict
 
 
-def apply_frustum_culling(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
+def apply_frustum_culling(viewpoint_camera, anchor_cloud, gaussian_type="2D"):
     """Project visible anchors and return a tightened visibility mask."""
     means = anchor_cloud.anchors_positions[anchor_cloud.visibility_mask]
     scales = torch.exp(anchor_cloud.anchors_log_scales[anchor_cloud.visibility_mask])[
@@ -157,38 +139,20 @@ def apply_frustum_culling(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
         .float()[None]
     )
 
-    if gaussian_type == "3D":
-        proj_results = fully_fused_projection(
-            means,
-            None,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            int(viewpoint_camera.image_width),
-            int(viewpoint_camera.image_height),
-            eps2d=0.3,
-            packed=False,
-            near_plane=0.01,
-            far_plane=1e10,
-            radius_clip=0.0,
-            sparse_grad=False,
-            calc_compensations=False,
-        )
-    elif gaussian_type == "2D":
-        proj_results = frustum_cull_2dgs(
-            points_world_space=means,
-            quats=quats,
-            scale_vecs=scales,
-            w2cam_mats=viewmats,
-            cam_intrinsics=Ks,
-            img_W=int(viewpoint_camera.image_width),
-            img_H=int(viewpoint_camera.image_height),
-            near_plane=0.01,
-            far_plane=100.0,
-        )
-    else:
-        raise ValueError(f"Unknown gaussian_type: {gaussian_type}")
+    if gaussian_type != "2D":
+        raise ValueError(f"gaussian_type {gaussian_type} is not supported, use 2D")
+
+    proj_results = frustum_cull_2dgs(
+        points_world_space=means,
+        quats=quats,
+        scale_vecs=scales,
+        w2cam_mats=viewmats,
+        cam_intrinsics=Ks,
+        img_W=int(viewpoint_camera.image_width),
+        img_H=int(viewpoint_camera.image_height),
+        near_plane=0.01,
+        far_plane=100.0,
+    )
 
     radii = proj_results[0]
     visible_mask = anchor_cloud.visibility_mask.clone()
