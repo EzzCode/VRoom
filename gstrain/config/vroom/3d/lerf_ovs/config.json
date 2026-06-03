@@ -79,6 +79,7 @@
         "desification_start": 1500,
         "desification_end": 30000,
         "densification_interval": 100,
-        "min_opacity": 0.005
+        "min_opacity": 0.005,
+        "gradient_threshold": 0.0005
     }
 }

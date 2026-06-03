@@ -76,6 +76,7 @@ class TrainingOrchestrator:
             anchor_cloud=self.anchor_cloud,
             optimizer=None,
             num_gaussians_per_anchor=self.decoder.number_gaussians_per_anchor,
+            gradient_threshold=self.densifier_configs.get("gradient_threshold"),
         )
         self.optimizer = Optimizer(self.optmizer_configs, self.densifier)
         self.densifier.optimizer = self.optimizer
