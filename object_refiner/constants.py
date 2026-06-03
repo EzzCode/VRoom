@@ -22,4 +22,7 @@ GAUSSIAN_MODEL_DEFAULTS = {
     "quantization_size": 0.001,
     "render_mode": "RGB+ED",
     "tile_size_2dgs": 8,
+    "knn_k": 4,
+    "knn_chunk_size": 2048,
+    "min_quantization_size": 1e-6,
 }

@@ -73,10 +73,17 @@ def build_vroom_gaussians(kwargs: dict, device="cuda") -> VRoomGaussians:
     render_mode = str(kwargs.get("render_mode", "RGB+ED"))
     tile_size_2dgs = int(kwargs.get("tile_size_2dgs", 8))
 
+    knn_k = kwargs.get("knn_k")
+    knn_chunk_size = kwargs.get("knn_chunk_size")
+    min_quantization_size = kwargs.get("min_quantization_size")
+
     anchor_cloud = AnchorCloud(
         gaussians_per_anchor=gaussians_per_anchor,
         feature_dim=feature_dim,
         quantization_size=quantization_size,
+        knn_k=knn_k,
+        knn_chunk_size=knn_chunk_size,
+        min_quantization_size=min_quantization_size,
         device=device,
     )
     decoder = GaussianDecoder(

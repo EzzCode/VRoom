@@ -112,6 +112,9 @@ def main():
         quantization_size=model_kwargs.get("quantization_size", None),
         gaussians_per_anchor=model_kwargs.get("gs_per_anchor", 5),
         feature_dim=model_kwargs.get("feature_dim", 32),
+        knn_k=model_kwargs.get("knn_k"),
+        knn_chunk_size=model_kwargs.get("knn_chunk_size"),
+        min_quantization_size=model_kwargs.get("min_quantization_size"),
     )
     decoder = GaussianDecoder(
         feature_dim=model_kwargs.get("feature_dim", 32),

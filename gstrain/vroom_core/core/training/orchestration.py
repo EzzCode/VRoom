@@ -170,7 +170,7 @@ class TrainingOrchestrator:
             if iteration % self.densifier_configs["densification_interval"] == 0:
                 self.densifier.growing_operation()
                 self.densifier.pruning_operation(
-                    opacity_threshold=self.densifier_configs.get("min_opacity", 0.005)
+                    opacity_threshold=self.densifier_configs.get("min_opacity")
                 )
                 self.densifier.reset_state()
         else:

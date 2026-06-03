@@ -123,10 +123,20 @@ def main():
         
     feat_dim = cfg["model"]["feat_dim"]
     gs_per_anchor = cfg["model"]["gs_per_anchor"]
+    knn_k = cfg["model"]["knn_k"]
+    knn_chunk_size = cfg["model"]["knn_chunk_size"]
+    min_quantization_size = cfg["model"]["min_quantization_size"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    anchor_cloud = AnchorCloud(gaussians_per_anchor=gs_per_anchor, feature_dim=feat_dim, device=device)
+    anchor_cloud = AnchorCloud(
+        gaussians_per_anchor=gs_per_anchor,
+        feature_dim=feat_dim,
+        knn_k=knn_k,
+        knn_chunk_size=knn_chunk_size,
+        min_quantization_size=min_quantization_size,
+        device=device,
+    )
     decoder = GaussianDecoder(feature_dim=feat_dim, anchor_cloud=anchor_cloud).to(device)
     chkp_manager = CheckpointManager(anchor_cloud, decoder)
     

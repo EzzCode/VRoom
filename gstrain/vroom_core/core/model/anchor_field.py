@@ -33,6 +33,9 @@ class AnchorCloud(nn.Module):
         self,
         gaussians_per_anchor,
         feature_dim,
+        knn_k,
+        knn_chunk_size,
+        min_quantization_size,
         point_cloud=None,
         quantization_size=None,
         density_mode=False,
@@ -47,6 +50,9 @@ class AnchorCloud(nn.Module):
         self.visibility_mask = torch.empty((0,), dtype=torch.bool, device=self.device)
         self.semantic_manager = semantic_manager
         self.feature_dim = feature_dim
+        self.knn_k = knn_k
+        self.knn_chunk_size = knn_chunk_size
+        self.min_quantization_size = min_quantization_size
 
         self.anchors_positions = nn.Parameter(
             torch.empty((0, 3), dtype=torch.float32, device=self.device)
@@ -95,23 +101,24 @@ class AnchorCloud(nn.Module):
         anchor_cloud = self._generate_anchors(points, labels)
         self.set_anchors_cloud(anchor_cloud)
 
-    def estimate_quantization_size(self, knn_distances, min_size=1e-6):
+    def estimate_quantization_size(self, knn_distances, min_size):
         """
         Estimates a quantization size for a uniform grid using knn distances
         """
         quantization_size = torch.median(knn_distances[:, 1:]).item()
-        print(f"quantization size calculated = {quantization_size}")
         return max(quantization_size, min_size)
 
     def _generate_anchors(self, point_cloud, point_labels):
         """
         Intialize the anchor cloud from the sparse point cloud by quantization
         """
-        distances_between_points = self._knn(point_cloud, k=4)
+        distances_between_points = self._knn(
+            point_cloud, k=self.knn_k, chunk_size=self.knn_chunk_size
+        )
 
         if self.quantization_size is None:
             self.quantization_size = self.estimate_quantization_size(
-                distances_between_points
+                distances_between_points, self.min_quantization_size
             )
 
         # voxelize the point cloud
@@ -123,7 +130,9 @@ class AnchorCloud(nn.Module):
             (unique_voxels * self.quantization_size).float()
         )  # quantized points (anchors)
 
-        distances_between_anchors = self._knn(self.anchors_positions, k=4)
+        distances_between_anchors = self._knn(
+            self.anchors_positions, k=self.knn_k, chunk_size=self.knn_chunk_size
+        )
 
         # resolve label for each anchor based on majority vote of the points in the voxel
         self.anchor_labels = self._majority_vote(
@@ -140,7 +149,6 @@ class AnchorCloud(nn.Module):
         self.anchors_log_scales = nn.Parameter(log_scales)
         self.anchors_rotations = nn.Parameter(rotations, requires_grad=False)
 
-        print(f"intialized with {self.anchors_positions.shape[0]} Anchors")
         self.anchor_features = nn.Parameter(
             torch.zeros(
                 (self.anchors_positions.shape[0], self.feature_dim),
@@ -174,7 +182,7 @@ class AnchorCloud(nn.Module):
             quantization_size=self.quantization_size,
         )
 
-    def _knn(self, point_cloud, k, chunk_size=2048):
+    def _knn(self, point_cloud, k, chunk_size):
         """finds the k nearest neighbors of each point in the point cloud"""
         with torch.no_grad():
             final_distances = torch.empty((point_cloud.shape[0], k), device=self.device)

@@ -127,9 +127,7 @@ def compute_anchors_scale_and_rotation(
     device: torch.device | str = "cuda",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute scale and rotation for anchors based on distances and quantization size"""
-    area_of_effect = (
-        distances[:, 1:].mean(dim=-1).clamp(min=max(quantization_size, 1e-6))
-    )
+    area_of_effect = distances.mean(dim=-1).clamp(min=max(quantization_size, 1e-6))
     log_scaling = torch.log(area_of_effect.sqrt()).unsqueeze(-1).repeat(1, 6)
     rotations = torch.zeros(
         (anchors_positions.shape[0], 4),

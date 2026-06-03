@@ -28,7 +28,10 @@
         "gs_per_anchor": 10,
         "feature_dim": 32,
         "quantization_size": 0.001,
-        "tile_Size": 8
+        "tile_Size": 8,
+        "knn_k": 4,
+        "knn_chunk_size": 2048,
+        "min_quantization_size": 1e-06
     },
     "pipeline": {
         "shuffle": false,
