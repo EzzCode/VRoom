@@ -4,7 +4,9 @@ from gstrain.vroom_core.utilities.training import extend_optimizer, prune_optimi
 
 
 class DensifcationController:
-    def __init__(self, quantization_size, anchor_cloud, optimizer, num_gaussians_per_anchor=5):
+    def __init__(
+        self, quantization_size, anchor_cloud, optimizer, num_gaussians_per_anchor=5
+    ):
         self.gaussian_gradients_acc = None
         self.gaussian_visits = None
         self.anchor_opacity_acc = None
@@ -143,7 +145,7 @@ class DensifcationController:
         if self.gaussian_gradients_acc is None:
             return
 
-        gradient_threshold = 0.0005
+        gradient_threshold = 0.00001
         # we are going to do growing for different quantization levels depending on gradient value
         level_2_threshold = gradient_threshold * 2  # level 2 resolution threshold
         level_3_threshold = gradient_threshold * 4  # level 3 resolution threshold
