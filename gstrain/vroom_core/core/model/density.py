@@ -222,14 +222,10 @@ class DensifcationController:
             ).to(torch.int64)
 
             # check for overlap so that we don't add new anchors in the same location
-            overlap_mask = (
-                (
-                    voxel_above_threshold.unsqueeze(1)
-                    == anchor_voxelized_grid.unsqueeze(0)
-                )
-                .all(dim=-1)
-                .any(dim=-1)
-            )
+            n_existing = anchor_voxelized_grid.shape[0]
+            combined = torch.cat([anchor_voxelized_grid, voxel_above_threshold], dim=0)
+            _, inverse_indices = torch.unique(combined, dim=0, return_inverse=True)
+            overlap_mask = torch.isin(inverse_indices[n_existing:], inverse_indices[:n_existing])
 
             anchors_to_add = voxel_above_threshold[
                 ~overlap_mask
