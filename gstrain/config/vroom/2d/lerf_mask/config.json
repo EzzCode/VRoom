@@ -1,7 +1,7 @@
 {
     "experiment": {
         "dataset_name": "lerf_mask",
-        "save_dir": "2d_loss_0.1",
+        "save_dir": "saved_results",
         "dataset_path": "datasets/lerf_mask",
         "frames": "images",
         "masks": "masks",

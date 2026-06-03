@@ -1,7 +1,7 @@
 {
     "experiment": {
         "dataset_name": "scannetpp",
-        "save_dir": "3d_crossentropy_loss_0.1_colmap_ply",
+        "save_dir": "saved_results",
         "dataset_path": "/home/hussein_essam/gs-workspace/scannetpp_ovs",
         "frames": "images",
         "masks": "masks",

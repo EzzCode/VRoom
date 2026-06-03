@@ -1,7 +1,7 @@
 {
     "experiment": {
         "dataset_name": "mipnerf360",
-        "save_dir": "object_0.01",
+        "save_dir": "saved_results",
         "dataset_path": "datasets/mipnerf360",
         "frames": "images",
         "masks": "masks",

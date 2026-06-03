@@ -1,7 +1,7 @@
 {
     "experiment": {
         "dataset_name": "3dovs",
-        "save_dir": "2d_crossentropy_loss_01",
+        "save_dir": "saved_results",
         "dataset_path": "datasets/3dovs/bed",
         "frames": "images",
         "masks": "masks",
