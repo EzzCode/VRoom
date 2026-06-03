@@ -1,362 +1,121 @@
-"""
-Point Cloud Voting for Object Labeling
-
-This script projects 3D points onto 2D mask images and assigns per-point object labels
-through multi-view voting (majority, probability, or correspondence-based).
-After voting, it performs 3D alias merging to consolidate tracker IDs that
-refer to the same physical object.
-
-Usage:
-    python voter/vote.py --data_path data --algorithm majority
-"""
+"""Point-cloud multi-view voting for object label assignment."""
 
 import json
-import struct
-import numpy as np
-import cv2
+import logging
 import argparse
-import os
-import sys
-import colorsys
 from collections import Counter, defaultdict
+from pathlib import Path
+
+import cv2
+import numpy as np
 from plyfile import PlyData, PlyElement
+from masks_and_tracking.helpers import label_to_color
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import typing
-if typing.TYPE_CHECKING:
-    from sfm.colmap_loader import (
-        read_intrinsics_binary, read_extrinsics_binary,
-        read_intrinsics_text, read_extrinsics_text,
-    )
-else:
-    try:
-        from sfm.colmap_loader import (
-            read_intrinsics_binary, read_extrinsics_binary,
-            read_intrinsics_text, read_extrinsics_text,
-        )
-    except ImportError:
-        from colmap_loader import (
-            read_intrinsics_binary, read_extrinsics_binary,
-            read_intrinsics_text, read_extrinsics_text,
-        )
+from sfm.colmap_loader import (
+    read_intrinsics_binary, read_extrinsics_binary, read_points3D_binary,
+    read_intrinsics_text, read_extrinsics_text, read_points3D_text,
+)
 
-
-##### COLMAP points3D reader (preserves track data for corr voting) ###########
-
-def load_points3D_bin(path):
-    """Load COLMAP points3D.bin -> dict[id -> (xyz, rgb, error, tracks)].
-    Reads binary file and extracts 3D point coordinates, color, error, and 2D-3D tracks.
-    """
-    points = {}
-    with open(path, "rb") as f:
-        (n,) = struct.unpack("<Q", f.read(8))  # Number of points
-        for _ in range(n):
-            blob = struct.unpack("<QdddBBBd", f.read(43))  # Read point data
-            pid, xyz, rgb, err = blob[0], blob[1:4], blob[4:7], blob[7]
-            (tlen,) = struct.unpack("<Q", f.read(8))  # Number of tracks
-            raw = struct.unpack(f"<{'ii' * tlen}", f.read(8 * tlen))
-            tracks = [(raw[i], raw[i + 1]) for i in range(0, len(raw), 2)]  # (image_id, point2D_idx)
-            points[pid] = (np.array(xyz), np.array(rgb, dtype=np.uint8), err, tracks)
-    return points
-
-
-def load_points3D_txt(path):
-    """Load COLMAP points3D.txt -> dict[id -> (xyz, rgb, error, tracks=[])].
-    Reads text file and extracts 3D point coordinates, color, error, and 2D-3D tracks.
-    """
-    points = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            pid = int(parts[0])
-            xyz = np.array([float(x) for x in parts[1:4]])
-            rgb = np.array([int(x) for x in parts[4:7]], dtype=np.uint8)
-            err = float(parts[7])
-            # Parse tracks if present: pairs of (image_id, point2D_idx)
-            track_parts = parts[8:]
-            tracks = [(int(track_parts[i]), int(track_parts[i + 1]))
-                       for i in range(0, len(track_parts), 2)]
-            points[pid] = (xyz, rgb, err, tracks)
-    return points
-
-
-##### Camera intrinsics handling ###############################################
-
-
-# COLMAP camera models where params[0] is a shared focal length f, then cx, cy
-_SHARED_FOCAL_MODELS = {
-    "SIMPLE_PINHOLE", "SIMPLE_RADIAL", "SIMPLE_RADIAL_FISHEYE",
-    "RADIAL", "RADIAL_FISHEYE",
-}
+logger = logging.getLogger(__name__)
 
 def intrinsics_from_camera(cam):
-    """Return (fx, fy, cx, cy) regardless of COLMAP camera model.
-    Handles both shared-focal and separate-focal camera models.
-    """
     p = cam.params
-    if cam.model in _SHARED_FOCAL_MODELS:
+    if cam.model in {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL", "RADIAL_FISHEYE"}:
         return p[0], p[0], p[1], p[2]
-    return p[0], p[1], p[2], p[3]      # PINHOLE / OPENCV / etc.
+    return p[0], p[1], p[2], p[3]
 
-
-##### Batch projection #########################################################
-
-def quat_to_R(q):
-    """Quaternion [w,x,y,z] -> 3x3 rotation matrix.
-    Converts quaternion to rotation matrix for camera orientation.
-    """
-    w, x, y, z = q
-    return np.array([
-        [1 - 2*(y*y + z*z),  2*(x*y - z*w),      2*(x*z + y*w)],
-        [2*(x*y + z*w),      1 - 2*(x*x + z*z),  2*(y*z - x*w)],
-        [2*(x*z - y*w),      2*(y*z + x*w),       1 - 2*(x*x + y*y)],
-    ])
-
-
-def project_all(pts_xyz, R, t, fx, fy, cx, cy, w, h):
-    """
-    Vectorised projection of Nx3 world points -> pixel coords.
-    Returns (u, v, mask) where mask flags points inside the image.
-    Projects all 3D points into the image and checks which are visible.
-    """
-    cam = (R @ pts_xyz.T + t).T                    # Nx3 in camera frame
-    z = cam[:, 2]
-    valid = z > 0  # Only points in front of camera
-    u = np.full(len(pts_xyz), -1.0)
-    v = np.full(len(pts_xyz), -1.0)
-    u[valid] = fx * cam[valid, 0] / z[valid] + cx
-    v[valid] = fy * cam[valid, 1] / z[valid] + cy
-    ui, vi = np.round(u).astype(int), np.round(v).astype(int)
-    in_bounds = valid & (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
-    return ui, vi, in_bounds
-
-
-##### Mask I/O #################################################################
-
-def _mask_path(mask_dir, image_name):
-    """Derive mask .png path from a COLMAP image name (.jpg/.JPG).
-    Converts image name to corresponding mask file name.
-    """
-    name = os.path.splitext(image_name)[0] + ".png"
-    return os.path.join(mask_dir, name)
-
-
-def load_mask(mask_dir, image_name):
-    """Load a single-channel label mask, or None if missing.
-    Reads the mask image for a given COLMAP image.
-    """
-    path = _mask_path(mask_dir, image_name)
-    return cv2.imread(path, cv2.IMREAD_UNCHANGED)
-
-
-##### Vote collection ##########################################################
-
-def collect_projection_votes(images, cameras, points, mask_dir):
-    """
-    For every 3D point, project into every view and read the label.
-    Returns dict[point_id -> list[label]].
-    Projects all 3D points into each image and collects the mask label for each visible point.
-    """
-    pid_list = list(points.keys())
-    pts_xyz = np.array([points[p][0] for p in pid_list])       # Nx3
-
+    
+def collect_projection_votes(images, cameras, pts_xyz, mask_dir):
     votes = defaultdict(list)
-
     for img in images.values():
-        mask = load_mask(mask_dir, img.name)
+        path = Path(mask_dir) / (Path(img.name).stem + ".png")
+        mask = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if mask is None:
-            print(f"  WARN: mask missing for {img.name}, skipping")
+            logger.warning("mask missing for %s, skipping", img.name)
             continue
-
-        R = quat_to_R(img.qvec)
+        qw, qx, qy, qz = img.qvec
+        R = np.array([
+            [1 - 2*(qy*qy + qz*qz),  2*(qx*qy - qz*qw),      2*(qx*qz + qy*qw)],
+            [2*(qx*qy + qz*qw),      1 - 2*(qx*qx + qz*qz),  2*(qy*qz - qx*qw)],
+            [2*(qx*qz - qy*qw),      2*(qy*qz + qx*qw),       1 - 2*(qx*qx + qy*qy)],
+        ])
         t = img.tvec.reshape(3, 1)
         fx, fy, cx, cy = intrinsics_from_camera(cameras[img.camera_id])
         h, w = mask.shape[:2]
-
-        ui, vi, ok = project_all(pts_xyz, R, t, fx, fy, cx, cy, w, h)
-
+        cam_pts = (R @ pts_xyz.T + t).T
+        z = cam_pts[:, 2]
+        valid = z > 0
+        u = np.full(len(pts_xyz), -1.0)
+        v = np.full(len(pts_xyz), -1.0)
+        u[valid] = fx * cam_pts[valid, 0] / z[valid] + cx
+        v[valid] = fy * cam_pts[valid, 1] / z[valid] + cy
+        ui, vi = np.round(u).astype(int), np.round(v).astype(int)
+        ok = valid & (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
         for idx in np.where(ok)[0]:
-            votes[pid_list[idx]].append(int(mask[vi[idx], ui[idx]]))
-
-        print(f"  {img.name}: {ok.sum()} / {len(pts_xyz)} points visible")
-
+            votes[idx].append(int(mask[vi[idx], ui[idx]]))
+        logger.info("%s: %d / %d points visible", img.name, ok.sum(), len(pts_xyz))
     return votes
 
 
-def collect_correspondence_votes(images, points, mask_dir):
-    """
-    Use COLMAP's 2D <-> 3D correspondence tracks instead of re-projecting.
-    Returns dict[point_id -> list[label]].
-    For each 3D point, uses its 2D-3D correspondences to directly look up the mask label.
-    """
-    votes = defaultdict(list)
-    mask_cache = {}
-
-    for pid, (xyz, rgb, err, tracks) in points.items():
-        for img_id, pt2d_idx in tracks:
-            if img_id not in images:
-                continue
-            img = images[img_id]
-
-            # Lazy-load and cache masks
-            if img_id not in mask_cache:
-                mask_cache[img_id] = load_mask(mask_dir, img.name)
-            mask = mask_cache[img_id]
-            if mask is None:
-                continue
-
-            if pt2d_idx >= len(img.xys):
-                continue
-            u, v = int(round(img.xys[pt2d_idx][0])), int(round(img.xys[pt2d_idx][1]))
-            h, w = mask.shape[:2]
-            if 0 <= u < w and 0 <= v < h:
-                votes[pid].append(int(mask[v, u]))
-
-    return votes
+def find_parent(parent, x):
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
 
 
-##### Label resolution strategies ##############################################
-
-def resolve_majority(label_list):
-    """Pick the most frequent label from the list of votes."""
-    return Counter(label_list).most_common(1)[0][0]
-
-
-def resolve_probability(label_list):
-    """Sample one label proportional to its frequency (randomized voting)."""
-    counts = Counter(label_list)
-    labels, freqs = zip(*counts.items())
-    probs = np.array(freqs, dtype=float)
-    probs /= probs.sum()
-    return int(np.random.choice(labels, p=probs))
-
-
-def resolve_correspondence(label_list):
-    """Majority vote, but ignore background (label 0).
-    Used for correspondence-based voting.
-    """
-    fg = [l for l in label_list if l != 0]
-    if not fg:
-        return 0
-    return Counter(fg).most_common(1)[0][0]
-
-
-_RESOLVERS = {
-    "majority": resolve_majority,
-    "prob":     resolve_probability,
-    "corr":     resolve_correspondence,
-}
-
-
-##### 3D Alias Merging #########################################################
-
-def build_vote_point_sets(votes, pid_order):
-    """
-    Build a dict mapping each non-background label to the set of point indices
-    that received ANY vote for that label across all views.
-    Unlike resolved labels (where each point has 1 label), a single point can
-    appear in multiple label sets here — that overlap is the alias signal for merging.
-    """
+def merge_aliases(labels, votes, num_points, iou_thresh=0.75, min_covisibility=20):
     label_sets = defaultdict(set)
-    for i, pid in enumerate(pid_order):
-        if pid in votes:
-            for lbl in votes[pid]:
+    for i in range(num_points):
+        if i in votes:
+            for lbl in votes[i]:
                 if lbl != 0:
                     label_sets[int(lbl)].add(i)
-    return label_sets
 
-
-def compute_3d_label_iou(set_a, set_b):
-    """Compute point-level IoU between two sets of point indices.
-    Used to determine overlap between label sets for alias merging.
-    """
-    inter = len(set_a & set_b)
-    union = len(set_a | set_b)
-    return inter / union if union > 0 else 0.0
-
-
-def merge_aliases(labels, votes, pid_order, iou_thresh=0.20, min_covisibility=5):
-    """
-    Detect and merge tracker IDs that refer to the same physical object.
-    Uses point set overlap (IoU) and covisibility to merge aliases.
-    Returns remapped labels array and the merge map.
-    """
-    # Build point sets from RAW votes — this is the critical difference
-    label_sets = build_vote_point_sets(votes, pid_order)
     if len(label_sets) < 2:
         return labels, {}
-    
+
     sorted_labels = sorted(label_sets.keys())
-    
-    # Log raw vote stats
-    print(f"  Labels in raw votes: {sorted_labels}")
+    logger.info("Labels in raw votes: %s", sorted_labels)
     for lbl in sorted_labels:
-        print(f"    ID {lbl:3d}: {len(label_sets[lbl]):5d} points (raw vote membership)")
-    
-    # Union-Find structure for merging
+        logger.info("  ID %3d: %5d points (raw vote membership)", lbl, len(label_sets[lbl]))
+
     parent = {lbl: lbl for lbl in label_sets}
-    
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-    
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            if ra > rb:
-                ra, rb = rb, ra
-            parent[rb] = ra
-    
     merge_count = 0
-    
-    for i, la in enumerate(sorted_labels):
-        for lb in sorted_labels[i + 1:]:
-            if find(la) == find(lb):
+    for i, label_a in enumerate(sorted_labels):
+        for label_b in sorted_labels[i + 1:]:
+            if find_parent(parent, label_a) == find_parent(parent, label_b):
                 continue
-            
-            # Covisibility = shared points that got votes for both labels
-            shared = len(label_sets[la] & label_sets[lb])
+            set_a, set_b = label_sets[label_a], label_sets[label_b]
+            shared = len(set_a & set_b)
             if shared < min_covisibility:
                 continue
-            
-            # 3D point IoU from raw votes
-            iou = compute_3d_label_iou(label_sets[la], label_sets[lb])
+            inter = len(set_a & set_b)
+            union_set = len(set_a | set_b)
+            iou = inter / union_set if union_set > 0 else 0.0
             if iou >= iou_thresh:
-                union(la, lb)
+                ra, rb = find_parent(parent, label_a), find_parent(parent, label_b)
+                if ra != rb:
+                    if ra > rb:
+                        ra, rb = rb, ra
+                    parent[rb] = ra
                 merge_count += 1
-                print(f"  Alias merge: ID {lb} -> ID {la}  (3D IoU={iou:.3f}, shared_pts={shared})")
+                logger.info("Alias merge: ID %d -> ID %d  (3D IoU=%.3f, shared_pts=%d)", label_b, label_a, iou, shared)
 
-    
     if merge_count == 0:
-        print("  No aliases detected.")
+        logger.info("No aliases detected.")
         return labels, {}
-    
-    # Build final merge map and remap labels
-    merge_map = {}
-    for lbl in sorted_labels:
-        root = find(lbl)
-        if root != lbl:
-            merge_map[lbl] = root
-    
-    remapped = labels.copy()
+
+    merge_map = {lbl: find_parent(parent, lbl) for lbl in sorted_labels if find_parent(parent, lbl) != lbl}
+    remapped  = labels.copy()
     for old_id, new_id in merge_map.items():
         remapped[labels == old_id] = new_id
-    
-    print(f"  Merged {merge_count} alias pairs into {len(set(find(l) for l in sorted_labels))} unique objects.")
+
+    logger.info("Merged %d alias pairs into %d unique objects.", merge_count, len({find_parent(parent, l) for l in sorted_labels}))
     return remapped, merge_map
 
 
-##### PLY output ###############################################################
-
 def save_labeled_ply(path, xyz, rgb, labels):
-    """Write a PLY with (x,y,z, nx,ny,nz, r,g,b, label).
-    Saves the point cloud with normals (set to zero), color, and label.
-    """
     dtype = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),
         ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),
@@ -366,182 +125,118 @@ def save_labeled_ply(path, xyz, rgb, labels):
     n = len(xyz)
     normals = np.zeros((n, 3), dtype=np.float32)
     arr = np.empty(n, dtype=dtype)
-    for i, row in enumerate(
-        np.hstack([xyz, normals, rgb, labels.reshape(-1, 1)])
-    ):
+    for i, row in enumerate(np.hstack([xyz, normals, rgb, labels.reshape(-1, 1)])):
         arr[i] = tuple(row)
     PlyData([PlyElement.describe(arr, "vertex")]).write(path)
 
 
-def prune_3d_outliers(xyz, labels, min_points=10):
-    """
-    Looks at the 3D points for each label. 
-    If total points for a label is less than min_points, it is classified as background (label 0).
-    """
-    cleaned_labels = labels.copy()
-    unique_labels = np.unique(labels)
-    
-    for lbl in unique_labels:
-        if lbl == 0:
-            continue # Skip background
-        # Get the 3D coordinates of all points assigned to this label
-        mask = (labels == lbl)
-        obj_xyz = xyz[mask]
-        if len(obj_xyz) < min_points:
-            cleaned_labels[mask] = 0
-    return cleaned_labels
-
-
-##### Visualization ############################################################
-
-def label_to_color(lbl):
-    """Map label to a distinct RGB color using golden-angle HSV spacing.
-    Used for visualization of different object labels.
-    """
-    if lbl == 0:
-        return (150, 150, 150)  # gray for background
-    # Golden angle (~137.5 deg) gives maximally spaced hues
-    hue = ((lbl * 137.508) % 360) / 360.0
-    sat, val = 0.75, 0.9
-    r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
-    return (int(r * 255), int(g * 255), int(b * 255))
-
-
-##### Pipeline #################################################################
-
 def run_voting(args):
-    """Execute the full voting pipeline: load COLMAP, collect votes, resolve,
-    merge aliases, prune outliers, and write labeled PLY outputs.
-    This is the main function that orchestrates the labeling process.
-    """
     data = args.data_path
-    mask_dir = os.path.join(data, args.mask_dir)
+    mask_dir = Path(data) / args.mask_dir
 
-    # Check mask directory exists
-    if not os.path.isdir(mask_dir):
-        sys.exit(f"ERROR: mask dir not found: {mask_dir}")
+    if not mask_dir.is_dir():
+        raise FileNotFoundError(f"mask dir not found: {mask_dir}")
 
-    # ── Load COLMAP data ──
-    sp = os.path.join(data, args.sparse_dir)
-    if not os.path.isdir(sp):
-        sys.exit(f"ERROR: sparse dir not found: {sp}")
+    sp = Path(data) / args.sparse_dir
+    if not sp.is_dir():
+        raise FileNotFoundError(f"sparse dir not found: {sp}")
 
     try:
-        # Try loading binary COLMAP model
-        cameras = read_intrinsics_binary(os.path.join(sp, "cameras.bin"))
-        images  = read_extrinsics_binary(os.path.join(sp, "images.bin"))
-        points  = load_points3D_bin(os.path.join(sp, "points3D.bin"))
-        print(f"Loaded binary COLMAP from {sp}")
+        cameras = read_intrinsics_binary(str(sp / "cameras.bin"))
+        images  = read_extrinsics_binary(str(sp / "images.bin"))
+        xyz_arr, rgb_arr, _ = read_points3D_binary(str(sp / "points3D.bin"))
+        logger.info("Loaded binary COLMAP from %s", sp)
     except Exception:
-        # Fallback to text COLMAP model
-        cameras = read_intrinsics_text(os.path.join(sp, "cameras.txt"))
-        images  = read_extrinsics_text(os.path.join(sp, "images.txt"))
-        points  = load_points3D_txt(os.path.join(sp, "points3D.txt"))
-        print(f"Loaded text COLMAP from {sp}")
+        cameras = read_intrinsics_text(str(sp / "cameras.txt"))
+        images  = read_extrinsics_text(str(sp / "images.txt"))
+        xyz_arr, rgb_arr, _ = read_points3D_text(str(sp / "points3D.txt"))
+        logger.info("Loaded text COLMAP from %s", sp)
 
-    print(f"{len(cameras)} cam(s), {len(images)} imgs, {len(points)} pts")
+    xyz_arr = xyz_arr.astype(np.float32)
+    rgb_arr = rgb_arr.astype(np.uint8)
+
+    logger.info("%d cam(s), %d imgs, %d pts", len(cameras), len(images), len(xyz_arr))
     for cid, cam in cameras.items():
         fx, fy, cx, cy = intrinsics_from_camera(cam)
-        print(f"  cam {cid}: {cam.model}  {cam.width}x{cam.height}  "
-              f"f=({fx:.1f},{fy:.1f})  c=({cx:.1f},{cy:.1f})")
+        logger.info("  cam %d: %s  %dx%d  f=(%.1f,%.1f)  c=(%.1f,%.1f)", cid, cam.model, cam.width, cam.height, fx, fy, cx, cy)
 
-    # ── Collect votes ──
-    algo = args.algorithm
-    print(f"\nVoting strategy: {algo}")
+    logger.info("Voting strategy: majority projection")
+    votes = collect_projection_votes(images, cameras, xyz_arr, mask_dir)
 
-    # Choose voting strategy
-    if algo == "corr":
-        votes = collect_correspondence_votes(images, points, mask_dir)
-    else:
-        votes = collect_projection_votes(images, cameras, points, mask_dir)
-
-    resolver = _RESOLVERS[algo]
-
-    # ── Resolve labels ──
-    pid_order = list(points.keys())
-    xyz_arr = np.array([points[p][0] for p in pid_order], dtype=np.float32)
-    rgb_arr = np.array([points[p][1] for p in pid_order], dtype=np.uint8)
-
-    # Assign a label to each point based on collected votes
-    labels = np.zeros(len(pid_order), dtype=np.uint8)
-    for i, pid in enumerate(pid_order):
-        if pid in votes and votes[pid]:
-            labels[i] = resolver(votes[pid])
+    labels = np.zeros(len(xyz_arr), dtype=np.uint8)
+    for i in range(len(xyz_arr)):
+        if i in votes and votes[i]:
+            labels[i] = Counter(votes[i]).most_common(1)[0][0]
 
     unique, counts = np.unique(labels, return_counts=True)
-    print(f"\nRaw label distribution ({len(unique)} labels):")
+    logger.info("Raw label distribution (%d labels):", len(unique))
     for lbl, cnt in zip(unique, counts):
-        print(f"  label {lbl:3d}: {cnt:6d} pts ({100*cnt/len(labels):.1f}%)")
+        logger.info("  label %3d: %6d pts (%.1f%%)", lbl, cnt, 100 * cnt / len(labels))
 
-    # ── 3D Alias Merging ──
     if not args.disable_alias_merge:
-        print("\n--- 3D Alias Merging ---")
+        logger.info("--- 3D Alias Merging ---")
         labels, merge_map = merge_aliases(
-            labels, votes, pid_order,
+            labels, votes, len(xyz_arr),
             iou_thresh=args.alias_iou_thresh,
             min_covisibility=args.alias_min_covisibility,
         )
         if merge_map:
-            # Save alias merge map to file
-            map_path = os.path.join(data, args.output_dir, "alias_merge_map.json")
-            os.makedirs(os.path.dirname(map_path), exist_ok=True)
+            map_path = Path(data) / args.output_dir / "alias_merge_map.json"
+            map_path.parent.mkdir(parents=True, exist_ok=True)
             with open(map_path, "w") as f:
                 json.dump({str(k): int(v) for k, v in merge_map.items()}, f, indent=2)
-            print(f"  Saved alias map -> {map_path}")
-            
+            logger.info("Saved alias map -> %s", map_path)
             unique, counts = np.unique(labels, return_counts=True)
-            print(f"\nPost-merge label distribution ({len(unique)} labels):")
+            logger.info("Post-merge label distribution (%d labels):", len(unique))
             for lbl, cnt in zip(unique, counts):
-                print(f"  label {lbl:3d}: {cnt:6d} pts ({100*cnt/len(labels):.1f}%)")
+                logger.info("  label %3d: %6d pts (%.1f%%)", lbl, cnt, 100 * cnt / len(labels))
 
-    # ── Prune outliers ──
-    labels = prune_3d_outliers(xyz_arr, labels, min_points=args.min_points)
+    cleaned = labels.copy()
+    for lbl in np.unique(labels):
+        if lbl != 0:
+            mask = labels == lbl
+            if mask.sum() < args.min_points:
+                cleaned[mask] = 0
+    labels = cleaned
 
     unique, counts = np.unique(labels, return_counts=True)
-    print(f"\nFinal label distribution ({len(unique)} labels):")
+    logger.info("Final label distribution (%d labels):", len(unique))
     for lbl, cnt in zip(unique, counts):
-        print(f"  label {lbl:3d}: {cnt:6d} pts ({100*cnt/len(labels):.1f}%)")
+        logger.info("  label %3d: %6d pts (%.1f%%)", lbl, cnt, 100 * cnt / len(labels))
 
-    # ── Create output folder ──
-    out_dir = os.path.join(data, args.output_dir)
-    obj_dir = os.path.join(out_dir, "object_clouds")
-    os.makedirs(obj_dir, exist_ok=True)
+    out_dir = Path(data) / args.output_dir
+    obj_dir = out_dir / "object_clouds"
+    obj_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Labeled PLY: original RGB + label property ──
-    labeled_path = os.path.join(out_dir, "points3D_labeled.ply")
+    labeled_path = out_dir / "points3D_labeled.ply"
     save_labeled_ply(labeled_path, xyz_arr, rgb_arr, labels)
-    print(f"\nSaved -> {labeled_path}")
+    logger.info("Saved -> %s", labeled_path)
 
-    # ── Visualization PLY: auto-generate distinct colors per label ──
-    vis_rgb = np.array([label_to_color(l) for l in labels], dtype=np.uint8)
-    vis_path = os.path.join(out_dir, "points3D_vis.ply")
+    vis_rgb  = np.array([label_to_color(l) for l in labels], dtype=np.uint8)
+    vis_path = out_dir / "points3D_vis.ply"
     save_labeled_ply(vis_path, xyz_arr, vis_rgb, labels)
-    print(f"Saved -> {vis_path}")
+    logger.info("Saved -> %s", vis_path)
 
-    # ── Per-object clouds: one PLY per label (skip background 0) ──
     for lbl in sorted(set(labels)):
         if lbl == 0:
             continue
-        mask = labels == lbl
-        obj_path = os.path.join(obj_dir, f"label_{lbl:02d}.ply")
+        mask     = labels == lbl
+        obj_path = obj_dir / f"label_{lbl:02d}.ply"
         save_labeled_ply(obj_path, xyz_arr[mask], rgb_arr[mask], labels[mask])
-        print(f"Saved -> {obj_path}  ({mask.sum()} pts)")
+        logger.info("Saved -> %s  (%d pts)", obj_path, mask.sum())
 
-    print(f"\nAll outputs in: {out_dir}")
+    logger.info("All outputs in: %s", out_dir)
 
-
-##### CLI ######################################################################
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
     p = argparse.ArgumentParser(description="Point cloud object labeling via multi-view voting.")
-    p.add_argument("--data_path",   required=True, help="Scene directory (contains COLMAP data and masks)")
+    p.add_argument("--data_path", required=True, help="Scene directory (contains COLMAP data and masks)")
     p.add_argument("--sparse_dir", default="sparse/0", help="COLMAP sparse model dir relative to data_path")
-    p.add_argument("--mask_dir",   default="object_mask", help="Mask folder name")
-    p.add_argument("--algorithm",  default="majority", choices=["majority", "prob", "corr"])
+    p.add_argument("--mask_dir", default="object_mask", help="Mask folder name")
     p.add_argument("--output_dir", default="output", help="Output folder name inside data_path")
     p.add_argument("--min_points", type=int, default=10, help="Minimum number of points to be considered an object")
-    # Alias merging
     p.add_argument("--disable_alias_merge", action="store_true", help="Disable 3D alias merging")
-    p.add_argument("--alias_iou_thresh", type=float, default=0.40, help="Min 3D point IoU to merge two tracker IDs")
-    p.add_argument("--alias_min_covisibility", type=int, default=15, help="Min shared points for alias merge candidates")
+    p.add_argument("--alias_iou_thresh", type=float, default=0.5, help="Min 3D point IoU to merge two tracker IDs")
+    p.add_argument("--alias_min_covisibility", type=int, default=20, help="Min shared points for alias merge candidates")
     run_voting(p.parse_args())

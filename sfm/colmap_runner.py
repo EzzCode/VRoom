@@ -1,5 +1,5 @@
 """
-COLMAP Automation Pipeline for VRoom / ObjectGS
+COLMAP Automation Pipeline for VRoom 
 
 Automates the Structure-from-Motion (SfM) pipeline to extract camera poses 
 and sparse point clouds from a directory of images.
@@ -120,7 +120,7 @@ def run_colmap_pipeline(args):
         logger.error("Try using more images, ensuring better overlap, or checking for blurry frames.")
 
 if __name__ == "__main__":
-    check_colmap_installed() # Early check before parsing arguments
+    check_colmap_installed()
     parser = argparse.ArgumentParser(description="Automated COLMAP Pipeline for VRoom")
     parser.add_argument("--data_path", required=True, help="Root folder containing the 'images' directory")
     parser.add_argument("--camera_model", default="OPENCV", choices=["PINHOLE", "OPENCV", "SIMPLE_RADIAL", "RADIAL"], 

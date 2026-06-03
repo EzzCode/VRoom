@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from masks_and_tracking.tracker_defaults import TRACKING_DEFAULTS
+
 
 def _quote_for_log(parts):
     """Return a shell-safe command string for readable logging output."""
@@ -56,28 +58,27 @@ def main():
     parser.add_argument("--text_prompts", nargs="+", default=["chair", "table", "sofa", "bed", "desk", "cabinet"])
     parser.add_argument("--min_mask_area", type=int, default=120)
     parser.add_argument("--max_area_ratio", type=float, default=0.50)
-    parser.add_argument("--border_touch_threshold", type=float, default=0.35)
+    parser.add_argument("--border_threshold", type=float, default=0.35)
     parser.add_argument("--merge_thresh", type=float, default=0.78)
     parser.add_argument("--proximity_gap", type=int, default=20)
     parser.add_argument("--proximity_color_thresh", type=float, default=0.32)
     parser.add_argument("--no_split_disconnected", action="store_true")
 
     # Tracker arguments
-    parser.add_argument("--alpha", type=float, default=0.35)
-    parser.add_argument("--beta", type=float, default=0.30)
-    parser.add_argument("--gamma", type=float, default=0.15)
-    parser.add_argument("--delta", type=float, default=0.20)
-    parser.add_argument("--match_threshold", type=float, default=0.74)
-    parser.add_argument("--patience", type=int, default=28)
-    parser.add_argument("--ema", type=float, default=0.70)
-    parser.add_argument("--reid_threshold", type=float, default=0.50)
+    parser.add_argument("--iou_w", type=float, default=TRACKING_DEFAULTS["iou_w"])
+    parser.add_argument("--color_w", type=float, default=TRACKING_DEFAULTS["color_w"])
+    parser.add_argument("--texture_w", type=float, default=TRACKING_DEFAULTS["texture_w"])
+    parser.add_argument("--bbox_w", type=float, default=TRACKING_DEFAULTS["bbox_w"])
+    parser.add_argument("--match_threshold", type=float, default=TRACKING_DEFAULTS["match_threshold"])
+    parser.add_argument("--patience", type=int, default=TRACKING_DEFAULTS["patience"])
+    parser.add_argument("--smoothing_factor", type=float, default=TRACKING_DEFAULTS["smoothing_factor"])
+    parser.add_argument("--reid_threshold", type=float, default=TRACKING_DEFAULTS["reid_threshold"])
     parser.add_argument("--disable_motion_comp", action="store_true")
-    parser.add_argument("--consensus_window", type=int, default=8)
-    parser.add_argument("--consensus_tie_margin", type=float, default=0.05)
+    parser.add_argument("--consensus_window", type=int, default=TRACKING_DEFAULTS["consensus_window"])
+    parser.add_argument("--consensus_tie_margin", type=float, default=TRACKING_DEFAULTS["consensus_tie_margin"])
     parser.add_argument("--use_opencv", action="store_true")
 
     # Voting arguments
-    parser.add_argument("--algorithm", default="majority", choices=["majority", "prob", "corr"])
     parser.add_argument("--output_dir", default="labeled_output")
     parser.add_argument("--min_points", type=int, default=10)
     parser.add_argument("--disable_alias_merge", action="store_true")
@@ -114,21 +115,20 @@ def main():
             "--text_prompts", *args.text_prompts,
             "--min_mask_area", str(args.min_mask_area),
             "--max_area_ratio", str(args.max_area_ratio),
-            "--border_touch_threshold", str(args.border_touch_threshold),
+            "--border_threshold", str(args.border_threshold),
             "--merge_thresh", str(args.merge_thresh),
             "--proximity_gap", str(args.proximity_gap),
             "--proximity_color_thresh", str(args.proximity_color_thresh),
-            "--alpha", str(args.alpha),
-            "--beta", str(args.beta),
-            "--gamma", str(args.gamma),
-            "--delta", str(args.delta),
+            "--iou_w", str(args.iou_w),
+            "--color_w", str(args.color_w),
+            "--texture_w", str(args.texture_w),
+            "--bbox_w", str(args.bbox_w),
             "--match_threshold", str(args.match_threshold),
             "--patience", str(args.patience),
-            "--ema", str(args.ema),
+            "--smoothing_factor", str(args.smoothing_factor),
             "--reid_threshold", str(args.reid_threshold),
             "--consensus_window", str(args.consensus_window),
             "--consensus_tie_margin", str(args.consensus_tie_margin),
-            "--algorithm", args.algorithm,
             "--output_dir", args.output_dir,
             "--min_points", str(args.min_points),
             "--alias_iou_thresh", str(args.alias_iou_thresh),
