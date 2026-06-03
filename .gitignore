@@ -41,10 +41,10 @@ bed_vroom_output/
 office3dgsvroom/
 vroom_output/
 
-# ─── Module4 / Mesh Pipeline ──────────────────────────────────────────────────
-Module4/inputs/
-Module4/objects/
-Module4/objects_glb
+# ─── Mesh Generation ──────────────────────────────────────────────────
+mesh_generation/inputs/
+mesh_generation/objects/
+mesh_generation/objects_glb
 
 # ─── Datasets & Large Data ────────────────────────────────────────────────────
 datasets/
