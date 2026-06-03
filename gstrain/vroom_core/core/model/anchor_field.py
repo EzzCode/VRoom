@@ -105,7 +105,7 @@ class AnchorCloud(nn.Module):
         """
         Estimates a quantization size for a uniform grid using knn distances
         """
-        quantization_size = torch.median(knn_distances[:, 1:]).item()
+        quantization_size = torch.median(knn_distances).item()
         return max(quantization_size, min_size)
 
     def _generate_anchors(self, point_cloud, point_labels):
