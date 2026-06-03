@@ -87,12 +87,7 @@ class DensifcationController:
         ]  # [N_vis * K] where N_vis is the number of visible gaussians
 
         # select only gaussians that have postive opacity
-        # the reason i apply the negative_opacity_filter first before the opacity mask
-        # is to match the dim of vis_gaussian_indices(N_vis*K) to opacity(N_selected)
         selected_indices = vis_gaussian_indices[negative_opacity_filter]  # [N_selected]
-
-        opacity_mask = opacity.view(-1) > 0.5  # [N_selected]
-        active_indices = selected_indices[opacity_mask]  # [N_active]
 
         if points_grad is None:
             return
@@ -106,8 +101,8 @@ class DensifcationController:
         gaussians_gradients *= scaler
         grad_magnitude = torch.norm(gaussians_gradients, dim=-1)  # [N_selected]
 
-        self.gaussian_gradients_acc[active_indices] += grad_magnitude[opacity_mask]
-        self.gaussian_visits[active_indices] += (
+        self.gaussian_gradients_acc[selected_indices] += grad_magnitude
+        self.gaussian_visits[selected_indices] += (
             1  # increment the visits for the selected gaussians
         )
 
