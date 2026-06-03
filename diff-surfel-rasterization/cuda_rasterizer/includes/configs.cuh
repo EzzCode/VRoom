@@ -13,10 +13,8 @@ __device__ constexpr float FAR_PLANE = 100.0f;
 constexpr float DEPTH_NORM_SCALE = FAR_PLANE / (FAR_PLANE - NEAR_PLANE);
 
 // Feature toggles
-#define OPACITY_SCALED_CUTOFF 0 // If 1, scale surfel's cutoff radius by opacity (minor speed gain)
 #define FLIP_NORMALS_TO_CAM 1   // If 1, flip normals to always face camera (important for surfel integrity)
 #define RENDER_AUX 1            // If 1, render depth, normal, distortion auxiliary channels
-#define EDGE_ON_CULL 1          // If 1, enables culling surfels viewed edge-on from cam
 
 // Render auxiliary channel layout offsets (for rendered_aux_buff indexing)
 #define DEPTH_OFFSET 0
@@ -25,6 +23,7 @@ constexpr float DEPTH_NORM_SCALE = FAR_PLANE / (FAR_PLANE - NEAR_PLANE);
 #define MEDIAN_DEPTH_OFFSET 5
 #define DISTORTION_OFFSET 6 // Forces the optimization to place exactly one opaque surfel per pixel at the true surface depth
 
-// Filter constants. No surfel can have an effective screen-space radius smaller than FILTER_SIZE pixels.
-__device__ constexpr float FILTER_SIZE = 0.707106f; // sqrt(2)/2, minimum filter radius (half diagonal of unit square)
-__device__ constexpr float FILTER_INV_SQ = 2.0f;    // 1 / FilterSize^2, used for low-pass rho
+// Filter constants. No surfel can have a pixel-space radius smaller than FILTER_SIZE pixels
+// FILTER_SIZE MUST NOT BE ZERO. IT WILL BREAK SURFEL RADII COMPUTAIONS.
+__device__ constexpr float FILTER_SIZE = 0.707106f; // Half diagonal of unit square. Ensures no surfel is smaller than 1 pixel
+__device__ constexpr float FILTER_INV_SQ = 2.0f;    // 1 / FilterSize^2, used for low-pass 2D distance calculation in rendering.

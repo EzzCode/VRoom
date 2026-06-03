@@ -1,7 +1,7 @@
 import gsplat
 import torch
-from gsplat.cuda._wrapper import fully_fused_projection, fully_fused_projection_2dgs
-from cuda_rasterizer import rasterize_2dgs
+from gsplat.cuda._wrapper import fully_fused_projection
+from cuda_rasterizer import rasterize_2dgs, frustum_cull_2dgs
 
 
 def render(
@@ -58,7 +58,7 @@ def render(
             combined_colors = torch.cat([color, semantics.detach()], dim=-1)
         else:
             combined_colors = color
-        
+
         (rendered, render_alphas), info = rasterize_2dgs(
             points_world_space=xyz,
             quats=rot,
@@ -176,20 +176,16 @@ def apply_frustum_culling(viewpoint_camera, anchor_cloud, gaussian_type="3D"):
             calc_compensations=False,
         )
     elif gaussian_type == "2D":
-        proj_results = fully_fused_projection_2dgs(
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            int(viewpoint_camera.image_width),
-            int(viewpoint_camera.image_height),
-            eps2d=0.3,
-            packed=False,
+        proj_results = frustum_cull_2dgs(
+            points_world_space=means,
+            quats=quats,
+            scale_vecs=scales,
+            w2cam_mats=viewmats,
+            cam_intrinsics=Ks,
+            img_W=int(viewpoint_camera.image_width),
+            img_H=int(viewpoint_camera.image_height),
             near_plane=0.01,
-            far_plane=1e10,
-            radius_clip=0.0,
-            sparse_grad=False,
+            far_plane=100.0,
         )
     else:
         raise ValueError(f"Unknown gaussian_type: {gaussian_type}")

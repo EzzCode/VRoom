@@ -49,7 +49,9 @@ class _RasterizerFirstPass(torch.autograd.Function):
     """
 
     @staticmethod
-    @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32) # Ensure receieved inputs are float32
+    @torch.cuda.amp.custom_fwd(
+        cast_inputs=torch.float32
+    )  # Ensure receieved inputs are float32
     def forward(
         ctx,
         points_world_space,
@@ -129,7 +131,7 @@ class _RasterizerFirstPass(torch.autograd.Function):
         )
 
     @staticmethod
-    @torch.cuda.amp.custom_bwd # Ensure receieved inputs are of same precision as fwd
+    @torch.cuda.amp.custom_bwd  # Ensure receieved inputs are of same precision as fwd
     def backward(
         ctx,
         grad_rendered_color_feat,  # Image rendering loss
@@ -230,7 +232,9 @@ class _RasterizerSubsequent(torch.autograd.Function):
     """
 
     @staticmethod
-    @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32) # Ensure receieved inputs are float32
+    @torch.cuda.amp.custom_fwd(
+        cast_inputs=torch.float32
+    )  # Ensure receieved inputs are float32
     def forward(
         ctx,
         colors_feat,
@@ -288,7 +292,7 @@ class _RasterizerSubsequent(torch.autograd.Function):
         return rendered_color_feat
 
     @staticmethod
-    @torch.cuda.amp.custom_bwd # Ensure receieved inputs are of same precision as fwd
+    @torch.cuda.amp.custom_bwd  # Ensure receieved inputs are of same precision as fwd
     def backward(
         ctx,
         grad_rendered_color_feat,  # Image rendering loss
@@ -496,11 +500,11 @@ class _SurfelRasterizer(nn.Module):
 # Would require to batch projected_centers and modify the main training loop
 # to become compatible.
 def rasterize_2dgs(
-    points_world_space: Tensor,  # [N, 3]
-    quats: Tensor,  # [N, 4]
-    scale_vecs: Tensor,  # [N, 3]
-    opacities: Tensor,  # [N]
-    colors_feat: Tensor,  # [N, D] or [N, K, 3]
+    points_world_space: Tensor,  # [P, 3]
+    quats: Tensor,  # [P, 4]
+    scale_vecs: Tensor,  # [P, 2] or [P, 3]
+    opacities: Tensor,  # [P]
+    colors_feat: Tensor,  # [P, Channels]
     w2cam_mats: Tensor,  # [C, 4, 4]
     cam_intrinsics: Tensor,  # [C, 3, 3]
     img_W: int,
@@ -528,7 +532,7 @@ def rasterize_2dgs(
 
     # Ensure scale vectors are 2D (since surfels are 2D) and contiguous
     scale_vecs = scale_vecs[:, :2].contiguous()
-    
+
     # Safely ensure that opacities dims are [N, 1]
     opacities = opacities.contiguous()
     if opacities.dim() == 1:
@@ -716,8 +720,12 @@ def rasterize_2dgs(
 
     # Rotate normals from camera to world space
 
-    # 1. Transpose of of orthogonal matrix is its inverse
+    # 1. Extract rotation portion of world 2 cam matrix.
+    # Transpose of orthogonal matrix is its inverse
     cam2w_mats = w2cam_mats[:, :3, :3].transpose(1, 2)
+
+    # 2. Multiply each pixel's rotation vector by
+    # the cam 2 world space rotation matrix
     rendered_normal = torch.einsum(
         "...ij,...j->...i",
         cam2w_mats.unsqueeze(1).unsqueeze(
@@ -780,3 +788,70 @@ def rasterize_2dgs(
     }
 
     return (rendered_color_feat_depth, rendered_alphas), meta
+
+
+def frustum_cull_2dgs(
+    points_world_space: Tensor,  # [P, 3]
+    quats: Tensor,  # [P, 4]
+    scale_vecs: Tensor,  # [P, 2] or [P, 3]
+    w2cam_mats: Tensor,  # [C, 4, 4]
+    cam_intrinsics: Tensor,  # [C, 3, 3]
+    img_W: int,
+    img_H: int,
+    near_plane: float = 0.01,
+    far_plane: float = 100.0,
+) -> Tuple[Tensor]:
+    """
+    High-level CUDA frustum culling API.
+    Culls surfels that aren't in the camera's view.
+    """
+
+    # Find the number of different cameras used (typically only 1)
+    cam_count = len(w2cam_mats)
+
+    # Find the used device (should be CUDA / VRAM)
+    device = points_world_space.device
+
+    # Normalize quaternions and ensure contiguous memory
+    quats = F.normalize(quats, dim=-1).contiguous()
+
+    # Ensure scale vectors are 2D (since surfels are 2D) and contiguous
+    scale_vecs = scale_vecs[:, :2].contiguous()
+
+    # Loop over different cameras and cull surfels
+
+    all_radii = []
+    for cam_id in range(cam_count):
+        # Compute camera FOV from camera intrinsics
+        fovx = 2 * math.atan(img_W / (2 * cam_intrinsics[cam_id, 0, 0].item()))
+        fovy = 2 * math.atan(img_H / (2 * cam_intrinsics[cam_id, 1, 1].item()))
+
+        # Compute different space transformation matrices.
+        # Transpose them into col-major order for GLM.
+        w2cam_mat = w2cam_mats[cam_id].transpose(0, 1)
+
+        cam2clip_mat = _compute_cam2clip_mat(
+            near_plane=near_plane,
+            far_plane=far_plane,
+            fovx=fovx,
+            fovy=fovy,
+            device=device,
+        ).transpose(0, 1)
+
+        w2clip_mat = w2cam_mat @ cam2clip_mat
+
+        # Call surfel culling kernel
+        radii = _C.frustum_cull_surfels(
+            points_world_space,
+            scale_vecs,
+            1.0,  # glob_scale_mod
+            quats,
+            w2cam_mat,
+            w2clip_mat,
+            img_W,
+            img_H,
+            False,  # debug
+        )
+        all_radii.append(radii)
+
+    return (torch.stack(all_radii, dim=0),)  # [C, P]

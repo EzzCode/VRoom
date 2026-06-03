@@ -86,22 +86,22 @@ __device__ bool compute_aabb(
 
 // Preprocessing kernel
 __global__ void preprocess_kernel_fwd(
-    const int surfel_count,              // Surfel / Points count
-    const float3 *points_world_space,    // All points (surfels) in world space
-    const float2 *scale_vecs,            // Scale vectors
-    const float glob_scale_mod,          // Global scale modifier
-    const float4 *quats,                 // Quaternions
-    const float *opacities,              // surfel opacities
-    const float *w2cam_mat,              // World to Cam space matrix
-    const float *w2clip_mat,             // World to Clip space matrix
-    const int img_W, const int img_H,    // Image width and height
-    const dim3 tile_grid,                // Grid dimensions for kernels
-    float2 *projected_centers_buff,      // Buffer with mapped pixel locations of each surfel
-    uint32_t *asymmetric_radii_buff,     // Both surfel radii for tighter bounding boxes
-    float *depths_buff,                  // Computed surfel depths as seen from the image (cam space)
-    float3 *splat2pix_mats_buff,         // Splat to pixel space matrices buffer for each surfel
-    float4 *normal_opacity_buff,         // Normals (camera space) concatenated with opacity for each surfel
-    uint32_t *surfels_tiles_touched_buff // Number of tiles touched by each surfel
+    const int surfel_count,                           // Surfel / Points count
+    const float3 *__restrict__ points_world_space,    // All points (surfels) in world space
+    const float2 *__restrict__ scale_vecs,            // Scale vectors
+    const float glob_scale_mod,                       // Global scale modifier
+    const float4 *__restrict__ quats,                 // Quaternions
+    const float *__restrict__ opacities,              // surfel opacities
+    const float *__restrict__ w2cam_mat,              // World to Cam space matrix
+    const float *__restrict__ w2clip_mat,             // World to Clip space matrix
+    const int img_W, const int img_H,                 // Image width and height
+    const dim3 tile_grid,                             // Grid dimensions for render kernels
+    float2 *__restrict__ projected_centers_buff,      // Buffer with mapped pixel locations of each surfel
+    uint32_t *__restrict__ asymmetric_radii_buff,     // Both surfel radii for tighter bounding boxes
+    float *__restrict__ depths_buff,                  // Computed surfel depths as seen from the image (cam space)
+    float3 *__restrict__ splat2pix_mats_buff,         // Splat to pixel space matrices buffer for each surfel
+    float4 *__restrict__ normal_opacity_buff,         // Normals (camera space) concatenated with opacity for each surfel
+    uint32_t *__restrict__ surfels_tiles_touched_buff // Number of tiles touched by each surfel
 )
 {
     auto surfel_idx = cg::this_grid().thread_rank();
@@ -110,11 +110,7 @@ __global__ void preprocess_kernel_fwd(
     if (surfel_idx >= surfel_count)
         return;
 
-    // Zero default init. Used to cull invalid surfels later.
-    asymmetric_radii_buff[surfel_idx] = 0;
-    surfels_tiles_touched_buff[surfel_idx] = 0;
-
-    // Frustum cull and cam
+    // Frustum cull and cam-space point coords
     float3 point_world_space = points_world_space[surfel_idx];
     float3 point_cam_space;
     if (!verify_in_frustum(point_world_space, w2cam_mat, point_cam_space))
@@ -149,21 +145,22 @@ __global__ void preprocess_kernel_fwd(
         normal = {-normal.x, -normal.y, -normal.z};
 #endif // IF FLIP_NORMALS_TO_CAM
 
-    // Compute surfel center and radius
+    // Compute surfel center and pixel-space radii
     float2 center_pixel;
     int2 surfel_radii;
     {
         // Local scope trick for optimizing register usage
-        
-        // Define pixel cutoff. 3 standard deviations of the gaussian (surfel).
+
+        // Define pixel cutoff. 3 standard deviations of the gaussian (surfel)
+        // which covers ~ 99.7% of surfel's opacity.
         constexpr float cutoff = 3.f;
 
         float2 unclamped_surfel_radii;
         if (!compute_aabb(splat2pix_mat, cutoff, center_pixel, unclamped_surfel_radii))
             return;
         // Clamp to prevent OOM from surfels being too close to camera
-        surfel_radii.x = min(2048, max(1, (int)ceil(max(unclamped_surfel_radii.x, cutoff * FILTER_SIZE))));
-        surfel_radii.y = min(2048, max(1, (int)ceil(max(unclamped_surfel_radii.y, cutoff * FILTER_SIZE))));
+        surfel_radii.x = min(2048, (int)ceil(max(unclamped_surfel_radii.x, cutoff * FILTER_SIZE)));
+        surfel_radii.y = min(2048, (int)ceil(max(unclamped_surfel_radii.y, cutoff * FILTER_SIZE)));
     }
 
     // Compute tile bounds
@@ -191,7 +188,7 @@ void FWD::preprocess(
     const float *w2cam_mat,              // World to Cam space matrix
     const float *w2clip_mat,             // World to Clip space matrix
     const int img_W, const int img_H,    // Image width and height
-    const dim3 tile_grid,                // Grid dimensions for kernels
+    const dim3 tile_grid,                // Grid dimensions for render kernels
     float2 *projected_centers_buff,      // Buffer with mapped pixel locations of each surfel
     uint32_t *asymmetric_radii_buff,     // Both surfel radii for tighter bounding boxes
     float *depths_buff,                  // Computed surfel depths as seen from the image (cam space)
@@ -493,11 +490,10 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
 // Rendering image (RGB + features) using surfels
 void FWD::render(
-    const dim3 tile_grid, const dim3 block, // Tile grid and block dimensions for kernels
-    const int img_W, const int img_H,       // Image width and height
-    const int num_color_feat_channels,      // Number of channels in the concat of colors + features
-    const float *colors_feat,               // Concatenation of colors and features per surfel
-    const float *background,                // Background values
+    const int img_W, const int img_H,  // Image width and height
+    const int num_color_feat_channels, // Number of channels in the concat of colors + features
+    const float *colors_feat,          // Concatenation of colors and features per surfel
+    const float *background,           // Background values
     // Preprocess buffers
     const float2 *projected_centers, // Mapped pixel locations of each surfel's center
     const float3 *splat2pix_mats,    // Splat to pixel space matrices buffer for each surfel
@@ -513,21 +509,25 @@ void FWD::render(
     float *rendered_aux_buff         // Rendered depth, normal, distortion auxiliary channels per pixel
 )
 {
-#define __RENDER_CALL_(N)                           \
-    case N:                                         \
-        render_kernel_fwd<N><<<tile_grid, block>>>( \
-            img_W, img_H,                           \
-            colors_feat,                            \
-            background,                             \
-            projected_centers,                      \
-            splat2pix_mats,                         \
-            normal_opacity,                         \
-            sorted_surfel_indices,                  \
-            tile_ranges,                            \
-            contrib_state_buff,                     \
-            transmittance_and_moments_buff,         \
-            rendered_color_feat_buff,               \
-            rendered_aux_buff);                     \
+    // Define kernel structure
+    dim3 tile_grid(DIV_CEIL(img_W, BLOCK_DIM_X), DIV_CEIL(img_H, BLOCK_DIM_Y), 1);
+    dim3 tile(BLOCK_DIM_X, BLOCK_DIM_Y, 1);
+
+#define __RENDER_CALL_(CHANNELS)                          \
+    case CHANNELS:                                        \
+        render_kernel_fwd<CHANNELS><<<tile_grid, tile>>>( \
+            img_W, img_H,                                 \
+            colors_feat,                                  \
+            background,                                   \
+            projected_centers,                            \
+            splat2pix_mats,                               \
+            normal_opacity,                               \
+            sorted_surfel_indices,                        \
+            tile_ranges,                                  \
+            contrib_state_buff,                           \
+            transmittance_and_moments_buff,               \
+            rendered_color_feat_buff,                     \
+            rendered_aux_buff);                           \
         break;
 
     switch (num_color_feat_channels)
@@ -542,4 +542,89 @@ void FWD::render(
         break; // Should never reach here. Python pads / batches to provide only supported sizes
     }
 #undef __RENDER_CALL_
+}
+
+// Frustum culling kernel
+__global__ void frustum_cull_kernel(
+    const int surfel_count,                        // Surfel / Points count
+    const float3 *__restrict__ points_world_space, // All points (surfels) in world space
+    const float2 *__restrict__ scale_vecs,         // Scale vectors
+    const float glob_scale_mod,                    // Global scale modifier
+    const float4 *__restrict__ quats,              // Quaternions
+    const float *__restrict__ w2cam_mat,           // World to Cam space matrix
+    const float *__restrict__ w2clip_mat,          // World to Clip space matrix
+    const int img_W, const int img_H,              // Image width and height
+    int *__restrict__ radii_buff                   // Pixel-space surfel max radius. Used as the culling metric (zero for culled surfels)
+)
+{
+    auto surfel_idx = cg::this_grid().thread_rank();
+
+    // Verify the thread corresponds to a surfel
+    if (surfel_idx >= surfel_count)
+        return;
+
+    // Frustum cull and cam-space point coords
+    float3 point_world_space = points_world_space[surfel_idx];
+    float3 point_cam_space;
+    if (!verify_in_frustum(point_world_space, w2cam_mat, point_cam_space))
+        return;
+
+    // Compute splat to pix-space matrix
+    glm::mat3 splat2pix_mat;
+    float3 unused_normal; // Unused so the compiler will optimize it out
+    compute_splat2pix_mat(point_world_space, {scale_vecs[surfel_idx].x, scale_vecs[surfel_idx].y},
+                          glob_scale_mod,
+                          {quats[surfel_idx].x, quats[surfel_idx].y, quats[surfel_idx].z, quats[surfel_idx].w},
+                          w2cam_mat, w2clip_mat, img_W, img_H, splat2pix_mat, unused_normal);
+
+    // Compute surfel center and pixel-space radii
+    float2 center_pixel;
+    int2 surfel_radii;
+    {
+        // Local scope trick for optimizing register usage
+
+        // Define pixel cutoff. 3 standard deviations of the gaussian (surfel)
+        // which covers ~ 99.7% of surfel's opacity.
+        constexpr float cutoff = 3.f;
+
+        float2 unclamped_surfel_radii;
+        if (!compute_aabb(splat2pix_mat, cutoff, center_pixel, unclamped_surfel_radii))
+            return;
+        // Clamp to prevent OOM from surfels being too close to camera
+        surfel_radii.x = min(2048, (int)ceil(max(unclamped_surfel_radii.x, cutoff * FILTER_SIZE)));
+        surfel_radii.y = min(2048, (int)ceil(max(unclamped_surfel_radii.y, cutoff * FILTER_SIZE)));
+    }
+
+    // Cull surfels whose projection is outside the image boundaries
+    float2 min_pix_coord = {center_pixel.x - surfel_radii.x, center_pixel.y - surfel_radii.y};
+    float2 max_pix_coord = {center_pixel.x + surfel_radii.x, center_pixel.y + surfel_radii.y};
+    if (max_pix_coord.x < 0.f || min_pix_coord.x >= img_W || max_pix_coord.y < 0.f || min_pix_coord.y >= img_H)
+        return;
+
+    // Store max radius value (only visible surfels reach here)
+    radii_buff[surfel_idx] = max(surfel_radii.x, surfel_radii.y);
+}
+
+// Frustum culling. Cull surfels that aren't in the current camera's view.
+void FWD::frustum_cull(
+    const int surfel_count,           // Surfel / Points count
+    const float3 *points_world_space, // All points (surfels) in world space
+    const float2 *scale_vecs,         // Scale vectors
+    const float glob_scale_mod,       // Global scale modifier
+    const float4 *quats,              // Quaternions
+    const float *w2cam_mat,           // World to Cam space matrix
+    const float *w2clip_mat,          // World to Clip space matrix
+    const int img_W, const int img_H, // Image width and height
+    int *radii_buff                   // Pixel-space surfel max radius. Used as the culling metric (zero for culled surfels)
+)
+{
+    // 1D grid, BLOCK_SIZE threads per block, one thread per surfel
+    frustum_cull_kernel<<<DIV_CEIL(surfel_count, BLOCK_SIZE), BLOCK_SIZE>>>(
+        surfel_count,
+        points_world_space,
+        scale_vecs, glob_scale_mod,
+        quats,
+        w2cam_mat, w2clip_mat,
+        img_W, img_H,
+        radii_buff);
 }

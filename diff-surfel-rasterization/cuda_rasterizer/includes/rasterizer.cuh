@@ -123,3 +123,16 @@ rasterize_surfels_bwd_subsequent(
     const torch::Tensor &grad_rendered_aux,        // [7, H, W] float32 - dummy; subsequent passes' calculations are coupled with 1st pass
     const bool debug = false                       // Scalar
 );
+
+// Py-CUDA frustum culling bridge function.
+// Returns: radii [P] int32 - max radius per surfel. 0 = culled.
+torch::Tensor frustum_cull_surfels(
+    const torch::Tensor &points_world_space, // [P, 3] float32
+    const torch::Tensor &scale_vecs,         // [P, 2] float32
+    const float glob_scale_mod,              // Scalar
+    const torch::Tensor &quats,              // [P, 4] float32
+    const torch::Tensor &w2cam_mat,          // [4, 4] float32
+    const torch::Tensor &w2clip_mat,         // [4, 4] float32
+    const int img_W, const int img_H,        // Scalars
+    const bool debug = false                 // Scalar
+);

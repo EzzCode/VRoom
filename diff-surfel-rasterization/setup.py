@@ -6,7 +6,7 @@ os.path.dirname(os.path.abspath(__file__))
 setup(
     name="custom_differentiable_rasterizer",
     packages=['cuda_rasterizer'],
-    version='0.0.1',
+    version='1.0',
     ext_modules=[
         # ==========================================
         # NEW RASTERIZER

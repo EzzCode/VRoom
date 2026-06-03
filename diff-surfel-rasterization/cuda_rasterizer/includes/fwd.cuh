@@ -19,7 +19,7 @@ namespace FWD
         const float *w2cam_mat,              // World to Cam space matrix
         const float *w2clip_mat,             // World to Clip space matrix
         const int img_W, const int img_H,    // Image width and height
-        const dim3 tile_grid,                // Grid dimensions for kernels
+        const dim3 tile_grid,                // Grid dimensions for render kernels
         float2 *projected_centers_buff,      // Buffer with mapped pixel locations of each surfel's center
         uint32_t *asymmetric_radii_buff,     // Both surfel radii for tighter bounding boxes
         float *depths_buff,                  // Computed surfel depths as seen from the image (cam space)
@@ -30,11 +30,10 @@ namespace FWD
 
     // Rendering image (RGB + features) using surfels
     void render(
-        const dim3 tile_grid, const dim3 block, // Tile grid and block dimensions for kernels
-        const int img_W, const int img_H,       // Image width and height
-        const int num_color_feat_channels,      // Number of channels in the concat of colors + features
-        const float *colors_feat,               // Concatenation of colors and features per surfel
-        const float *background,                // Background values
+        const int img_W, const int img_H,  // Image width and height
+        const int num_color_feat_channels, // Number of channels in the concat of colors + features
+        const float *colors_feat,          // Concatenation of colors and features per surfel
+        const float *background,           // Background values
         // Preprocess buffers
         const float2 *projected_centers, // Mapped pixel locations of each surfel's center
         const float3 *splat2pix_mats,    // Splat to pixel space matrices buffer for each surfel
@@ -48,6 +47,19 @@ namespace FWD
         // Remaining outputs
         float *rendered_color_feat_buff, // Rendered concat of colors + features per pixel
         float *rendered_aux_buff         // Rendered depth, normal, distortion auxiliary channels per pixel
+    );
+
+    // Frustum culling. Cull surfels that aren't in the current camera's view.
+    void frustum_cull(
+        const int surfel_count,           // Surfel / Points count
+        const float3 *points_world_space, // All points (surfels) in world space
+        const float2 *scale_vecs,         // Scale vectors
+        const float glob_scale_mod,       // Global scale modifier
+        const float4 *quats,              // Quaternions
+        const float *w2cam_mat,           // World to Cam space matrix
+        const float *w2clip_mat,          // World to Clip space matrix
+        const int img_W, const int img_H, // Image width and height
+        int *radii_buff                   // Pixel-space surfel max radius. Used as the culling metric (zero for culled surfels)
     );
 
 } // namespace FWD

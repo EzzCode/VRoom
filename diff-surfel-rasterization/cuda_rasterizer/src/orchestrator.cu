@@ -22,14 +22,14 @@ namespace cg = cooperative_groups;
 
 // Generate the keys to be used to sort surfels front to back per tile.
 __global__ void key_gen_kernel(
-    const int surfel_count,                   // Total surfel count
-    const float2 *projected_centers,          // Buffer with mapped pixel locations of each surfel
-    const float *depths,                      // Computed surfel depths as seen from the image (cam space)
-    const uint32_t *tiles_touched_prefix_sum, // For sorting of surfels
-    const uint32_t *asymmetric_radii,         // Both surfel radii
-    const dim3 tile_grid,                     // Tile grid dimensions
-    uint64_t *keys_unsorted,                  // [Tile ID | Depth]
-    uint32_t *unsorted_surfel_indices         // surfel IDs being sorted
+    const int surfel_count,                                // Total surfel count
+    const float2 *__restrict__ projected_centers,          // Buffer with mapped pixel locations of each surfel
+    const float *__restrict__ depths,                      // Computed surfel depths as seen from the image (cam space)
+    const uint32_t *__restrict__ tiles_touched_prefix_sum, // For sorting of surfels
+    const uint32_t *__restrict__ asymmetric_radii,         // Both surfel radii
+    const dim3 tile_grid,                                  // Tile grid dimensions
+    uint64_t *__restrict__ keys_unsorted,                  // [Tile ID | Depth]
+    uint32_t *__restrict__ unsorted_surfel_indices         // surfel IDs being sorted
 )
 {
     auto surfel_idx = cg::this_grid().thread_rank();
@@ -39,7 +39,7 @@ __global__ void key_gen_kernel(
         return;
 
     // Skip culled surfels
-    if (asymmetric_radii[surfel_idx] > 0)
+    if (asymmetric_radii[surfel_idx] > 0) // Modified the default zero value of allocation
     {
         // Tiles touched prefix sum offset
         uint32_t offset = (surfel_idx != 0) ? tiles_touched_prefix_sum[surfel_idx - 1] : 0;
@@ -72,9 +72,9 @@ __global__ void key_gen_kernel(
 
 // Find where each tile's block of surfels begins and ends
 __global__ void compute_tile_ranges_kernel(
-    const int n_isects,          // Total number of surfel-tile intersections (tiles touched)
-    const uint64_t *keys_sorted, // [Tile ID | Depth] sorted
-    uint2 *tile_ranges           // Per-tile [start, end) index ranges
+    const int n_isects,                       // Total number of surfel-tile intersections (tiles touched)
+    const uint64_t *__restrict__ keys_sorted, // [Tile ID | Depth] sorted
+    uint2 *__restrict__ tile_ranges           // Per-tile [start, end) index ranges
 )
 {
     auto isect_idx = cg::this_grid().thread_rank();
@@ -249,11 +249,12 @@ int RasterizerOrchestrator::forward(
 
     // Render image
     CUDA_SAFE_CALL(FWD::render(
-                       tile_grid, block, img_W, img_H, num_color_feat_channels, colors_feat,
-                       background, prep_buffers.projected_centers, prep_buffers.splat2pix_mats,
+                       img_W, img_H, num_color_feat_channels, colors_feat, background,
+                       prep_buffers.projected_centers, prep_buffers.splat2pix_mats,
                        prep_buffers.normal_opacity, bin_buffers.sorted_surfel_indices,
                        img_buffers.tile_ranges, img_buffers.contrib_state,
-                       img_buffers.transmittance_and_moments, rendered_color_feat, rendered_aux),
+                       img_buffers.transmittance_and_moments,
+                       rendered_color_feat, rendered_aux),
                    debug);
 
     return n_isects;
@@ -281,7 +282,7 @@ void RasterizerOrchestrator::backward(
     // Binning buffers
     const uint32_t *sorted_surfel_indices, // sorted surfel indices
     // Image buffers
-    const uint2 *tile_ranges,              // Per-tile [start, end) index ranges
+    const uint2 *tile_ranges,         // Per-tile [start, end) index ranges
     uint32_t *contrib_state,          // Indices of the last and median surfel contributing to a pixel
     float *transmittance_and_moments, // Transmittance, first and seconds moments of depth (for distortion loss)
     // Input gradients (from pytorch)
@@ -304,13 +305,8 @@ void RasterizerOrchestrator::backward(
     if (surfel_count == 0)
         return;
 
-    // Define kernel dims
-    dim3 tile_grid(DIV_CEIL(img_W, BLOCK_DIM_X), DIV_CEIL(img_H, BLOCK_DIM_Y), 1);
-    dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y, 1);
-
     // Backpropagate gradients through rendering process
     CUDA_SAFE_CALL(BWD::render(
-                       tile_grid, block,
                        img_W, img_H, num_color_feat_channels,
                        colors_feat, background,
                        projected_centers, splat2pix_mats, normal_opacity,

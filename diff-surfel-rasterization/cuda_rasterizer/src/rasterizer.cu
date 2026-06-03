@@ -4,6 +4,7 @@
 #include "../includes/pytorch_allocators.cuh"
 #include "../includes/rasterizer.cuh"
 #include "../includes/utils.cuh"
+#include "torch/types.h"
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -90,13 +91,8 @@ torch::Tensor rasterize_surfels_fwd_subsequent(
     torch::Tensor rendered_color_feat(torch::empty({num_color_feat_channels, img_H, img_W},
                                                    colors_feat.options().dtype(torch::kFloat32)));
 
-    // Define kernel dims
-    dim3 tile_grid(DIV_CEIL(img_W, BLOCK_DIM_X), DIV_CEIL(img_H, BLOCK_DIM_Y), 1);
-    dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y, 1);
-
     // Render image
     CUDA_SAFE_CALL(FWD::render(
-                       tile_grid, block,
                        img_W, img_H,
                        num_color_feat_channels,
                        colors_feat.contiguous().data_ptr<float>(),
@@ -245,13 +241,8 @@ rasterize_surfels_bwd_subsequent(
     // Call backward orchestrator
     if (surfel_count > 0)
     {
-        // Define kernel dims
-        dim3 tile_grid(DIV_CEIL(img_W, BLOCK_DIM_X), DIV_CEIL(img_H, BLOCK_DIM_Y), 1);
-        dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y, 1);
-
         // Backpropagate gradients through rendering process
         CUDA_SAFE_CALL(BWD::render(
-                           tile_grid, block,
                            img_W, img_H, num_color_feat_channels,
                            colors_feat.contiguous().data_ptr<float>(),
                            background.contiguous().data_ptr<float>(),
@@ -286,4 +277,41 @@ rasterize_surfels_bwd_subsequent(
         ctx.grad_splat2pix_mats,
         ctx.grad_opacity,
         ctx.grad_colors_feat);
+}
+
+torch::Tensor frustum_cull_surfels(
+    const torch::Tensor &points_world_space, // [P, 3] float32
+    const torch::Tensor &scale_vecs,         // [P, 2] float32
+    const float glob_scale_mod,              // Scalar
+    const torch::Tensor &quats,              // [P, 4] float32
+    const torch::Tensor &w2cam_mat,          // [4, 4] float32
+    const torch::Tensor &w2clip_mat,         // [4, 4] float32
+    const int img_W, const int img_H,        // Scalars
+    const bool debug                         // Scalar
+)
+{
+    // Get surfel count
+    const int surfel_count = points_world_space.size(0);
+
+    // Allocate radii tensor
+    const torch::TensorOptions &base_opts = points_world_space.options();
+    torch::Tensor radii = torch::zeros({surfel_count}, base_opts.dtype(torch::kInt32));
+
+    if (surfel_count > 0)
+    {
+        // Call surfel culling kernel
+        CUDA_SAFE_CALL(FWD::frustum_cull(
+                           surfel_count,
+                           reinterpret_cast<float3 *>(points_world_space.contiguous().data_ptr<float>()),
+                           reinterpret_cast<float2 *>(scale_vecs.contiguous().data_ptr<float>()),
+                           glob_scale_mod,
+                           reinterpret_cast<float4 *>(quats.contiguous().data_ptr<float>()),
+                           w2cam_mat.contiguous().data_ptr<float>(),
+                           w2clip_mat.contiguous().data_ptr<float>(),
+                           img_W, img_H,
+                           radii.data_ptr<int32_t>()),
+                       debug);
+    }
+
+    return radii;
 }

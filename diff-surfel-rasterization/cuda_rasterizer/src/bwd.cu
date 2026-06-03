@@ -111,7 +111,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
         for (int ch = 0; ch < CHANNELS; ch++)
         {
             grad_pixel_color_feat[ch] = grad_rendered_color_feat[pixel_idx +
-                                                                                                 ch * img_H * img_W];
+                                                                 ch * img_H * img_W];
             // Fused Multiply-Add (FMA)
             // ldg routes VRAM access through read-only data (texture) cache
             // which is better for broadcasting to other threads and reducing L1 cache pressure.
@@ -514,11 +514,10 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
 // Backpropagate gradients through rendering process
 void BWD::render(
-    const dim3 tile_grid, const dim3 block, // Tile grid and block dimensions for kernels
-    const int img_W, const int img_H,       // Image width and height
-    const int num_color_feat_channels,      // Number of channels in the concat of colors + features
-    const float *colors_feat,               // Concatenation of colors and features per surfel
-    const float *background,                // Background values
+    const int img_W, const int img_H,  // Image width and height
+    const int num_color_feat_channels, // Number of channels in the concat of colors + features
+    const float *colors_feat,          // Concatenation of colors and features per surfel
+    const float *background,           // Background values
     // Preprocess buffers
     const float2 *projected_centers, // Mapped pixel locations of each surfel's center
     const float3 *splat2pix_mats,    // Splat to pixel space matrices buffer for each surfel
@@ -540,26 +539,30 @@ void BWD::render(
     float *grad_colors_feat_buff         // Computed surfel color gradients
 )
 {
-#define __RENDER_CALL_(N)                           \
-    case N:                                         \
-        render_kernel_bwd<N><<<tile_grid, block>>>( \
-            img_W, img_H,                           \
-            colors_feat,                            \
-            background,                             \
-            projected_centers,                      \
-            splat2pix_mats,                         \
-            normal_opacity,                         \
-            sorted_surfel_indices,                  \
-            tile_ranges,                            \
-            contrib_state,                          \
-            transmittance_and_moments,              \
-            grad_rendered_color_feat,               \
-            grad_rendered_aux,                      \
-            grad_splat2pix_mats_buff,               \
-            grad_projected_centers_buff,            \
-            grad_normal_buff,                       \
-            grad_opacity_buff,                      \
-            grad_colors_feat_buff);                 \
+    // Define kernel structure
+    dim3 tile_grid(DIV_CEIL(img_W, BLOCK_DIM_X), DIV_CEIL(img_H, BLOCK_DIM_Y), 1);
+    dim3 tile(BLOCK_DIM_X, BLOCK_DIM_Y, 1);
+
+#define __RENDER_CALL_(CHANNELS)                          \
+    case CHANNELS:                                        \
+        render_kernel_bwd<CHANNELS><<<tile_grid, tile>>>( \
+            img_W, img_H,                                 \
+            colors_feat,                                  \
+            background,                                   \
+            projected_centers,                            \
+            splat2pix_mats,                               \
+            normal_opacity,                               \
+            sorted_surfel_indices,                        \
+            tile_ranges,                                  \
+            contrib_state,                                \
+            transmittance_and_moments,                    \
+            grad_rendered_color_feat,                     \
+            grad_rendered_aux,                            \
+            grad_splat2pix_mats_buff,                     \
+            grad_projected_centers_buff,                  \
+            grad_normal_buff,                             \
+            grad_opacity_buff,                            \
+            grad_colors_feat_buff);                       \
         break;
 
     switch (num_color_feat_channels)
@@ -663,22 +666,22 @@ __forceinline__ __device__ void grad_compute_aabb(
 
 // Backpropagate through the preprocessing steps. 1 surfel per thread.
 __global__ void preprocess_kernel_bwd(
-    const int surfel_count,           // Surfel / Points count
-    const float3 *points_world_space, // All points (surfels) in world space
-    const float2 *scale_vecs,         // Scale vectors
-    const float glob_scale_mod,       // Global scale modifier
-    const float4 *quats,              // Quaternions
-    const float *w2cam_mat,           // World to Cam space matrix
-    const float *w2clip_mat,          // World to Clip space matrix
-    const int img_W, const int img_H, // Image width and height
-    const uint32_t *asymmetric_radii, // Both surfel radii for tighter bounding boxes
-    const float3 *splat2pix_mats,     // Splat to pixel space matrices for each surfel
-    const float3 *grad_normal,        // Gradients of 3D normals (cam space)
-    float3 *grad_points_world_space,  // Computed gradients of points (world space)
-    float2 *grad_scale_vecs,          // Computed gradients of scale vectors
-    float4 *grad_quats,               // Computed gradients of quaternions
-    float2 *grad_projected_centers,   // Computed gradients of projected centers (pix space)
-    float3 *grad_splat2pix_mats       // Computed gradients of splat 2 pixel space matrices
+    const int surfel_count,                        // Surfel / Points count
+    const float3 *__restrict__ points_world_space, // All points (surfels) in world space
+    const float2 *__restrict__ scale_vecs,         // Scale vectors
+    const float glob_scale_mod,                    // Global scale modifier
+    const float4 *__restrict__ quats,              // Quaternions
+    const float *__restrict__ w2cam_mat,           // World to Cam space matrix
+    const float *__restrict__ w2clip_mat,          // World to Clip space matrix
+    const int img_W, const int img_H,              // Image width and height
+    const uint32_t *__restrict__ asymmetric_radii, // Both surfel radii for tighter bounding boxes
+    const float3 *__restrict__ splat2pix_mats,     // Splat to pixel space matrices for each surfel
+    const float3 *__restrict__ grad_normal,        // Gradients of 3D normals (cam space)
+    float3 *__restrict__ grad_points_world_space,  // Computed gradients of points (world space)
+    float2 *__restrict__ grad_scale_vecs,          // Computed gradients of scale vectors
+    float4 *__restrict__ grad_quats,               // Computed gradients of quaternions
+    float2 *__restrict__ grad_projected_centers,   // Computed gradients of projected centers (pix space)
+    float3 *__restrict__ grad_splat2pix_mats       // Computed gradients of splat 2 pixel space matrices
 )
 {
     auto surfel_idx = cg::this_grid().thread_rank();

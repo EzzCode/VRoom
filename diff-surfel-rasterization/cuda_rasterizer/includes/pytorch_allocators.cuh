@@ -35,13 +35,15 @@ namespace PytorchAllocators
                 SurfelRasterizerTypes::PreprocessBuffers bufs = {};
                 if (surfel_count > 0)
                 {
-                    // Allocate tensors
+                    // Allocate tensors.
+                    // Tensors allocated as zeros can be used in culling surfels that don't change
+                    // the value.
                     projected_centers = torch::empty({surfel_count, 2}, base_opts.dtype(torch::kFloat32));
-                    asymmetric_radii = torch::empty({surfel_count}, base_opts.dtype(torch::kInt32));
+                    asymmetric_radii = torch::zeros({surfel_count}, base_opts.dtype(torch::kInt32));
                     depths = torch::empty({surfel_count}, base_opts.dtype(torch::kFloat32));
                     splat2pix_mats = torch::empty({surfel_count, 3, 3}, base_opts.dtype(torch::kFloat32));
                     normal_opacity = torch::empty({surfel_count, 4}, base_opts.dtype(torch::kFloat32));
-                    tiles_touched = torch::empty({surfel_count}, base_opts.dtype(torch::kInt32));
+                    tiles_touched = torch::zeros({surfel_count}, base_opts.dtype(torch::kInt32));
                     tiles_touched_prefix_sum = torch::empty({surfel_count}, base_opts.dtype(torch::kInt32));
 
                     // Generate ptrs
@@ -115,20 +117,20 @@ namespace PytorchAllocators
         torch::Tensor grad_opacity;
         torch::Tensor grad_colors_feat;
 
-        BackwardAllocationContext(const torch::TensorOptions &options, int num_color_feat_channels,
+        BackwardAllocationContext(const torch::TensorOptions &base_opts, int num_color_feat_channels,
                                   int surfel_count)
         {
             // Allocate intermediate tensor
-            grad_normal = torch::zeros({surfel_count, 3}, options);
+            grad_normal = torch::zeros({surfel_count, 3}, base_opts.dtype(torch::kFloat32));
 
             // Allocate output tensors
-            grad_points_world_space = torch::zeros({surfel_count, 3}, options);
-            grad_scale_vecs = torch::zeros({surfel_count, 2}, options);
-            grad_quats = torch::zeros({surfel_count, 4}, options);
-            grad_projected_centers = torch::zeros({surfel_count, 2}, options);
-            grad_splat2pix_mats = torch::zeros({surfel_count, 3, 3}, options);
-            grad_opacity = torch::zeros({surfel_count, 1}, options);
-            grad_colors_feat = torch::zeros({surfel_count, num_color_feat_channels}, options);
+            grad_points_world_space = torch::zeros({surfel_count, 3}, base_opts.dtype(torch::kFloat32));
+            grad_scale_vecs = torch::zeros({surfel_count, 2}, base_opts.dtype(torch::kFloat32));
+            grad_quats = torch::zeros({surfel_count, 4}, base_opts.dtype(torch::kFloat32));
+            grad_projected_centers = torch::zeros({surfel_count, 2}, base_opts.dtype(torch::kFloat32));
+            grad_splat2pix_mats = torch::zeros({surfel_count, 3, 3}, base_opts.dtype(torch::kFloat32));
+            grad_opacity = torch::zeros({surfel_count, 1}, base_opts.dtype(torch::kFloat32));
+            grad_colors_feat = torch::zeros({surfel_count, num_color_feat_channels}, base_opts.dtype(torch::kFloat32));
         }
     }; // struct BackwardAllocationContext
 
