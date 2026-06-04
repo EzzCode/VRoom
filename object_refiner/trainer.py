@@ -137,6 +137,7 @@ def train_object(
         anchor_cloud=gaussians.anchor_cloud,
         optimizer=None,
         num_gaussians_per_anchor=gaussians.decoder.number_gaussians_per_anchor,
+        gradient_threshold=opt.densify_grad_threshold,
     )
     opt_wrapper = GstrainOptimizer(configs["optimization"], densifier)
     opt_wrapper.setup()

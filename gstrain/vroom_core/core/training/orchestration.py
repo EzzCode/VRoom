@@ -71,12 +71,22 @@ class TrainingOrchestrator:
         self.color_network = self.decoder.color_network
         self.CheckPointManager = CheckpointManager(self.anchor_cloud, self.decoder)
 
-        self.densifier = DensifcationController(
-            quantization_size=self.anchor_cloud.quantization_size,
-            anchor_cloud=self.anchor_cloud,
-            optimizer=None,
-            num_gaussians_per_anchor=self.decoder.number_gaussians_per_anchor,
-        )
+        densifier_kwargs = {
+            "quantization_size": self.anchor_cloud.quantization_size,
+            "anchor_cloud": self.anchor_cloud,
+            "optimizer": None,
+            "num_gaussians_per_anchor": self.decoder.number_gaussians_per_anchor,
+        }
+        if "gradient_threshold" in self.densifier_configs:
+            densifier_kwargs["gradient_threshold"] = self.densifier_configs["gradient_threshold"]
+        if "ratio_of_voxels_to_keep_L2" in self.densifier_configs:
+            densifier_kwargs["ratio_of_voxels_to_keep_L2"] = self.densifier_configs["ratio_of_voxels_to_keep_L2"]
+        if "ratio_of_voxels_to_keep_L3" in self.densifier_configs:
+            densifier_kwargs["ratio_of_voxels_to_keep_L3"] = self.densifier_configs["ratio_of_voxels_to_keep_L3"]
+        if "ratio_of_voxels_to_keep_L4" in self.densifier_configs:
+            densifier_kwargs["ratio_of_voxels_to_keep_L4"] = self.densifier_configs["ratio_of_voxels_to_keep_L4"]
+
+        self.densifier = DensifcationController(**densifier_kwargs)
         self.optimizer = Optimizer(self.optmizer_configs, self.densifier)
         self.densifier.optimizer = self.optimizer
 

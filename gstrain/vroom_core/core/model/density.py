@@ -4,7 +4,17 @@ from gstrain.vroom_core.utilities.training import extend_optimizer, prune_optimi
 
 
 class DensifcationController:
-    def __init__(self, quantization_size, anchor_cloud, optimizer, num_gaussians_per_anchor=5):
+    def __init__(
+        self,
+        quantization_size,
+        anchor_cloud,
+        optimizer,
+        num_gaussians_per_anchor=5,
+        gradient_threshold=0.0005,
+        ratio_of_voxels_to_keep_L2=0.5,
+        ratio_of_voxels_to_keep_L3=0.6,
+        ratio_of_voxels_to_keep_L4=0.8,
+    ):
         self.gaussian_gradients_acc = None
         self.gaussian_visits = None
         self.anchor_opacity_acc = None
@@ -13,6 +23,10 @@ class DensifcationController:
         self.anchor_cloud = anchor_cloud
         self.optimizer = optimizer
         self.num_gaussians_per_anchor = num_gaussians_per_anchor
+        self.gradient_threshold = gradient_threshold
+        self.ratio_of_voxels_to_keep_L2 = ratio_of_voxels_to_keep_L2
+        self.ratio_of_voxels_to_keep_L3 = ratio_of_voxels_to_keep_L3
+        self.ratio_of_voxels_to_keep_L4 = ratio_of_voxels_to_keep_L4
 
     def reset_state(self):
         """Reset the state of the densifcation controller"""
@@ -114,12 +128,12 @@ class DensifcationController:
         # accumulate anchor opacity
         # create a lookup table for each gaussian to its visible parent anchor
         n_vis_anchors = int(visibility_mask.sum().item())
-        vis_anchor_local_idx = torch.arange(
+        vis_anchor_buckets = torch.arange(
             n_vis_anchors, device=device
         ).repeat_interleave(
             K
         )  # [N_vis * K] local indices of visible anchors repeated for each gaussian
-        selected_anchor_local_idx = vis_anchor_local_idx[
+        selected_anchor_buckets = vis_anchor_buckets[
             negative_opacity_filter
         ]  # [N_selected]
         # now that we have look up table for each gaussian to its parents index
@@ -128,10 +142,10 @@ class DensifcationController:
         opacity_sum = torch.zeros(n_vis_anchors, device=device)
         opacity_count = torch.zeros(n_vis_anchors, device=device)
         opacity_sum.scatter_add_(
-            0, selected_anchor_local_idx, opacity_flat
+            0, selected_anchor_buckets, opacity_flat
         )  # add the opacity of each gaussian to its bucket (anchor)
         opacity_count.scatter_add_(
-            0, selected_anchor_local_idx, torch.ones_like(opacity_flat)
+            0, selected_anchor_buckets, torch.ones_like(opacity_flat)
         )  # add 1 to each bucket per gaussian
         anchors_opacity_avg = opacity_sum / opacity_count.clamp(min=1)
 
@@ -148,7 +162,7 @@ class DensifcationController:
         if self.gaussian_gradients_acc is None:
             return
 
-        gradient_threshold = 0.0005
+        gradient_threshold = self.gradient_threshold
         # we are going to do growing for different quantization levels depending on gradient value
         level_2_threshold = gradient_threshold * 2  # level 2 resolution threshold
         level_3_threshold = gradient_threshold * 4  # level 3 resolution threshold
@@ -186,22 +200,22 @@ class DensifcationController:
 
             # apply random elimination to avoid too many anchors spawining
             # priorty is given for higher thresholds/levels
-            if level == 1:  # 50% survive
-                ratio_of_voxels_to_keep = 0.5
+            if level == 1:
+                ratio_of_voxels_to_keep = self.ratio_of_voxels_to_keep_L2
                 random_mask = (
                     torch.rand_like(average_gradient_per_voxel)
                     < ratio_of_voxels_to_keep
                 ).bool()
                 above_threshold_mask = above_threshold_mask & random_mask
-            elif level == 2:  # 60%
-                ratio_of_voxels_to_keep = 0.6
+            elif level == 2:
+                ratio_of_voxels_to_keep = self.ratio_of_voxels_to_keep_L3
                 random_mask = (
                     torch.rand_like(average_gradient_per_voxel)
                     < ratio_of_voxels_to_keep
                 ).bool()
                 above_threshold_mask = above_threshold_mask & random_mask
-            elif level == 3:  # 80%
-                ratio_of_voxels_to_keep = 0.8
+            elif level == 3:
+                ratio_of_voxels_to_keep = self.ratio_of_voxels_to_keep_L4
                 random_mask = (
                     torch.rand_like(average_gradient_per_voxel)
                     < ratio_of_voxels_to_keep

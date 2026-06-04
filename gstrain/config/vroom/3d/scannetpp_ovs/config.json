@@ -78,6 +78,10 @@
         "desification_start": 1500,
         "desification_end": 30000,
         "densification_interval": 100,
-        "min_opacity": 0.005
+        "min_opacity": 0.005,
+        "gradient_threshold": 0.0005,
+        "ratio_of_voxels_to_keep_L2": 0.5,
+        "ratio_of_voxels_to_keep_L3": 0.6,
+        "ratio_of_voxels_to_keep_L4": 0.8
     }
 }
