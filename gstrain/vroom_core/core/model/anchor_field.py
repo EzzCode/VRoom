@@ -218,10 +218,14 @@ class AnchorCloud(nn.Module):
             return None
         anchor_labels = torch.zeros(unique_voxels.shape[0], dtype=torch.long)
         for voxel_index in range(unique_voxels.shape[0]):
-            label_for_voxel = labels[inversed_indices == voxel_index]
+            label_for_voxel = labels[
+                inversed_indices == voxel_index
+            ]  # contains the labels for the points at a certain voxel
             if len(label_for_voxel) > 0:
                 counts = torch.bincount(label_for_voxel)
-                anchor_labels[voxel_index] = torch.argmax(counts)
+                anchor_labels[voxel_index] = torch.argmax(
+                    counts
+                )  # returns the highest voted label for the voxel
         return anchor_labels
 
     def set_anchors_cloud(self, data: AnchorCloudData):

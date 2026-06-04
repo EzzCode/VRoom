@@ -226,7 +226,7 @@ class DensifcationController:
             if not above_threshold_mask.any():
                 continue
 
-            # indices into unique_quantized_gaussians for above_threshold voxels
+            # use above threshold indices to get unique_quantized_gaussians above threshold
             above_threshold_indices = above_threshold_mask.nonzero(as_tuple=True)[
                 0
             ]  # indices of voxels above threshold
@@ -302,12 +302,10 @@ class DensifcationController:
             contributes = gauss_to_slot >= 0
             contributing_slot = gauss_to_slot[
                 contributes
-            ]  # which anchor are we computing feature/label for
+            ]  # for each contributing gaussian, which anchor are we computing feature/label for
 
             # Average features
-            contributing_features = parent_to_gaussian_features[
-                contributes
-            ]  # size is number of gaussians
+            contributing_features = parent_to_gaussian_features[contributes]
             feature_sum = torch.zeros(n_new, feature_dim, device=device)
             feature_count = torch.zeros(n_new, device=device)
             feature_sum.scatter_add_(
@@ -326,19 +324,19 @@ class DensifcationController:
 
             # majority vote for anchors labels
             if parent_to_gaussian_labels is not None:
-                contributing_labels = parent_to_gaussian_labels[
-                    contributes
-                ].long()  # size is number of gaussians
+                contributing_labels = parent_to_gaussian_labels[contributes].long()
                 n_classes = (
                     int(contributing_labels.max().item()) + 1
-                )  # beacuase indices start from zero
-                # flatten contributing_labels for scatter add
-                flat_idx = (
+                )  # to get the num of class , find the the highest class id and add 1 to it beacuase indices start from zero.
+                # all possible anchor-label combinations flattened
+                all_possible_combinations = (
                     contributing_slot * n_classes + contributing_labels
                 )  # slot * number of classes + label , Ex: slot:0 * number of classes:3 + label:1 = bucket:1 : (row * width) + col
                 class_counts = torch.zeros(n_new * n_classes, device=device)
                 class_counts.scatter_add_(
-                    0, flat_idx, torch.ones(contributing_slot.shape[0], device=device)
+                    0,
+                    all_possible_combinations,
+                    torch.ones(contributing_slot.shape[0], device=device),
                 )
                 anchor_label = class_counts.view(n_new, n_classes).argmax(dim=1)
 
@@ -393,15 +391,15 @@ class DensifcationController:
         if self.anchor_visits is None:
             return
 
-        prune_them_anchors_mask = (self.anchor_visits > 0) & (
+        prune_anchors_mask = (self.anchor_visits > 0) & (
             self.anchor_opacity_acc / self.anchor_visits.clamp(min=1)
             < opacity_threshold
         )
 
-        if not prune_them_anchors_mask.any():
+        if not prune_anchors_mask.any():
             return
 
-        keep_mask = ~prune_them_anchors_mask
+        keep_mask = ~prune_anchors_mask
 
         # update optimizer and the anchor cloud data
         prune_optimizer(self.optimizer, self.anchor_cloud, keep_mask)
@@ -431,9 +429,11 @@ class DensifcationController:
             self.anchor_cloud.anchors_log_scales
         )[:, :3].unsqueeze(1)  # (num_anchors, num_gaussians_per_anchor, 3)
 
+        # quantized positions
         quantized_gaussians = (
             gaussian_positions.detach().view(-1, 3) / quantization_size
         ).to(torch.int64)
+        # get the quantized grid
         unique_quantized_gaussians, inverse_gaussian_voxel_indices = torch.unique(
             quantized_gaussians, dim=0, return_inverse=True
         )
