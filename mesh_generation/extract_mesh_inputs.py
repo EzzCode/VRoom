@@ -15,53 +15,30 @@ sys.path.insert(0, str(REPO_ROOT))
 from gstrain.vroom_core.core.model.anchor_field import AnchorCloud
 from gstrain.vroom_core.utilities.gaussian_decoder import GaussianDecoder
 from gstrain.vroom_core.utilities.utils import CheckpointManager
+from gstrain.vroom_core.utilities.render import render as vroom_render
 
 # ==========================================
 # 🎯 RENDERER (RGB + DEPTH + SEMANTICS VIA TWO-PASS)
 # ==========================================
 def render_3d(viewpoint_camera, decoded_output, gaussian_positions, normalized_rotations, background_color, semantics=None):
-    xyz = gaussian_positions
-    color = decoded_output["color"]
-    opacity = decoded_output["opacity"]
-    scaling = decoded_output["scaling"]
-    rot = normalized_rotations
-
-    render_device = xyz.device
-    background_color = background_color.to(render_device)
-    K = torch.tensor(
-        [[viewpoint_camera.fx, 0, viewpoint_camera.cx],
-         [0, viewpoint_camera.fy, viewpoint_camera.cy],
-         [0, 0, 1]], dtype=torch.float32, device=render_device,
+    rendered_dict = vroom_render(
+        viewpoint_camera=viewpoint_camera,
+        decoded_output=decoded_output,
+        gaussian_positions=gaussian_positions,
+        normalized_rotations=normalized_rotations,
+        background_color=background_color,
+        gaussian_type="2D",
+        tile_Size=8,
+        semantics=semantics
     )
-    viewmat = viewpoint_camera.world_view_transform.transpose(0, 1).to(render_device).float()
-
-    # 🎬 PASS 1: RGB and Depth
-    results = gsplat.rasterization(
-        means=xyz, quats=rot, scales=scaling, opacities=opacity.squeeze(-1), colors=color,
-        viewmats=viewmat[None], Ks=K[None], width=int(viewpoint_camera.image_width), height=int(viewpoint_camera.image_height),
-        backgrounds=background_color[None], packed=False, render_mode="RGB+ED"
-    )
-    
-    render_colors = results[0] 
-    colors, depths = render_colors[..., 0:3], render_colors[..., 3:4]
     
     out = {
-        "render": colors[0].permute(2, 0, 1),
-        "depth": depths[0].permute(2, 0, 1)
+        "render": rendered_dict["render"],
+        "depth": rendered_dict["render_depth"]
     }
     
-    # 🎬 PASS 2: Semantics (Tricking the rasterizer)
-    if semantics is not None:
-        sem_bg = torch.zeros(semantics.shape[-1], dtype=torch.float32, device=render_device)
-        
-        sem_results = gsplat.rasterization(
-            means=xyz, quats=rot, scales=scaling, opacities=opacity.squeeze(-1), colors=semantics,
-            viewmats=viewmat[None], Ks=K[None], width=int(viewpoint_camera.image_width), height=int(viewpoint_camera.image_height),
-            backgrounds=sem_bg[None], packed=False, render_mode="RGB"
-        )
-        
-        render_semantics = sem_results[0]
-        out["semantics"] = render_semantics[0].argmax(dim=-1)
+
+    out["semantics"] = rendered_dict["render_semantics"].argmax(dim=0)
         
     return out
 
@@ -121,7 +98,7 @@ def main():
     with open(model_dir / "config.json", "r", encoding="utf-8") as f:
         cfg = json.load(f)
         
-    feat_dim = cfg["model"]["feat_dim"]
+    feat_dim = cfg["model"]["feature_dim"]
     gs_per_anchor = cfg["model"]["gs_per_anchor"]
     knn_k = cfg["model"]["knn_k"]
     knn_chunk_size = cfg["model"]["knn_chunk_size"]

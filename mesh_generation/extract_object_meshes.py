@@ -51,6 +51,13 @@ parser.add_argument("--depth_percentile", type=float, default=99.0,
                      " depth truncation (default: 99.0).")
 parser.add_argument("--label", type=int,   default=None,
                      help="Process only this label ID (default: None (all labels))")
+
+# New arguments for input and output directories
+parser.add_argument("--input_dir", type=str, default=None,
+                     help="Input directory containing renders, depth, semantic, and cameras.json")
+parser.add_argument("--output_dir", type=str, default=None,
+                     help="Output directory to save extracted meshes")
+
 args = parser.parse_args()
 
 # Set parameters from arguments
@@ -85,10 +92,13 @@ start_time = time.time() # keep track of total runtime
 
 # Set up input and output paths
 curr_directory = os.path.dirname(__file__)
-input_dir = os.path.join(curr_directory, "inputs")
-output_dir = os.path.join(curr_directory, "objects")
+
+# Use arguments if provided, else fallback to defaults
+input_dir = args.input_dir if args.input_dir else os.path.join(curr_directory, "inputs")
+output_dir = args.output_dir if args.output_dir else os.path.join(curr_directory, "objects")
+output_glb_dir = os.path.join(output_dir, "glb") # Save glb files in a subfolder of output_dir
+
 os.makedirs(output_dir, exist_ok=True) # create output directory if it doesn't exist
-output_glb_dir = os.path.join(curr_directory, "objects_glb") # glb for mobile app
 os.makedirs(output_glb_dir, exist_ok=True)
 
 # Load cameras
