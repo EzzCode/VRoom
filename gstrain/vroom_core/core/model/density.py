@@ -1,6 +1,6 @@
 import torch
 
-from gstrain.vroom_core.utilities.training import extend_optimizer, prune_optimizer
+from gstrain.vroom_core.utilities.utils.training import extend_optimizer, prune_optimizer
 
 
 class DensifcationController:

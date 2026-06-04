@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from gstrain.vroom_core.utilities.utils import calc_volumetric_loss
+from gstrain.vroom_core.utilities.utils.utils import calc_volumetric_loss
 
 
 class LossEngine:

@@ -13,9 +13,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from gstrain.vroom_core.core.model.anchor_field import AnchorCloud
-from gstrain.vroom_core.utilities.gaussian_decoder import GaussianDecoder
-from gstrain.vroom_core.utilities.utils import CheckpointManager
-from gstrain.vroom_core.utilities.render import render as vroom_render
+from gstrain.vroom_core.utilities.decoder.gaussian_decoder import GaussianDecoder
+from gstrain.vroom_core.utilities.utils.utils import CheckpointManager
+from gstrain.vroom_core.utilities.utils.render import render as vroom_render
 
 # ==========================================
 # 🎯 RENDERER (RGB + DEPTH + SEMANTICS VIA TWO-PASS)

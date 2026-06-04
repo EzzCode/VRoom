@@ -1,7 +1,7 @@
 import torch
 from gstrain.vroom_core.core.model.density import DensifcationController
-from gstrain.vroom_core.utilities.render import apply_frustum_culling, render
-from gstrain.vroom_core.utilities.training import (
+from gstrain.vroom_core.utilities.utils.render import apply_frustum_culling, render
+from gstrain.vroom_core.utilities.utils.training import (
     Optimizer,
     visualize,
     save_checkpoint as _save_checkpoint_util,
@@ -9,7 +9,7 @@ from gstrain.vroom_core.utilities.training import (
     update_progress_bar,
 )
 from gstrain.vroom_core.core.training.loss_engine import LossEngine
-from gstrain.vroom_core.utilities.utils import (
+from gstrain.vroom_core.utilities.utils.utils import (
     CheckpointManager,
 )
 

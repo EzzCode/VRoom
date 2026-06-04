@@ -6,10 +6,10 @@ from dataclasses import dataclass, field
 from typing import Dict
 
 from gstrain.vroom_core.core.model.anchor_field import AnchorCloud, AnchorCloudData
-from gstrain.vroom_core.utilities.gaussian_decoder import GaussianDecoder
-from gstrain.vroom_core.utilities.utils import CheckpointManager, SemanticsManager, projection_matrix
-from gstrain.vroom_core.utilities.render import apply_frustum_culling as _culling
-from gstrain.vroom_core.utilities.render import render as _render
+from gstrain.vroom_core.utilities.decoder.gaussian_decoder import GaussianDecoder
+from gstrain.vroom_core.utilities.utils.utils import CheckpointManager, SemanticsManager, projection_matrix
+from gstrain.vroom_core.utilities.utils.render import apply_frustum_culling as _culling
+from gstrain.vroom_core.utilities.utils.render import render as _render
 from gstrain.vroom_core.core.training.orchestration import prepare_gaussian_space_props
 
 

@@ -7,7 +7,7 @@ import torch.nn as nn
 import torchvision
 from tqdm import tqdm
 
-from gstrain.vroom_core.utilities.utils import exponential_lr_schedule
+from gstrain.vroom_core.utilities.utils.utils import exponential_lr_schedule
 
 # Optimizer group names that belong to the anchor cloud
 _FIELD_GROUPS = {

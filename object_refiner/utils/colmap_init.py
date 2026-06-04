@@ -14,7 +14,7 @@ from typing import cast, Any
 import cv2
 import numpy as np
 
-from gstrain.vroom_core.utilities.utils import PointCloudSample
+from gstrain.vroom_core.utilities.utils.utils import PointCloudSample
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,7 @@ from torch import nn
 from PIL import Image
 from plyfile import PlyData, PlyElement
 
-from gstrain.vroom_core.utilities.utils import (
+from gstrain.vroom_core.utilities.utils.utils import (
     pil_image_to_tensor,
     projection_matrix,
     world_to_view_matrix,

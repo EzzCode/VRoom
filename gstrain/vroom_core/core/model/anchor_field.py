@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from gstrain.vroom_core.utilities.utils import (
+from gstrain.vroom_core.utilities.utils.utils import (
     compute_anchors_scale_and_rotation,
     SemanticsManager,
 )

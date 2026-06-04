@@ -21,9 +21,7 @@ packages = [
     "gstrain.vroom_core.core.model",
     "gstrain.vroom_core.core.training",
     "gstrain.vroom_core.utilities",
-    "gstrain.vroom_core.utilities.data_utils",
-    "gstrain.vroom_core.utilities.gaussian_renderer",
-    "gstrain.vroom_core.utilities.training",
+    "gstrain.vroom_core.utilities.decoder",
     "gstrain.vroom_core.utilities.utils",
 
     # masks_and_tracking  →  import masks_and_tracking ...

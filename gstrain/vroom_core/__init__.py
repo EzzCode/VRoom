@@ -1,4 +1,4 @@
-from .utilities.data_utils import (
+from .utilities.utils.data_utils import (
     FrameRecord,
     RenderCamera,
     quaternion_to_rotation,
@@ -14,8 +14,8 @@ from .utilities.data_utils import (
 )
 
 from .core.model.anchor_field import AnchorCloud
-from .utilities.gaussian_decoder import GaussianDecoder
-from .utilities.utils import (
+from .utilities.decoder.gaussian_decoder import GaussianDecoder
+from .utilities.utils.utils import (
     SemanticsManager,
     PointCloudSample,
     focal_to_fov,

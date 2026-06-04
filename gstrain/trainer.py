@@ -9,10 +9,10 @@ from datetime import datetime
 from types import SimpleNamespace
 import torch
 from gstrain.vroom_core.core.model.anchor_field import AnchorCloud
-from gstrain.vroom_core.utilities.gaussian_decoder import GaussianDecoder
+from gstrain.vroom_core.utilities.decoder.gaussian_decoder import GaussianDecoder
 from gstrain.vroom_core.core.training.orchestration import TrainingOrchestrator
-from gstrain.vroom_core.utilities.utils import seed_everything, CheckpointManager
-from gstrain.vroom_core.utilities.data_utils import TrainingScene
+from gstrain.vroom_core.utilities.utils.utils import seed_everything, CheckpointManager
+from gstrain.vroom_core.utilities.utils.data_utils import TrainingScene
 from gstrain.vroom_core.config import load_vroom_config
 
 

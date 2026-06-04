@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Union, Any, cast
 import numpy as np
 from gstrain.vroom_core.config import load_vroom_config
-from gstrain.vroom_core.utilities.utils import SemanticsManager
+from gstrain.vroom_core.utilities.utils.utils import SemanticsManager
 from .gstrain_wrapper import build_vroom_gaussians, load_vroom_checkpoint
 from object_refiner.utils.transforms import ObjectFrame
 from object_refiner.constants import GAUSSIAN_MODEL_DEFAULTS

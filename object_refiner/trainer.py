@@ -11,7 +11,7 @@ from object_refiner.utils.gstrain_wrapper import prefilter_anchors as _prefilter
 from object_refiner.utils.gstrain_wrapper import render_rgba as _gstrain_render
 from object_refiner.utils.gstrain_wrapper import build_vroom_gaussians, save_vroom_checkpoint, ssim_loss
 from gstrain.vroom_core.core.model.density import DensifcationController
-from gstrain.vroom_core.utilities.training import Optimizer as GstrainOptimizer
+from gstrain.vroom_core.utilities.utils.training import Optimizer as GstrainOptimizer
 from .utils.gstrain_wrapper import make_camera
 from .utils.colmap_init import load_colmap_object_point_cloud
 from .constants import GAUSSIAN_MODEL_DEFAULTS
