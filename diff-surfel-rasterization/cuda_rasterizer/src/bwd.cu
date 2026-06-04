@@ -242,21 +242,21 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             const float3 splat2pix_mat_col2 = splat2pix_mat_col2_batch[batch_surf_idx];
 
             // 1.5 define intermediate variables between validation blocks
-            float3 ray_cross, plane_x, plane_y, normal;
+            float3 ray_cross, line_x, line_y, normal;
             float2 local_uv, pixel_offset;
             float dist_3d_sq, dist_2d_sq, depth, gaussian_dist_sq,
                 opacity, power, exp_power, alpha;
 
             if (valid_surfel)
             {
-                // 2. Define two planes representing the vertical and horizontal
+                // 2. Define st. lines representing the vertical and horizontal
                 // lines passing through the exact center of this pixel, transformed into
                 // the surfel's (u, v) space.
-                plane_x = pixel.x * splat2pix_mat_col2 - splat2pix_mat_col0;
-                plane_y = pixel.y * splat2pix_mat_col2 - splat2pix_mat_col1;
+                line_x = pixel.x * splat2pix_mat_col2 - splat2pix_mat_col0;
+                line_y = pixel.y * splat2pix_mat_col2 - splat2pix_mat_col1;
 
-                // 3. The cross product of these two planes gives the ray passing through the pixel
-                ray_cross = cross_product(plane_x, plane_y);
+                // 3. The cross product of these two lines gives the ray passing through the pixel
+                ray_cross = cross_product(line_x, line_y);
 
                 // Validate progress so far (we skipped edge-on surfels in FWD)
                 if (ray_cross.z == 0.f)
@@ -425,26 +425,26 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
                         -(grad_ray_cross_x * local_uv.x + grad_ray_cross_y * local_uv.y)};
 
                     // Backpropagate through the cross product of the
-                    // planes defining the surfel.
-                    const float3 grad_plane_x = cross_product(plane_y, grad_ray_cross);
-                    const float3 grad_plane_y = cross_product(grad_ray_cross, plane_x);
+                    // st. lines defining the surfel.
+                    const float3 grad_line_x = cross_product(line_y, grad_ray_cross);
+                    const float3 grad_line_y = cross_product(grad_ray_cross, line_x);
 
                     // Backpropagate through splat 2 pixel space matrix
 
                     // 1. Column 1 (col-major indexing)
-                    grad_splat2pix_mats[0] = -grad_plane_x.x;
-                    grad_splat2pix_mats[1] = -grad_plane_x.y;
-                    grad_splat2pix_mats[2] = -grad_plane_x.z;
+                    grad_splat2pix_mats[0] = -grad_line_x.x;
+                    grad_splat2pix_mats[1] = -grad_line_x.y;
+                    grad_splat2pix_mats[2] = -grad_line_x.z;
 
                     // 2. Column 2 (col-major indexing)
-                    grad_splat2pix_mats[3] = -grad_plane_y.x;
-                    grad_splat2pix_mats[4] = -grad_plane_y.y;
-                    grad_splat2pix_mats[5] = -grad_plane_y.z;
+                    grad_splat2pix_mats[3] = -grad_line_y.x;
+                    grad_splat2pix_mats[4] = -grad_line_y.y;
+                    grad_splat2pix_mats[5] = -grad_line_y.z;
 
                     // 3. Column 3 (col-major indexing)
-                    grad_splat2pix_mats[6] = pixel.x * grad_plane_x.x + pixel.y * grad_plane_y.x;
-                    grad_splat2pix_mats[7] = pixel.x * grad_plane_x.y + pixel.y * grad_plane_y.y;
-                    grad_splat2pix_mats[8] = pixel.x * grad_plane_x.z + pixel.y * grad_plane_y.z;
+                    grad_splat2pix_mats[6] = pixel.x * grad_line_x.x + pixel.y * grad_line_y.x;
+                    grad_splat2pix_mats[7] = pixel.x * grad_line_x.y + pixel.y * grad_line_y.y;
+                    grad_splat2pix_mats[8] = pixel.x * grad_line_x.z + pixel.y * grad_line_y.z;
                 }
                 else
                 {

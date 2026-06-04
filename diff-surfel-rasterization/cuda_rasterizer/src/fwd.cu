@@ -352,14 +352,14 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             const float3 splat2pix_mat_col1 = splat2pix_mat_col1_batch[batch_surf_idx];
             const float3 splat2pix_mat_col2 = splat2pix_mat_col2_batch[batch_surf_idx];
 
-            // 2. Define two planes representing the vertical and horizontal
+            // 2. Define two st. lines representing the vertical and horizontal
             // lines passing through the exact center of this pixel, transformed into
             // the surfel's (u, v) space.
-            const float3 plane_x = pixel.x * splat2pix_mat_col2 - splat2pix_mat_col0;
-            const float3 plane_y = pixel.y * splat2pix_mat_col2 - splat2pix_mat_col1;
+            const float3 line_x = pixel.x * splat2pix_mat_col2 - splat2pix_mat_col0;
+            const float3 line_y = pixel.y * splat2pix_mat_col2 - splat2pix_mat_col1;
 
-            // 3. The cross product of these two planes gives the ray passing through the pixel
-            const float3 ray_cross = cross_product(plane_x, plane_y);
+            // 3. The cross product of these two st. lines gives the ray passing through the pixel
+            const float3 ray_cross = cross_product(line_x, line_y);
             if (ray_cross.z == 0.0f) // Skip edge-on surfels
                 continue;
 
