@@ -3,7 +3,6 @@ import json
 import logging
 import sys
 from pathlib import Path
-
 import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment

@@ -1,5 +1,3 @@
-"""Point-cloud multi-view voting for object label assignment."""
-
 import json
 import logging
 import argparse
@@ -18,12 +16,12 @@ from sfm.colmap_loader import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SPARSE_DIR= "sparse/0"
-DEFAULT_MASK_DIR = "object_mask"
-DEFAULT_OUTPUT_DIR = "output"
-DEFAULT_MIN_POINTS = 10
-DEFAULT_ALIAS_IOU_THRESH = 0.5
-DEFAULT_ALIAS_MIN_COVISIBILITY = 20
+_SPARSE_DIR= "sparse/0"
+_MASK_DIR = "object_mask"
+_OUTPUT_DIR = "output"
+_MIN_POINTS = 10
+_ALIAS_IOU_THRESH = 0.5
+_ALIAS_MIN_COVISIBILITY = 20
 
 def intrinsics(cam):
     param = cam.params
@@ -35,7 +33,7 @@ def intrinsics(cam):
     return fx, fy, cx, cy
 
     
-def collect_projection_votes(images, cameras, pts_xyz, mask_dir):
+def majority_voting(images, cameras, pts_xyz, mask_dir):
     votes = {}
     for img in images.values():
         path = Path(mask_dir) / (Path(img.name).stem + ".png")
@@ -95,7 +93,7 @@ def merge_aliases(labels, votes, num_points, iou_thresh=0.75, min_covisibility=2
     for lbl in sorted_labels:
         logger.info("  ID %3d: %5d points (raw vote membership)", lbl, len(label_sets[lbl]))
 
-    parent = {lbl: lbl for lbl in label_sets}
+    parent = {id: id for id in label_sets}
     merge_count = 0
     for i, label_a in enumerate(sorted_labels):
         for label_b in sorted_labels[i + 1:]:
@@ -105,15 +103,15 @@ def merge_aliases(labels, votes, num_points, iou_thresh=0.75, min_covisibility=2
             shared = len(set_a & set_b)
             if shared < min_covisibility:
                 continue
-            inter = len(set_a & set_b)
-            union_set = len(set_a | set_b)
-            iou = inter / union_set if union_set > 0 else 0.0
+            intersection = len(set_a & set_b)
+            union = len(set_a | set_b)
+            iou = intersection / union if union > 0 else 0.0
             if iou >= iou_thresh:
-                ra, rb = find_parent(parent, label_a), find_parent(parent, label_b)
-                if ra != rb:
-                    if ra > rb:
-                        ra, rb = rb, ra
-                    parent[rb] = ra
+                a, b = find_parent(parent, label_a), find_parent(parent, label_b)
+                if a != b:
+                    if a > b:
+                        a, b = b, a
+                    parent[b] = a
                 merge_count += 1
                 logger.info("Alias merge: ID %d -> ID %d  (3D IoU=%.3f, shared_pts=%d)", label_b, label_a, iou, shared)
 
@@ -122,15 +120,15 @@ def merge_aliases(labels, votes, num_points, iou_thresh=0.75, min_covisibility=2
         return labels, {}
 
     merge_map = {lbl: find_parent(parent, lbl) for lbl in sorted_labels if find_parent(parent, lbl) != lbl}
-    remapped  = labels.copy()
+    remap  = labels.copy()
     for old_id, new_id in merge_map.items():
-        remapped[labels == old_id] = new_id
+        remap[labels == old_id] = new_id
 
     logger.info("Merged %d alias pairs into %d unique objects.", merge_count, len({find_parent(parent, l) for l in sorted_labels}))
-    return remapped, merge_map
+    return remap, merge_map
 
 
-def save_labeled_ply(path, xyz, rgb, labels):
+def save_ply(path, xyz, rgb, labels):
     dtype = [
         ("x", "f4"), ("y", "f4"), ("z", "f4"),
         ("nx", "f4"), ("ny", "f4"), ("nz", "f4"),
@@ -176,7 +174,7 @@ def run_voting(args):
         logger.info("  cam %d: %s  %dx%d  f=(%.1f,%.1f)  c=(%.1f,%.1f)", cid, cam.model, cam.width, cam.height, fx, fy, cx, cy)
 
     logger.info("Voting strategy: majority projection")
-    votes = collect_projection_votes(images, cameras, xyz_arr, mask_dir)
+    votes = majority_voting(images, cameras, xyz_arr, mask_dir)
 
     labels = np.zeros(len(xyz_arr), dtype=np.uint8)
     for i in range(len(xyz_arr)):
@@ -184,7 +182,7 @@ def run_voting(args):
             counts = {}
             for val in votes[i]:
                 counts[val] = counts.get(val, 0) + 1
-            labels[i] = max(counts, key=counts.get)
+            labels[i] = max(counts, key=lambda k: counts[k])
 
     unique, counts = np.unique(labels, return_counts=True)
     logger.info("Raw label distribution (%d labels):", len(unique))
@@ -227,12 +225,12 @@ def run_voting(args):
     obj_dir.mkdir(parents=True, exist_ok=True)
 
     labeled_path = out_dir / "points3D_labeled.ply"
-    save_labeled_ply(labeled_path, xyz_arr, rgb_arr, labels)
+    save_ply(labeled_path, xyz_arr, rgb_arr, labels)
     logger.info("Saved -> %s", labeled_path)
 
     vis_rgb  = np.array([label_to_color(l) for l in labels], dtype=np.uint8)
     vis_path = out_dir / "points3D_vis.ply"
-    save_labeled_ply(vis_path, xyz_arr, vis_rgb, labels)
+    save_ply(vis_path, xyz_arr, vis_rgb, labels)
     logger.info("Saved -> %s", vis_path)
 
     for lbl in sorted(set(labels)):
@@ -240,7 +238,7 @@ def run_voting(args):
             continue
         mask     = labels == lbl
         obj_path = obj_dir / f"label_{lbl:02d}.ply"
-        save_labeled_ply(obj_path, xyz_arr[mask], rgb_arr[mask], labels[mask])
+        save_ply(obj_path, xyz_arr[mask], rgb_arr[mask], labels[mask])
         logger.info("Saved -> %s  (%d pts)", obj_path, mask.sum())
 
     logger.info("All outputs in: %s", out_dir)
@@ -250,11 +248,11 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
     p = argparse.ArgumentParser(description="Point cloud object labeling via multi-view voting.")
     p.add_argument("--data_path", required=True, help="Scene directory (contains COLMAP data and masks)")
-    p.add_argument("--sparse_dir", default=DEFAULT_SPARSE_DIR, help="COLMAP sparse model dir relative to data_path")
-    p.add_argument("--mask_dir", default=DEFAULT_MASK_DIR, help="Mask folder name")
-    p.add_argument("--output_dir", default=DEFAULT_OUTPUT_DIR, help="Output folder name inside data_path")
-    p.add_argument("--min_points", type=int, default=DEFAULT_MIN_POINTS, help="Minimum number of points to be considered an object")
+    p.add_argument("--sparse_dir", default=_SPARSE_DIR, help="COLMAP sparse model dir relative to data_path")
+    p.add_argument("--mask_dir", default=_MASK_DIR, help="Mask folder name")
+    p.add_argument("--output_dir", default=_OUTPUT_DIR, help="Output folder name inside data_path")
+    p.add_argument("--min_points", type=int, default=_MIN_POINTS, help="Minimum number of points to be considered an object")
     p.add_argument("--disable_alias_merge", action="store_true", help="Disable 3D alias merging")
-    p.add_argument("--alias_iou_thresh", type=float, default=DEFAULT_ALIAS_IOU_THRESH, help="Min 3D point IoU to merge two tracker IDs")
-    p.add_argument("--alias_min_covisibility", type=int, default=DEFAULT_ALIAS_MIN_COVISIBILITY, help="Min shared points for alias merge candidates")
+    p.add_argument("--alias_iou_thresh", type=float, default=_ALIAS_IOU_THRESH, help="Min 3D point IoU to merge two tracker IDs")
+    p.add_argument("--alias_min_covisibility", type=int, default=_ALIAS_MIN_COVISIBILITY, help="Min shared points for alias merge candidates")
     run_voting(p.parse_args())
