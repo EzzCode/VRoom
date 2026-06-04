@@ -11,5 +11,5 @@ TRACKING_DEFAULTS = {
     "smoothing_factor": 0.40,       # Exponential moving average factor for feature smoothing
     "reid_threshold": 0.60,         # Max appearance distance for Re-ID (graveyard / active unmatched)
     "consensus_window": 8,          # Temporal window length for consensus voting
-    "consensus_tie_margin": 0.05,   # IoU vote margin to trigger appearance tie-break
+    "consensus_tie_margin": 0.05,   # IoU vote margin to trigger tie-break
 }

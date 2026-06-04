@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 
-# ── Visualization helpers ────────────────────────────────────────────────────
+# Visualization helpers
 
 def generate_colors(n):
 	"""Generate n visually distinct BGR colors via HSV spacing."""

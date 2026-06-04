@@ -10,6 +10,16 @@ from masks_and_tracking.sam_inference import SAM3TextSegmenter
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SAM_CKPT = "masks_and_tracking/models/sam3.pt"
+DEFAULT_DEVICE = "cuda"
+DEFAULT_ULTRALYTICS_HOME = ""
+DEFAULT_TEXT_PROMPTS = ["desk", "table", "chair", "couch", "sofa", "cabinet"]
+DEFAULT_MIN_MASK_AREA = 120
+DEFAULT_MAX_AREA_RATIO = 0.50
+DEFAULT_BORDER_THRESHOLD = 0.35
+DEFAULT_MERGE_THRESH = 0.78
+DEFAULT_PROXIMITY_GAP = 20
+DEFAULT_PROXIMITY_COLOR_THRESH = 0.32
 
 
 def _bounding_box(mask):
@@ -20,7 +30,7 @@ def _bounding_box(mask):
 	return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
 
 
-def _bbox_gap_px(a, b):
+def _bbox_gap(a, b):
 	"""Edge Euclidean gap between two boxes."""
 	ax1, ay1, ax2, ay2 = a
 	bx1, by1, bx2, by2 = b
@@ -138,7 +148,7 @@ def proximity_merge(
 				box_i, box_j = boxes[i], boxes[j]
 				if box_i is None or box_j is None:
 					continue
-				if _bbox_gap_px(box_i, box_j) > float(gap_px):
+				if _bbox_gap(box_i, box_j) > float(gap_px):
 					continue
 				if np.linalg.norm(means[i] - means[j]) / hsv_norm > color_thresh:
 					continue
@@ -195,12 +205,6 @@ def postprocess_masks(
 
 	masks = [m.astype(bool) for m in masks if int(m.sum()) >= min_mask_area]
 	return masks, {"raw_mask_count": len(raw_masks), "final_mask_count": len(masks)}
-
-
-
-
-
-# ── CLI pipeline ─────────────────────────────────────────────────────────────
 
 def run_pipeline(args):
 	"""Run segmentation + postprocessing over all frames in input_dir."""
@@ -271,15 +275,15 @@ if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="VRoom SAM3 Text-Prompt Mask Processor")
 	parser.add_argument("--input_dir", required=True, help="Path to input images directory")
 	parser.add_argument("--output_dir", required=True, help="Path to save masks and visualizations")
-	parser.add_argument("--sam_ckpt", default="masks_and_tracking/models/sam3.pt", help="Ultralytics SAM3 checkpoint name or .pt path")
-	parser.add_argument("--device", default="cuda", help="Device ('cuda' or 'cpu')")
-	parser.add_argument("--ultralytics_home", default="", help="Directory for Ultralytics checkpoints/cache")
-	parser.add_argument("--text_prompts", nargs="+", default=["desk", "table", "chair", "couch", "sofa", "cabinet"], help="Open-vocabulary text prompts")
-	parser.add_argument("--min_mask_area", type=int, default=120, help="Minimum kept mask area in pixels")
-	parser.add_argument("--max_area_ratio", type=float, default=0.50, help="Drop masks larger than this image area ratio")
-	parser.add_argument("--border_threshold", type=float, default=0.35, help="Drop masks with high border-touch ratio")
-	parser.add_argument("--merge_thresh", type=float, default=0.78, help="Containment threshold for overlap merge")
-	parser.add_argument("--proximity_gap", type=int, default=20, help="Pixel gap threshold for proximity merge")
-	parser.add_argument("--proximity_color_thresh", type=float, default=0.32, help="HSV distance threshold for proximity merge")
+	parser.add_argument("--sam_ckpt", default=DEFAULT_SAM_CKPT, help="Ultralytics SAM3 checkpoint name or .pt path")
+	parser.add_argument("--device", default=DEFAULT_DEVICE, help="Device ('cuda' or 'cpu')")
+	parser.add_argument("--ultralytics_home", default=DEFAULT_ULTRALYTICS_HOME, help="Directory for Ultralytics checkpoints/cache")
+	parser.add_argument("--text_prompts", nargs="+", default=DEFAULT_TEXT_PROMPTS, help="Open-vocabulary text prompts")
+	parser.add_argument("--min_mask_area", type=int, default=DEFAULT_MIN_MASK_AREA, help="Minimum kept mask area in pixels")
+	parser.add_argument("--max_area_ratio", type=float, default=DEFAULT_MAX_AREA_RATIO, help="Drop masks larger than this image area ratio")
+	parser.add_argument("--border_threshold", type=float, default=DEFAULT_BORDER_THRESHOLD, help="Drop masks with high border-touch ratio")
+	parser.add_argument("--merge_thresh", type=float, default=DEFAULT_MERGE_THRESH, help="Containment threshold for overlap merge")
+	parser.add_argument("--proximity_gap", type=int, default=DEFAULT_PROXIMITY_GAP, help="Pixel gap threshold for proximity merge")
+	parser.add_argument("--proximity_color_thresh", type=float, default=DEFAULT_PROXIMITY_COLOR_THRESH, help="HSV distance threshold for proximity merge")
 	parser.add_argument("--no_split_disconnected", action="store_true", help="Disable splitting disconnected components")
 	run_pipeline(parser.parse_args())

@@ -3,7 +3,7 @@
 import json
 import logging
 import argparse
-from collections import Counter, defaultdict
+
 from pathlib import Path
 
 import cv2
@@ -18,15 +18,25 @@ from sfm.colmap_loader import (
 
 logger = logging.getLogger(__name__)
 
-def intrinsics_from_camera(cam):
-    p = cam.params
+DEFAULT_SPARSE_DIR= "sparse/0"
+DEFAULT_MASK_DIR = "object_mask"
+DEFAULT_OUTPUT_DIR = "output"
+DEFAULT_MIN_POINTS = 10
+DEFAULT_ALIAS_IOU_THRESH = 0.5
+DEFAULT_ALIAS_MIN_COVISIBILITY = 20
+
+def intrinsics(cam):
+    param = cam.params
     if cam.model in {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL", "RADIAL_FISHEYE"}:
-        return p[0], p[0], p[1], p[2]
-    return p[0], p[1], p[2], p[3]
+        fx = fy = param[0]
+        cx, cy = param[1], param[2]
+        return fx, fy, cx, cy
+    fx, fy, cx, cy = param[0], param[1], param[2], param[3]
+    return fx, fy, cx, cy
 
     
 def collect_projection_votes(images, cameras, pts_xyz, mask_dir):
-    votes = defaultdict(list)
+    votes = {}
     for img in images.values():
         path = Path(mask_dir) / (Path(img.name).stem + ".png")
         mask = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
@@ -40,7 +50,7 @@ def collect_projection_votes(images, cameras, pts_xyz, mask_dir):
             [2*(qx*qz - qy*qw),      2*(qy*qz + qx*qw),       1 - 2*(qx*qx + qy*qy)],
         ])
         t = img.tvec.reshape(3, 1)
-        fx, fy, cx, cy = intrinsics_from_camera(cameras[img.camera_id])
+        fx, fy, cx, cy = intrinsics(cameras[img.camera_id])
         h, w = mask.shape[:2]
         cam_pts = (R @ pts_xyz.T + t).T
         z = cam_pts[:, 2]
@@ -52,6 +62,8 @@ def collect_projection_votes(images, cameras, pts_xyz, mask_dir):
         ui, vi = np.round(u).astype(int), np.round(v).astype(int)
         ok = valid & (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
         for idx in np.where(ok)[0]:
+            if idx not in votes:
+                votes[idx] = []
             votes[idx].append(int(mask[vi[idx], ui[idx]]))
         logger.info("%s: %d / %d points visible", img.name, ok.sum(), len(pts_xyz))
     return votes
@@ -65,12 +77,15 @@ def find_parent(parent, x):
 
 
 def merge_aliases(labels, votes, num_points, iou_thresh=0.75, min_covisibility=20):
-    label_sets = defaultdict(set)
+    label_sets = {}
     for i in range(num_points):
         if i in votes:
             for lbl in votes[i]:
                 if lbl != 0:
-                    label_sets[int(lbl)].add(i)
+                    lbl_val = int(lbl)
+                    if lbl_val not in label_sets:
+                        label_sets[lbl_val] = set()
+                    label_sets[lbl_val].add(i)
 
     if len(label_sets) < 2:
         return labels, {}
@@ -157,7 +172,7 @@ def run_voting(args):
 
     logger.info("%d cam(s), %d imgs, %d pts", len(cameras), len(images), len(xyz_arr))
     for cid, cam in cameras.items():
-        fx, fy, cx, cy = intrinsics_from_camera(cam)
+        fx, fy, cx, cy = intrinsics(cam)
         logger.info("  cam %d: %s  %dx%d  f=(%.1f,%.1f)  c=(%.1f,%.1f)", cid, cam.model, cam.width, cam.height, fx, fy, cx, cy)
 
     logger.info("Voting strategy: majority projection")
@@ -166,7 +181,10 @@ def run_voting(args):
     labels = np.zeros(len(xyz_arr), dtype=np.uint8)
     for i in range(len(xyz_arr)):
         if i in votes and votes[i]:
-            labels[i] = Counter(votes[i]).most_common(1)[0][0]
+            counts = {}
+            for val in votes[i]:
+                counts[val] = counts.get(val, 0) + 1
+            labels[i] = max(counts, key=counts.get)
 
     unique, counts = np.unique(labels, return_counts=True)
     logger.info("Raw label distribution (%d labels):", len(unique))
@@ -232,11 +250,11 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
     p = argparse.ArgumentParser(description="Point cloud object labeling via multi-view voting.")
     p.add_argument("--data_path", required=True, help="Scene directory (contains COLMAP data and masks)")
-    p.add_argument("--sparse_dir", default="sparse/0", help="COLMAP sparse model dir relative to data_path")
-    p.add_argument("--mask_dir", default="object_mask", help="Mask folder name")
-    p.add_argument("--output_dir", default="output", help="Output folder name inside data_path")
-    p.add_argument("--min_points", type=int, default=10, help="Minimum number of points to be considered an object")
+    p.add_argument("--sparse_dir", default=DEFAULT_SPARSE_DIR, help="COLMAP sparse model dir relative to data_path")
+    p.add_argument("--mask_dir", default=DEFAULT_MASK_DIR, help="Mask folder name")
+    p.add_argument("--output_dir", default=DEFAULT_OUTPUT_DIR, help="Output folder name inside data_path")
+    p.add_argument("--min_points", type=int, default=DEFAULT_MIN_POINTS, help="Minimum number of points to be considered an object")
     p.add_argument("--disable_alias_merge", action="store_true", help="Disable 3D alias merging")
-    p.add_argument("--alias_iou_thresh", type=float, default=0.5, help="Min 3D point IoU to merge two tracker IDs")
-    p.add_argument("--alias_min_covisibility", type=int, default=20, help="Min shared points for alias merge candidates")
+    p.add_argument("--alias_iou_thresh", type=float, default=DEFAULT_ALIAS_IOU_THRESH, help="Min 3D point IoU to merge two tracker IDs")
+    p.add_argument("--alias_min_covisibility", type=int, default=DEFAULT_ALIAS_MIN_COVISIBILITY, help="Min shared points for alias merge candidates")
     run_voting(p.parse_args())
