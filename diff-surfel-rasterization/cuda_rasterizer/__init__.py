@@ -543,7 +543,51 @@ def rasterize_2dgs(
     rendered_aux = []
     asymmetric_radii = []
 
+    # Tensor leaf trick.
+    # Trick pytorch inputting this to the autograd function class
+    # causing it to receive the calculated gradients for projected_centers
+    # in backward pass.
+    trick_projected_centers = torch.zeros(
+        (points_world_space.shape[0], 2), requires_grad=True, device=device
+    )
+
     for cam_id in range(cam_count):
+        # Zero-surfel guard
+        if points_world_space.shape[0] == 0:
+            print("Surfel count is zero!")
+            # Prepare background for the rendered image / semantics
+            if backgrounds is not None:
+                bg = backgrounds[cam_id]
+                if bg.shape[0] < channel_count:
+                    bg = torch.cat([bg, torch.zeros(channel_count - bg.shape[0], device=device)])
+                elif bg.shape[0] > channel_count:
+                    bg = bg[:channel_count]
+            else:
+                bg = torch.zeros(channel_count, device=device)
+
+            # Connect the moch output to the autograd graph to
+            # produce dummy grads
+            dummy_grad = (0.0 * points_world_space.sum()) + (0.0 * colors_feat.sum())
+            bg = bg + dummy_grad
+
+            # Fill image & semantics with bg color
+            rendered_color_feat.append(
+                bg.view(channel_count, 1, 1)
+                .expand(channel_count, img_H, img_W)
+                .permute(1, 2, 0)  # Ensure: [H, W, CHANNELS]
+            )
+
+            # Fill aux outputs with zeros (AUX_CHANNEL_COUNT = 7)
+            rendered_aux.append(
+                torch.zeros((7, img_H, img_W), device=device) + dummy_grad
+            )
+
+            # Fill radii with zeros
+            asymmetric_radii.append(torch.zeros((0,), dtype=torch.int32, device=device))
+
+            # Skip this camera (no rasterization)
+            continue
+
         # Compute camera FOV from camera intrinsics
         fovx = 2 * math.atan(img_W / (2 * cam_intrinsics[cam_id, 0, 0].item()))
         fovy = 2 * math.atan(img_H / (2 * cam_intrinsics[cam_id, 1, 1].item()))
@@ -592,14 +636,6 @@ def rasterize_2dgs(
         tile_ranges = None
         contrib_state = None
         transmittance_and_moments = None
-
-        # 5. Tensor leaf trick.
-        # Trick pytorch inputting this to the autograd function class
-        # causing it to receive the calculated gradients for projected_centers
-        # in backward pass.
-        trick_projected_centers = torch.zeros(
-            (points_world_space.shape[0], 2), requires_grad=True, device=device
-        )
 
         # Rasterize and perform multiple passes if channel count of colors+features requires.
         channel_idx = 0

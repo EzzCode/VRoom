@@ -8,7 +8,7 @@
 #define NUM_WARPS (BLOCK_SIZE / NUM_THREADS_IN_WARP)
 
 // Culling boundaries and distortion normalizers
-__device__ constexpr float NEAR_PLANE = 0.2f;
+__device__ constexpr float NEAR_PLANE = 0.01f;
 __device__ constexpr float FAR_PLANE = 100.0f;
 constexpr float DEPTH_NORM_SCALE = FAR_PLANE / (FAR_PLANE - NEAR_PLANE);
 
