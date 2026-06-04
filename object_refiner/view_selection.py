@@ -12,7 +12,7 @@ from .utils.helpers import find_image, find_tracked_id_map
 logger = logging.getLogger(__name__)
 
 WEIGHTS = {
-    "front":  0.40, # prefer front-facing views
+    "front":  0.40, # prefer front views
     "cover":  0.25, # how big the object is in frame. max is COVER_TARGET
     "sharp":  0.20,
     "expose": 0.15,

@@ -17,8 +17,6 @@ putText = cv2.putText
 bitwise_not = cv2.bitwise_not
 
 class KalmanFilter:
-    """Discrete linear Kalman Filter."""
-
     def __init__(self, dynam_params, measure_params, control_params=0):
         self.dynam_params = dynam_params
         self.measure_params = measure_params
@@ -35,7 +33,6 @@ class KalmanFilter:
         self.errorCovPre = np.eye(dynam_params, dtype=np.float32)
 
     def predict(self):
-        """Predict the next state."""
         self.statePre = self.transitionMatrix @ self.statePost
         self.errorCovPre = (self.transitionMatrix @ self.errorCovPost @ self.transitionMatrix.T) + self.processNoiseCov
         self.statePost = self.statePre.copy()
@@ -43,7 +40,6 @@ class KalmanFilter:
         return self.statePre
 
     def correct(self, measurement):
-        """Correct the predicted state with a measurement."""
         residual = measurement - (self.measurementMatrix @ self.statePre)
         s_val = (self.measurementMatrix @ self.errorCovPre @ self.measurementMatrix.T) + self.measurementNoiseCov
         k_val = self.errorCovPre @ self.measurementMatrix.T @ np.linalg.inv(s_val)
@@ -51,8 +47,6 @@ class KalmanFilter:
         identity = np.eye(self.dynam_params, dtype=np.float32)
         self.errorCovPost = (identity - (k_val @ self.measurementMatrix)) @ self.errorCovPre
         return self.statePost
-
-# ── Image Operations ──────────────────────────────────────────────────────────
 
 def cvtColor(image, code):
     "convert color space"
@@ -102,7 +96,6 @@ def cvtColor(image, code):
 
 
 def dilate(image, kernel, iterations=1):
-    """2D binary morphological dilation using separable max filters."""
     if image is None or kernel is None:
         raise ValueError("Image or kernel cannot be None")
         
@@ -404,8 +397,6 @@ def calcOpticalFlowPyrLK(
             
     return next_points, output_status, output_errors
 
-# ── Geometry and Motion ───────────────────────────────────────────────────────
-
 def estimateAffinePartial2D(
     from_pts,
     to_pts,
@@ -413,7 +404,6 @@ def estimateAffinePartial2D(
     ransacReprojThreshold=3.0,
     max_iters=200
 ):
-    """Estimate 2D Partial Affine Transform."""
     points_from = from_pts.reshape(-1, 2)
     points_to = to_pts.reshape(-1, 2)
     num_points = points_from.shape[0]

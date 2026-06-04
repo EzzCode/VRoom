@@ -148,7 +148,6 @@ def train_object(
         raise RuntimeError("Optimizer is not initialized")
     initial_scaling = gaussians.anchor_cloud.anchors_log_scales.detach().clone()
 
-    background = torch.ones(3, dtype=torch.float32, device="cuda")
     loss_hist, depth_hist = [], []
 
     order = list(range(len(entries)))
