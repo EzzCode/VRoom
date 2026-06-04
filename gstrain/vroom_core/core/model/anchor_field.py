@@ -105,6 +105,7 @@ class AnchorCloud(nn.Module):
         """
         Estimates a quantization size for a uniform grid using knn distances
         """
+        print("estimating quantization size enabled")
         quantization_size = torch.median(knn_distances[:, 1:]).item()
         return max(quantization_size, min_size)
 
