@@ -57,17 +57,17 @@ python -m pip install -e . --no-build-isolation
 ### 4. Conda Environments
 
 The pipeline requires specific Conda environments to run different stages:
-- **`GP`**: Used for the Masks & Tracking pipeline.
-- **`objectgs`**: Used for SfM, Gaussian Splatting training, and Mesh Generation.
+- **`masks`**: Used for the Masks & Tracking pipeline.
+- **`pipeline`**: Used for SfM, Gaussian Splatting training, and Mesh Generation.
 
 You can create these environments using the provided configuration files in the repository:
 
 ```bash
-# 1. Create the GP environment
-conda env create -f environment_gp.yml
+# 1. Create the masks environment
+conda env create -f environment_masks.yml
 
-# 2. Create the objectgs environment
-conda env create -f environment_objectgs.yml
+# 2. Create the pipeline environment
+conda env create -f environment_pipeline.yml
 ```
 
 ### 5. Install VRoom Package
@@ -117,7 +117,7 @@ If there is a specific make target for training, you can use:
 ```bash
 make run_train DATASET=3dovs
 ```
-*(Note: Ensure you have the `objectgs` environment activated when running standalone training commands).*
+*(Note: Ensure you have the `pipeline` environment activated when running standalone training commands).*
 
 ## Mobile App
 

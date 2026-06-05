@@ -97,8 +97,16 @@ def main():
     parser.add_argument("--dry_run", action="store_true", help="Print commands without executing")
 
     # Conda Environments
-    parser.add_argument("--gp_env", default="GP", help="Conda environment for Masks & Tracking")
-    parser.add_argument("--objectgs_env", default="objectgs", help="Conda environment for SfM, Training, and Mesh Generation")
+    parser.add_argument(
+        "--masks_env",
+        default="masks",
+        help="Conda environment for Masks & Tracking"
+    )
+    parser.add_argument(
+        "--pipeline_env",
+        default="pipeline",
+        help="Conda environment for SfM, Training, and Mesh Generation"
+    )
 
     # Skipping flags
     parser.add_argument("--skip_colmap", action="store_true", help="Skip COLMAP step")
@@ -184,7 +192,7 @@ def main():
         ]
         if args.force_colmap:
             colmap_cmd.append("--force")
-        run_step("COLMAP Reconstruction (sfm)", colmap_cmd, dry_run=args.dry_run, conda_env=args.objectgs_env)
+        run_step("COLMAP Reconstruction (sfm)", colmap_cmd, dry_run=args.dry_run, conda_env=args.pipeline_env)
 
     # ── Stage 2: masks_and_tracking ──
     if not (args.skip_masks and args.skip_tracking and args.skip_voting):
@@ -243,7 +251,7 @@ def main():
         if args.disable_alias_merge:
             tracking_cmd.append("--disable_alias_merge")
 
-        run_step("Masks & Tracking Pipeline", tracking_cmd, dry_run=args.dry_run, conda_env=args.gp_env)
+        run_step("Masks & Tracking Pipeline", tracking_cmd, dry_run=args.dry_run, conda_env=args.masks_env)
 
     # ── Stage 3: gstrain (Training) ──
     scene_name = Path(args.data_path).name
@@ -300,7 +308,7 @@ def main():
             "--config", str(temp_config_path)
         ]
         
-        run_step("Gaussian Splatting Training (gstrain)", training_cmd, dry_run=args.dry_run, conda_env=args.objectgs_env)
+        run_step("Gaussian Splatting Training (gstrain)", training_cmd, dry_run=args.dry_run, conda_env=args.pipeline_env)
 
     # ── Stage 4: Mesh Generation ──
     if not args.skip_mesh_gen:
@@ -335,7 +343,7 @@ def main():
         
 
             
-        run_step("Extract Mesh Inputs", extract_inputs_cmd, dry_run=args.dry_run, conda_env=args.objectgs_env)
+        run_step("Extract Mesh Inputs", extract_inputs_cmd, dry_run=args.dry_run, conda_env=args.pipeline_env)
         
         # 2. Generate meshes
         if args.out_base_dir:
@@ -349,7 +357,7 @@ def main():
             "--input_dir", str(mesh_inputs_dir),
             "--output_dir", str(mesh_output_dir)
         ]
-        run_step("Generate Object Meshes", extract_meshes_cmd, dry_run=args.dry_run, conda_env=args.objectgs_env)
+        run_step("Generate Object Meshes", extract_meshes_cmd, dry_run=args.dry_run, conda_env=args.pipeline_env)
 
 
     print("\nFull VRoom pipeline finished.")

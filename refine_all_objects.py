@@ -174,7 +174,7 @@ def main():
                    help="TSDF grid resolution for mesh extraction")
 
     # ── Environment ───────────────────────────────────────────────────────────
-    p.add_argument("--conda_env", default="objectgs",
+    p.add_argument("--conda_env", default="pipeline",
                    help="Conda environment name")
     p.add_argument("--dry_run", action="store_true",
                    help="Print commands without executing them")
