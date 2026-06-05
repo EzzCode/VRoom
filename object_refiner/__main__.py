@@ -61,7 +61,7 @@ def run(
     # Novel views
     reuse_sv3d=False,
     # Training
-    generated_weight=1.0,
+    generated_weight=0.5,
     real_weight=1.0,
     rgb_weight=1.0,
     generated_rgb_scale=1.0,
@@ -133,10 +133,34 @@ def run(
         "phases": {},
     }
 
+    # ── Alias label resolution ─────────────────────────────────────────────────
+    # alias_merge_map.json maps secondary label IDs → canonical label ID.
+    # Example: {"8": 7, "10": 7} means labels 8 and 10 are fragments of object 7.
+    # When refining object 7, we must include anchors/masks with labels 8 and 10 too.
+    alias_label_ids = []
+    alias_map_path = Path(scene_dir) / "labeled_output" / "alias_merge_map.json"
+    if alias_map_path.exists():
+        try:
+            with open(alias_map_path, "r", encoding="utf-8") as f:
+                raw_map = json.load(f)  # {"secondary": canonical, ...}
+            alias_label_ids = [
+                int(secondary)
+                for secondary, canonical in raw_map.items()
+                if int(canonical) == obj_id
+            ]
+            if alias_label_ids:
+                logger.info(
+                    "Alias merge: object %d absorbs label(s) %s (from %s)",
+                    obj_id, sorted(alias_label_ids), alias_map_path,
+                )
+        except Exception as exc:
+            logger.warning("Could not load alias_merge_map from %s: %s", alias_map_path, exc)
+
     # ── Scope & model ─────────────────────────────────────────────────────────
     logger.info("Computing scope and loading model …")
     scope, frame = compute_object_scope(
-        str(model_path), obj_id, ply_path=str(resolved_ply)
+        str(model_path), obj_id, ply_path=str(resolved_ply),
+        alias_label_ids=alias_label_ids if alias_label_ids else None,
     )
     gaussians = load_gaussians(str(model_path), ply_path=str(resolved_ply))
 
@@ -172,9 +196,10 @@ def run(
 
         # TODO(label-alignment): replace this entire block with `tracked_object_id = object_label_id`
         #   once masks_and_tracking and ObjectGS share the same label namespace; delete vote_tracked_object_id() too.
+        vote_secondary_ids: list[int] = []
         if tracked_object_id is None:
             from object_refiner.utils.helpers import vote_tracked_object_id
-            tracked_object_id = vote_tracked_object_id(
+            tracked_object_id, vote_secondary_ids = vote_tracked_object_id(
                 scope, gaussians, resolved_tracked_id_map_dir, tau_alpha=tau_alpha
             )
             if tracked_object_id is None:
@@ -183,12 +208,28 @@ def run(
                     "model silhouette. Pass --tracked_object_id explicitly."
                 )
 
+        # Union three sources of alias tracker IDs:
+        #   alias_label_ids    — explicit alias_merge_map.json merges (IoU-threshold alias merge)
+        #   vote_secondary_ids — tracker IDs silently absorbed by majority-vote or discarded by
+        #                        min_points; never recorded in alias_merge_map.json
+        combined_alias_ids = alias_label_ids + [
+            t for t in vote_secondary_ids if t not in alias_label_ids
+        ]
+        if vote_secondary_ids:
+            logger.info(
+                "Adding %d voting-absorbed tracker ID(s) to extraction alias set: %s",
+                len(vote_secondary_ids), vote_secondary_ids,
+            )
+
         extraction_manifest = run_extraction(
             scope=scope,
             images_dir=images_dir,
             output_dir=obj_dir / "01_extraction",
             tracked_id_map_dir=resolved_tracked_id_map_dir,
             tracked_object_id=tracked_object_id,
+            alias_tracked_ids=combined_alias_ids if combined_alias_ids else None,
+            gaussians=gaussians,
+            object_label_id=obj_id,
         )
         summary["phases"]["extraction"] = extraction_manifest
         logger.info("✓ Extraction: %d frames extracted", len(extraction_manifest.get("frames", [])))
@@ -341,7 +382,7 @@ def _parse_args():
     p.add_argument("--reuse_sv3d", action="store_true")
 
     # Training
-    p.add_argument("--generated_weight", type=float, default=1.0)
+    p.add_argument("--generated_weight", type=float, default=0.5)
     p.add_argument("--real_weight", type=float, default=1.0)
     p.add_argument("--rgb_weight", type=float, default=1.0)
     p.add_argument("--generated_rgb_scale", type=float, default=1.0)

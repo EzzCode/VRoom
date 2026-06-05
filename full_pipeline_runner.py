@@ -258,6 +258,7 @@ def main():
         # Update necessary fields
         train_config["experiment"]["dataset_name"] = scene_name
         train_config["experiment"]["dataset_path"] = str(pipeline_data_path.absolute())
+        train_config["experiment"]["masks"] = "labeled_output/tracked/id_maps"
 
         if args.out_base_dir:
             # We use a path traversal trick to escape the hardcoded "output" folder in trainer.py

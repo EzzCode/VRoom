@@ -79,7 +79,7 @@ def merge_aliases(labels, votes, num_points, iou_thresh=0.75, min_covisibility=2
     for i in range(num_points):
         if i in votes:
             for lbl in votes[i]:
-                if lbl != 0:
+                if lbl != 255:
                     lbl_val = int(lbl)
                     if lbl_val not in label_sets:
                         label_sets[lbl_val] = set()
@@ -209,10 +209,10 @@ def run_voting(args):
 
     cleaned = labels.copy()
     for lbl in np.unique(labels):
-        if lbl != 0:
+        if lbl != 255:
             mask = labels == lbl
             if mask.sum() < args.min_points:
-                cleaned[mask] = 0
+                cleaned[mask] = 255
     labels = cleaned
 
     unique, counts = np.unique(labels, return_counts=True)
@@ -234,7 +234,7 @@ def run_voting(args):
     logger.info("Saved -> %s", vis_path)
 
     for lbl in sorted(set(labels)):
-        if lbl == 0:
+        if lbl == 255:
             continue
         mask     = labels == lbl
         obj_path = obj_dir / f"label_{lbl:02d}.ply"

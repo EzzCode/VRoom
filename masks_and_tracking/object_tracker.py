@@ -775,7 +775,7 @@ def run_pipeline(args):
 		)
 
 		frame_h, frame_w = frame.shape[:2]
-		id_map = np.zeros((frame_h, frame_w), dtype=np.uint16)
+		id_map = np.full((frame_h, frame_w), 255, dtype=np.uint16)
 		empty = np.ones((frame_h, frame_w), dtype=bool)
 		for obj_id, mask in tracked.items():
 			if obj_id > np.iinfo(np.uint16).max:

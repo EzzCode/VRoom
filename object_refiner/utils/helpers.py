@@ -79,13 +79,23 @@ def find_tracked_id_map(tracked_id_map_dir, img_name):
 
 # TODO(label-alignment): delete this entire function once tracked_object_id == object_label_id end-to-end;
 #   caller in __main__.py passes tracked_object_id=object_label_id directly and this is no longer needed.
-def vote_tracked_object_id(scope, gaussians, tracked_id_map_dir, n_probe=5, tau_alpha=0.4):
+def vote_tracked_object_id(scope, gaussians, tracked_id_map_dir, n_probe=5, tau_alpha=0.4,
+                           secondary_iou_ratio=0.3):
     """IoU-vote the GS alpha mask against the per-frame tracked id-maps to find
     the tracked_object_id (instance label) that best matches the Gaussian model's
-    silhouette. This is the same integer label that vote.py writes into the
-    labeled COLMAP point cloud."""
+    silhouette.
+
+    Returns ``(winner_id, secondary_ids)`` where ``secondary_ids`` is a list of
+    every other tracker label whose cumulative probe-frame IoU is at least
+    ``secondary_iou_ratio * winner_score``.  These are tracker IDs that vote.py
+    silently absorbed through majority-vote (not recorded in alias_merge_map.json)
+    or discarded by the min_points filter — they still appear as real pixels in
+    the per-frame id-maps and must be included during extraction.
+
+    Returns ``(None, [])`` when no match can be found.
+    """
     if not tracked_id_map_dir.exists():
-        return None
+        return None, []
     indices = list(scope.visible_cam_indices)
     if len(indices) > n_probe:
         indices = indices[::max(1, len(indices) // n_probe)][:n_probe]
@@ -115,11 +125,24 @@ def vote_tracked_object_id(scope, gaussians, tracked_id_map_dir, n_probe=5, tau_
             votes[int(label)] = votes.get(int(label), 0.0) + inter / max(union, 1.0)
 
     if not votes:
-        return None
-    winner, best_score = max(votes.items(), key=lambda kv: kv[1])
-    logger.info("Voted tracked_object_id=%d (top labels: %s)", winner,
-                {k: round(v, 3) for k, v in sorted(votes.items(), key=lambda kv: -kv[1])[:5]})
-    return winner if best_score > 0 else None
+        return None, []
+    sorted_labels = sorted(votes.items(), key=lambda kv: -kv[1])
+    winner, best_score = sorted_labels[0]
+    if best_score <= 0:
+        return None, []
+
+    # Secondary IDs: tracker labels co-observed in probe frames whose cumulative
+    # IoU is a significant fraction of the winner's score.  These are candidates
+    # silently absorbed by majority voting that have no alias_merge_map entry.
+    threshold = best_score * secondary_iou_ratio
+    secondary = [label for label, score in sorted_labels[1:] if score >= threshold]
+
+    logger.info(
+        "Voted tracked_object_id=%d (IoU=%.3f); secondary candidates: %s",
+        winner, best_score,
+        {k: round(v, 3) for k, v in sorted_labels[1:] if v >= threshold} or "none",
+    )
+    return winner, secondary
 
 def load_cache(out_dir, cond_azimuth_deg, cond_elevation_deg):
     out_dir       = Path(out_dir)

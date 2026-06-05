@@ -41,7 +41,7 @@ class ObjectTrainingConfig:
     decoder_color_lr_final: float = 0.000050
     
     # Pipeline specific
-    generated_weight: float = 1.0
+    generated_weight: float = 0.5
     real_weight: float = 1.0
     use_cond_cam_up: bool = True
 

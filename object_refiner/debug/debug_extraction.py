@@ -78,13 +78,45 @@ def _label(img, text, color=(255, 255, 255)):
     return out
 
 
-def _make_triptych(rgb, mask, frame_label):
-    rgb, mask = _resize_pair(rgb, mask)
-    panel_src = _label(rgb, "source")
-    panel_mask = _label(_overlay_mask(rgb, mask, (0, 200, 0)),
-                        "mask used", (220, 255, 220))
-    gap = np.full((panel_src.shape[0], 4, 3), 240, np.uint8)
-    row = np.hstack([panel_src, gap, panel_mask])
+def _make_triptych(rgb, mask_hybrid, frame_label,
+                   mask_tracker=None, mask_gs=None):
+    """Build a debug panel.
+
+    When intermediate masks are present (hybrid mode) the output is 4 panels:
+        source | tracker mask | GS alpha mask | final hybrid mask
+    Otherwise it falls back to 2 panels:
+        source | mask used
+    """
+    panels_rgb = [rgb]
+    panels_mask = [None]  # first panel is source (no overlay)
+    labels_txt = ["source"]
+
+    if mask_tracker is not None or mask_gs is not None:
+        panels_rgb += [rgb, rgb, rgb]
+        panels_mask += [mask_tracker, mask_gs, mask_hybrid]
+        labels_txt += ["tracker", "GS alpha", "hybrid (final)"]
+    else:
+        panels_rgb.append(rgb)
+        panels_mask.append(mask_hybrid)
+        labels_txt.append("mask used")
+
+    COLORS = [(200, 200, 200), (0, 180, 255), (0, 200, 0)]  # tracker=cyan, gs=blue, hybrid=green
+    color_idx = 0
+    cell_rows = []
+    for i, (p_rgb, p_mask, p_label) in enumerate(zip(panels_rgb, panels_mask, labels_txt)):
+        p_rgb, _ = _resize_pair(p_rgb, p_mask if p_mask is not None else np.zeros(p_rgb.shape[:2], np.uint8))
+        if p_mask is not None:
+            _, p_mask = _resize_pair(rgb, p_mask)
+            cell = _label(_overlay_mask(p_rgb, p_mask, COLORS[color_idx % len(COLORS)]), p_label)
+            color_idx += 1
+        else:
+            cell = _label(p_rgb.copy(), p_label)
+        cell_rows.append(cell)
+
+    gap = np.full((cell_rows[0].shape[0], 4, 3), 240, np.uint8)
+    row = cell_rows[0]
+    for cell in cell_rows[1:]:
+        row = np.hstack([row, gap, cell])
 
     header_h = 28
     header = np.full((header_h, row.shape[1], 3), 245, np.uint8)
@@ -145,10 +177,23 @@ def generate_debug_artifacts(*, manifest, images_dir, debug_dir,
         if rgb_src is None or mask_hybrid is None:
             continue
 
+        # Load intermediate masks when available (hybrid mode)
+        def _load_npy_mask(path):
+            if not path:
+                return None
+            try:
+                return (np.load(path).astype(np.uint8)) * 255
+            except Exception:
+                return None
+
+        mask_tracker = _load_npy_mask(f.get("tracker_mask_path"))
+        mask_gs = _load_npy_mask(f.get("gs_mask_path"))
+
         label = (f"cam={f.get('cam_index')} | {f.get('image_name','?')} | "
                  f"az={f.get('azimuth', 0.0):+.1f} | "
                  f"fg={f.get('object_coverage', 0.0):.3f}")
-        trip = _make_triptych(rgb_src, mask_hybrid, label)
+        trip = _make_triptych(rgb_src, mask_hybrid, label,
+                              mask_tracker=mask_tracker, mask_gs=mask_gs)
         (debug_dir / "triptych").mkdir(parents=True, exist_ok=True)
         out_path = debug_dir / "triptych" / f"cam_{f.get('cam_index'):03d}.png"
         if cv2.imwrite(str(out_path), cv2.cvtColor(trip, cv2.COLOR_RGB2BGR)):

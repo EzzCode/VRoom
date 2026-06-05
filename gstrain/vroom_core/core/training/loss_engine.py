@@ -67,6 +67,8 @@ class LossEngine:
         return 1 - (numerator / denominator).mean()
 
     def calc_semantic_loss(self, mask_label_idx, model_guess):
+        if not (mask_label_idx != 0).any():
+            return torch.tensor(0.0, device=model_guess.device)
         # calculate the cross entropy loss using the model probabilites and ground truth label ids
         model_guess = model_guess.unsqueeze(0)
         mask_label_idx = mask_label_idx.unsqueeze(0)

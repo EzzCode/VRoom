@@ -165,7 +165,8 @@ class ObjectScope:
     optim_params: dict = field(default_factory=dict)
 
 
-def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_path=None):
+def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_path=None,
+                         alias_label_ids=None):
     model_path = Path(path)
     cameras_json = model_path / "cameras.json"
     if not cameras_json.exists():
@@ -179,10 +180,18 @@ def compute_object_scope(path, object_label_id: int, min_anchors: int = 50, ply_
     all_anchors = gaussians.anchor_cloud.anchors_positions.detach().cpu().numpy().astype(np.float32)
     label_ids = cast(Any, gaussians.anchor_cloud.semantic_labels).detach().cpu().numpy().reshape(-1).astype(np.int64)
 
-    object_mask = (label_ids == object_label_id)
+    # IDs that belong to this object (+ alias from vote)
+    all_object_labels = [object_label_id] + (list(alias_label_ids) if alias_label_ids else [])
+    object_mask = np.isin(label_ids, all_object_labels)
+    if alias_label_ids:
+        logger.info(
+            "Object %d: merging alias labels %s → %d total anchors",
+            object_label_id, sorted(alias_label_ids),
+            int(object_mask.sum()),
+        )
     if not object_mask.any():
         raise ValueError(
-            f"object_label_id={object_label_id} has no anchors in {model_path}. "
+            f"object_label_id={object_label_id} (aliases={alias_label_ids}) has no anchors in {model_path}. "
             f"Available labels: {sorted(np.unique(label_ids).tolist())}"
         )
     total_objects = object_mask.sum()

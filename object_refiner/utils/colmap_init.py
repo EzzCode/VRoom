@@ -46,7 +46,7 @@ def _read_source_path(model_path):
     from gstrain.vroom_core.config import load_vroom_config
     try:
         _, model_params, _, _ = load_vroom_config(config_json_path)
-        source_path = model_params.get("source_path")
+        source_path = model_params.get("source_path") or model_params.get("dataset_path")
         if source_path:
             return _resolve_path(source_path, base_dir=model_path)
     except Exception:
@@ -77,6 +77,7 @@ def _read_extraction_manifest(extraction_index_path):
 def _candidate_labeled_plys(source_path):
     return [
         source_path / "sparse" / "0" / "points3D_corr.ply",
+        source_path / "labeled_output" / "points3D_labeled.ply",
         source_path / "vote_output" / "points3D_labeled.ply",
         source_path / "sparse" / "0" / "points3D_labeled.ply",
         source_path / "sparse" / "0" / "points3D_deva.ply",
