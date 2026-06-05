@@ -12,8 +12,8 @@ from .utils.helpers import find_image, find_tracked_id_map
 logger = logging.getLogger(__name__)
 
 WEIGHTS = {
-    "front":  0.40, # prefer front views
-    "cover":  0.25, # how big the object is in frame. max is COVER_TARGET
+    "front":  0.40,
+    "cover":  0.25,
     "sharp":  0.20,
     "expose": 0.15,
 }
@@ -27,7 +27,40 @@ EXPOSURE_CLAMP   = 5.0    # penalty scale
 
 
 
-def _load_object_mask(tracked_id_map_dir, image_name, tracked_object_id, shape):
+def _render_mask(gaussians, object_label_id, camera_spec, shape):
+    """Render GS alpha for *object_label_id* and return a bool mask of shape
+    *shape* (H, W).  Returns None on any error."""
+    try:
+        import torch
+        from .utils.gstrain_wrapper import make_camera as _make_cam, render_rgba as _render
+        from .constants import ALPHA_THRESH
+        cam = _make_cam(
+            camera_spec["R"], camera_spec["T"], camera_spec["K"],
+            camera_spec["width"], camera_spec["height"],
+        )
+        with torch.no_grad():
+            alpha = _render(
+                gaussians, cam,
+                object_label_id=int(object_label_id),
+                training=False, bg_white=False,
+            )["alpha"].detach().cpu().numpy()
+        if alpha.ndim == 3:
+            alpha = alpha[0]
+        gs_mask = alpha > ALPHA_THRESH
+        H, W = shape
+        if gs_mask.shape != (H, W):
+            gs_mask = cv2.resize(
+                gs_mask.astype(np.uint8), (W, H),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        return gs_mask
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("GS alpha render failed for cam: %s", exc)
+        return None
+
+
+def _load_object_mask(tracked_id_map_dir, image_name, tracked_object_id, shape,
+                       alias_tracked_ids=None):
     if tracked_id_map_dir is None or tracked_object_id is None:
         return None
     id_map_path = find_tracked_id_map(Path(tracked_id_map_dir), image_name)
@@ -42,14 +75,27 @@ def _load_object_mask(tracked_id_map_dir, image_name, tracked_object_id, shape):
     height, width = shape
     if id_map.shape[:2] != (height, width):
         id_map = cv2.resize(id_map, (width, height), interpolation=cv2.INTER_NEAREST)
-    return id_map == int(tracked_object_id)
+    all_ids = [int(tracked_object_id)]
+    if alias_tracked_ids:
+        all_ids += [int(a) for a in alias_tracked_ids]
+    return np.isin(id_map, all_ids)
 
 
-def run_extraction(scope, images_dir, output_dir, tracked_id_map_dir, tracked_object_id):
+def run_extraction(scope, images_dir, output_dir, tracked_id_map_dir, tracked_object_id,
+                   alias_tracked_ids=None, gaussians=None, object_label_id=None):
     output_dir = Path(output_dir)
     extracted_dir = output_dir / "extracted"
     extracted_dir.mkdir(parents=True, exist_ok=True)
+    masks_dir = output_dir / "debug_masks"
+    masks_dir.mkdir(parents=True, exist_ok=True)
     tracked_id_map_dir = Path(tracked_id_map_dir)
+    use_hybrid = gaussians is not None and object_label_id is not None
+    
+    if alias_tracked_ids:
+        logger.info(
+            "Extraction: tracked_object_id=%d, alias_tracked_ids=%s",
+            tracked_object_id, sorted(alias_tracked_ids),
+        )
 
     frames = []
     for cam_index in scope.visible_cam_indices:
@@ -67,24 +113,51 @@ def run_extraction(scope, images_dir, output_dir, tracked_id_map_dir, tracked_ob
             height, width = img.shape[:2]
             img = img[:, :, ::-1]  # BGR to RGB
 
-            mask = _load_object_mask(tracked_id_map_dir, image_name, tracked_object_id, (height, width))
+            mask = _load_object_mask(
+                tracked_id_map_dir, image_name, tracked_object_id, (height, width),
+                alias_tracked_ids=alias_tracked_ids,
+            )
             if mask is None:
                 raise RuntimeError(
                     f"cam {cam_index} ({image_name}): tracked id-map for object {tracked_object_id} "
                     f"not found under {tracked_id_map_dir}"
                 )
 
+            mask_tracker = mask.copy()
+            mask_for_debug = None
+
+            if use_hybrid:
+                gs_mask = _render_mask(gaussians, object_label_id, camera, (height, width))
+                if gs_mask is not None:
+                    mask_for_debug = gs_mask
+                    mask = np.logical_and(mask, gs_mask)
+                else:
+                    logger.debug("cam %d render failed using tracker mask only", cam_index)
+
+           
             n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=4)
             if n_labels < 2:
                 continue
 
-            largest_component_idx = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
-            n_pixels = int(stats[largest_component_idx, cv2.CC_STAT_AREA])
-            if n_pixels < MIN_MASK_PIXELS:
-                logger.warning("cam %d: largest component too small (%d px)", cam_index, n_pixels)
+            valid_components = [
+                idx for idx in range(1, n_labels)
+                if int(stats[idx, cv2.CC_STAT_AREA]) >= MIN_MASK_PIXELS
+            ]
+            if not valid_components:
+                logger.warning("cam %d: no component meets min pixels (%d)", cam_index, MIN_MASK_PIXELS)
                 continue
 
-            mask = labels == largest_component_idx
+            mask = np.isin(labels, valid_components)
+            n_pixels = int(mask.sum())
+
+            # masks for debug 
+            stem = f"{cam_index:03d}__{image_name}"
+            tracker_mask_path = str(masks_dir / f"{stem}__tracker.npy")
+            np.save(tracker_mask_path, mask_tracker.astype(np.uint8))
+            gs_mask_path = None
+            if mask_for_debug is not None:
+                gs_mask_path = str(masks_dir / f"{stem}__gs.npy")
+                np.save(gs_mask_path, mask_for_debug.astype(np.uint8))
 
             # Create RGBA output with the object mask as alpha
             masked_frame = np.concatenate([img, (mask.astype(np.uint8) * 255)[..., None]], axis=-1)
@@ -110,6 +183,8 @@ def run_extraction(scope, images_dir, output_dir, tracked_id_map_dir, tracked_ob
                 "azimuth_deg": float(camera.get("azimuth_deg", float("nan"))),
                 "elevation_deg": float(camera.get("elevation_deg", float("nan"))),
                 "rgba_path": str(output_path),
+                "tracker_mask_path": tracker_mask_path,
+                "gs_mask_path": gs_mask_path,
                 "sharpness": sharpness,
                 "exposure": exposure,
             })

@@ -36,8 +36,12 @@ def _resize(rgb, alpha, target_size):
 
     n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     if n_labels > 1:
-        largest_component_idx = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
-        mask = labels == largest_component_idx
+        valid = [i for i in range(1, n_labels) if stats[i, cv2.CC_STAT_AREA] >= MIN_SV3D_MASK_PIXELS]
+        if valid:
+            mask = np.isin(labels, valid)
+        else:
+            largest_component_idx = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+            mask = labels == largest_component_idx
 
     
     #if no pixels above threshold, make blank image

@@ -104,6 +104,7 @@ def run_pipeline(
     )
 
     summary = dict(result["summary"])
+    summary["_gaussians"] = result.get("gaussians") #used in debug
 
     logger.info("obj %d done: anchors=%d final_loss=%.5f",
                 object_id, summary.get("n_final_anchors", 0), summary.get("final_loss", 0.0))

@@ -202,7 +202,7 @@ def render_rgba(
     alpha_raw = pkg["render_alphas"]
     alpha = alpha_raw[0] if alpha_raw.ndim == 3 else alpha_raw
 
-    return_pkg = {"rgb": rgb, "alpha": alpha}
+    return_pkg = {"rgb": rgb, "alpha": alpha, "render_alphas": alpha_raw, "render_depth": pkg.get("render_depth")}
     if training:
         return_pkg.update({
             "render": rgb,
