@@ -8,10 +8,12 @@ import {
   Modal,
   FlatList,
   SafeAreaView,
+  Image,
 } from 'react-native';
 import { useTheme } from '../../shared/theme';
 import { IconButton, TrackingIndicator } from '../../shared/components';
 import { MeshInfo } from '../../shared/core/types';
+import { RoomLayout, loadLayouts, deleteLayout } from '../../services/mesh/layoutStorage';
 
 export type InteractionMode =
   | 'select'
@@ -45,6 +47,11 @@ interface AROverlayUIProps {
   /** All meshes available in the library (PLY filtered out by parent) */
   availableMeshes: MeshInfo[];
   onAddMesh: (mesh: MeshInfo) => void;
+  onSaveLayout?: (name: string) => void;
+  onLoadLayout?: (layout: RoomLayout) => void;
+  aligningLayout?: RoomLayout;
+  onConfirmAlignment?: () => void;
+  onCancelAlignment?: () => void;
 }
 
 export default function AROverlayUI({
@@ -63,9 +70,38 @@ export default function AROverlayUI({
   onScaleChange,
   availableMeshes,
   onAddMesh,
+  onSaveLayout,
+  onLoadLayout,
+  aligningLayout,
+  onConfirmAlignment,
+  onCancelAlignment,
 }: AROverlayUIProps) {
   const { theme } = useTheme();
   const [showMeshPicker, setShowMeshPicker] = useState(false);
+  
+  // For the ghost image alignment
+  const [ghostOpacity, setGhostOpacity] = useState(0.4);
+  
+  const [showLayoutsModal, setShowLayoutsModal] = useState(false);
+  const [savedLayouts, setSavedLayouts] = useState<RoomLayout[]>([]);
+  const [isLayoutsLoading, setIsLayoutsLoading] = useState(false);
+
+  const fetchLayouts = async () => {
+    setIsLayoutsLoading(true);
+    const layouts = await loadLayouts();
+    setSavedLayouts(layouts);
+    setIsLayoutsLoading(false);
+  };
+
+  const handleOpenLayouts = () => {
+    setShowLayoutsModal(true);
+    fetchLayouts();
+  };
+
+  const handleDeleteLayout = async (id: string) => {
+    await deleteLayout(id);
+    fetchLayouts();
+  };
 
   // Main mode bar — Place is auto-set, not a button
   const modes: { key: InteractionMode; label: string }[] = [
@@ -101,6 +137,69 @@ export default function AROverlayUI({
 
   // AR-compatible meshes for the picker (PLY cannot be displayed)
   const arCompatibleMeshes = availableMeshes.filter((m) => m.format !== 'PLY');
+
+  if (aligningLayout) {
+    return (
+      <View style={styles.container} pointerEvents="box-none">
+        {/* Ghost Image at adjustable opacity */}
+        {aligningLayout.screenshotUri && (
+          <Image
+            source={{ uri: aligningLayout.screenshotUri }}
+            style={[StyleSheet.absoluteFill, { opacity: ghostOpacity }]}
+            resizeMode="cover"
+          />
+        )}
+
+        {/* Top Instruction Banner */}
+        <SafeAreaView style={{ flex: 1, justifyContent: 'space-between' }} pointerEvents="box-none">
+          <View style={{ alignItems: 'center', marginTop: 60 }} pointerEvents="box-none">
+            <View style={{ backgroundColor: 'rgba(0,0,0,0.8)', paddingHorizontal: 24, paddingVertical: 16, borderRadius: theme.radii.lg, alignItems: 'center' }}>
+              <Text style={{ color: '#FFFFFF', fontSize: 18, fontWeight: '700', marginBottom: 4 }}>Align Your Camera</Text>
+              <Text style={{ color: '#EEEEEE', fontSize: 14, textAlign: 'center', marginBottom: 12 }}>
+                Move your phone to match the reference image.
+              </Text>
+              
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+                <TouchableOpacity 
+                  onPress={() => setGhostOpacity(Math.max(0.1, ghostOpacity - 0.1))}
+                  style={{ backgroundColor: 'rgba(255,255,255,0.2)', width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <Text style={{ color: '#FFF', fontSize: 20, fontWeight: 'bold' }}>-</Text>
+                </TouchableOpacity>
+                <Text style={{ color: '#FFF', fontSize: 16, fontWeight: '600', width: 80, textAlign: 'center' }}>
+                  Opacity {Math.round(ghostOpacity * 100)}%
+                </Text>
+                <TouchableOpacity 
+                  onPress={() => setGhostOpacity(Math.min(1.0, ghostOpacity + 0.1))}
+                  style={{ backgroundColor: 'rgba(255,255,255,0.2)', width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <Text style={{ color: '#FFF', fontSize: 20, fontWeight: 'bold' }}>+</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+
+          {/* Bottom Action Bar */}
+          <View style={{ paddingHorizontal: theme.spacing.xl, paddingBottom: 50, gap: 16 }} pointerEvents="box-none">
+
+            <TouchableOpacity
+              style={{ backgroundColor: theme.colors.primary, paddingVertical: 16, borderRadius: theme.radii.lg, alignItems: 'center' }}
+              onPress={onConfirmAlignment}
+            >
+              <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '700' }}>Confirm Alignment</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              style={{ backgroundColor: 'rgba(255,255,255,0.2)', paddingVertical: 16, borderRadius: theme.radii.lg, alignItems: 'center' }}
+              onPress={onCancelAlignment}
+            >
+              <Text style={{ color: '#FFFFFF', fontSize: 16, fontWeight: '600' }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container} pointerEvents="box-none">
@@ -424,7 +523,6 @@ export default function AROverlayUI({
         </View>
       )}
 
-      {/* ── Bottom bar ──────────────────────────────────────────────────────── */}
       <View
         style={[
           styles.bottomBar,
@@ -437,28 +535,49 @@ export default function AROverlayUI({
       >
         <IconButton icon="camera-outline" onPress={onScreenshot} color="#FFFFFF" size="lg" />
 
-        {/* Add Object button — always visible so user can add more */}
-        <TouchableOpacity
-          style={[
-            styles.addButton,
-            { backgroundColor: theme.colors.primary, borderRadius: theme.radii.xl },
-          ]}
-          onPress={() => setShowMeshPicker(true)}
-        >
-          <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>
-            +
-          </Text>
-          <Text
-            style={{
-              color: '#FFFFFF',
-              fontSize: theme.typography.caption.fontSize,
-              fontWeight: '600',
-              marginLeft: 4,
-            }}
+        <View style={{ flexDirection: 'row', gap: 12 }}>
+          {/* Add Object button */}
+          <TouchableOpacity
+            style={[
+              styles.addButton,
+              { backgroundColor: theme.colors.primary, borderRadius: theme.radii.xl },
+            ]}
+            onPress={() => setShowMeshPicker(true)}
           >
-            Add Object
-          </Text>
-        </TouchableOpacity>
+            <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>
+              +
+            </Text>
+            <Text
+              style={{
+                color: '#FFFFFF',
+                fontSize: theme.typography.caption.fontSize,
+                fontWeight: '600',
+                marginLeft: 4,
+              }}
+            >
+              Add Object
+            </Text>
+          </TouchableOpacity>
+
+          {/* Layouts button */}
+          <TouchableOpacity
+            style={[
+              styles.addButton,
+              { backgroundColor: theme.colors.surface, borderRadius: theme.radii.xl },
+            ]}
+            onPress={handleOpenLayouts}
+          >
+            <Text
+              style={{
+                color: theme.colors.textPrimary,
+                fontSize: theme.typography.caption.fontSize,
+                fontWeight: '600',
+              }}
+            >
+              Layouts
+            </Text>
+          </TouchableOpacity>
+        </View>
 
         {anyMeshPlaced && (
           <IconButton icon="refresh-outline" onPress={onReset} color="#FFFFFF" size="lg" />
@@ -598,6 +717,118 @@ export default function AROverlayUI({
                 }}
               >
                 Cancel
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
+
+      {/* ── Layouts Modal ─────────────────────────────────────────────────────── */}
+      <Modal
+        visible={showLayoutsModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowLayoutsModal(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowLayoutsModal(false)}
+        />
+        <SafeAreaView style={styles.modalSheet}>
+          <View style={[styles.modalContent, { backgroundColor: theme.colors.surface }]}>
+            <View style={[styles.modalHandle, { backgroundColor: theme.colors.textTertiary }]} />
+
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: theme.spacing.lg, marginBottom: theme.spacing.md }}>
+              <Text
+                style={{
+                  color: theme.colors.textPrimary,
+                  fontSize: theme.typography.h4.fontSize,
+                  fontWeight: '700',
+                }}
+              >
+                Room Layouts
+              </Text>
+              <TouchableOpacity
+                style={{
+                  backgroundColor: theme.colors.primary,
+                  paddingHorizontal: 12,
+                  paddingVertical: 6,
+                  borderRadius: theme.radii.md,
+                }}
+                onPress={() => {
+                  if (onSaveLayout) {
+                    onSaveLayout('');
+                    // give it a tiny delay to save before fetching
+                    setTimeout(fetchLayouts, 500);
+                  }
+                }}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '600' }}>Save Current</Text>
+              </TouchableOpacity>
+            </View>
+
+            {isLayoutsLoading ? (
+              <ActivityIndicator style={{ paddingVertical: 40 }} color={theme.colors.primary} />
+            ) : savedLayouts.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text style={{ color: theme.colors.textTertiary, textAlign: 'center' }}>
+                  No saved layouts yet.{'\n'}Place some objects and save your layout!
+                </Text>
+              </View>
+            ) : (
+              <FlatList
+                data={savedLayouts}
+                keyExtractor={(item) => item.id}
+                style={{ maxHeight: 320 }}
+                contentContainerStyle={{ paddingHorizontal: theme.spacing.lg }}
+                renderItem={({ item }) => (
+                  <View style={[styles.meshPickerItem, { borderBottomColor: theme.colors.border }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: theme.colors.textPrimary, fontWeight: '600' }} numberOfLines={1}>
+                        {item.name}
+                      </Text>
+                      <Text style={{ color: theme.colors.textSecondary, fontSize: 12, marginTop: 2 }}>
+                        {item.meshes.length} object{item.meshes.length !== 1 ? 's' : ''} • {new Date(item.createdAt).toLocaleDateString()}
+                      </Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <TouchableOpacity
+                        style={[styles.formatBadge, { backgroundColor: theme.colors.errorBackground }]}
+                        onPress={() => handleDeleteLayout(item.id)}
+                      >
+                        <Text style={{ color: theme.colors.error, fontSize: 12, fontWeight: '600' }}>Delete</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.formatBadge, { backgroundColor: theme.colors.primary + '22' }]}
+                        onPress={() => {
+                          setShowLayoutsModal(false);
+                          if (onLoadLayout) onLoadLayout(item);
+                        }}
+                      >
+                        <Text style={{ color: theme.colors.primary, fontSize: 12, fontWeight: '600' }}>Load</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+              />
+            )}
+
+            <TouchableOpacity
+              style={[
+                styles.cancelButton,
+                {
+                  marginHorizontal: theme.spacing.lg,
+                  marginTop: theme.spacing.md,
+                  marginBottom: theme.spacing.sm,
+                  borderRadius: theme.radii.lg,
+                  backgroundColor: theme.colors.errorBackground ?? 'rgba(255,80,80,0.12)',
+                },
+              ]}
+              onPress={() => setShowLayoutsModal(false)}
+            >
+              <Text style={{ color: theme.colors.error, fontWeight: '600', textAlign: 'center' }}>
+                Close
               </Text>
             </TouchableOpacity>
           </View>

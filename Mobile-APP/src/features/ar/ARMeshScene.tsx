@@ -39,10 +39,12 @@ export default function ARMeshScene(arSceneProps: any) {
   const onMeshSelected: ((id: string) => void) | undefined = props.onMeshSelected;
   const onMeshLoading: ((loading: boolean) => void) | undefined = props.onMeshLoading;
   const onReticleVisible: ((visible: boolean) => void) | undefined = props.onReticleVisible;
+  const onMeshPlacedExt: ((id: string, position: [number, number, number]) => void) | undefined = props.onMeshPlacedExt;
+  const onMeshMoved: ((id: string, position: [number, number, number]) => void) | undefined = props.onMeshMoved;
 
   // Scene-local positions (keyed by mesh id) — avoids parent re-renders on every drag
-  const [positions, setPositions] = useState<Record<string, [number, number, number]>>({});
-  const [planeAnchors, setPlaneAnchors] = useState<Record<string, [number, number, number]>>({});
+  const [positions, setPositions] = useState<Record<string, [number, number, number]>>(props.initialPositions ?? {});
+  const [planeAnchors, setPlaneAnchors] = useState<Record<string, [number, number, number]>>(props.initialPositions ?? {});
 
   const [reticlePosition, setReticlePosition] = useState<[number, number, number]>([0, 0, -1]);
   const [reticleVisible, setReticleVisible] = useState(false);
@@ -54,13 +56,13 @@ export default function ARMeshScene(arSceneProps: any) {
   // Reset when parent requests it
   useEffect(() => {
     if (props.resetRequested) {
-      setPositions({});
-      setPlaneAnchors({});
+      setPositions(props.initialPositions ?? {});
+      setPlaneAnchors(props.initialPositions ?? {});
       setReticlePosition([0, 0, -1]);
       setReticleVisible(false);
       latestHitPosition.current = null;
     }
-  }, [props.resetRequested]);
+  }, [props.resetRequested, props.initialPositions]);
 
   // ─── Viro callbacks ────────────────────────────────────────────────────────
 
@@ -122,9 +124,10 @@ export default function ARMeshScene(arSceneProps: any) {
     setPositions((prev) => ({ ...prev, [unplacedMesh.id]: pos }));
     setPlaneAnchors((prev) => ({ ...prev, [unplacedMesh.id]: pos }));
     if (onMeshPlaced) onMeshPlaced(unplacedMesh.id);
+    if (onMeshPlacedExt) onMeshPlacedExt(unplacedMesh.id, pos);
     setReticleVisible(false);
     latestHitPosition.current = null;
-  }, [unplacedMesh, onMeshPlaced]);
+  }, [unplacedMesh, onMeshPlaced, onMeshPlacedExt]);
 
   return (
     <ViroARScene
@@ -141,8 +144,8 @@ export default function ARMeshScene(arSceneProps: any) {
         if (!mesh.isPlaced || !mesh.meshSource) return null;
 
         const isActive = mesh.id === activeMeshId;
-        const meshPos = positions[mesh.id] ?? [0, 0, -1];
-        const planeAnchor = planeAnchors[mesh.id] ?? meshPos;
+        const meshPos = positions[mesh.id] ?? props.initialPositions?.[mesh.id] ?? [0, 0, -1];
+        const planeAnchor = planeAnchors[mesh.id] ?? props.initialPositions?.[mesh.id] ?? meshPos;
         const enableDrag =
           isActive && (interactionMode === 'move-floor' || interactionMode === 'move-lift');
 
@@ -157,7 +160,7 @@ export default function ARMeshScene(arSceneProps: any) {
                 ? interactionMode === 'move-lift'
                   ? 'FixedDistance'
                   : 'FixedToPlane'
-                : 'FixedDistance'
+                : undefined
             }
             dragPlane={
               enableDrag && interactionMode === 'move-floor'
@@ -171,10 +174,12 @@ export default function ARMeshScene(arSceneProps: any) {
             onDrag={
               enableDrag
                 ? (dragToPos: number[]) => {
+                    const newPos: [number, number, number] = [dragToPos[0] ?? 0, dragToPos[1] ?? 0, dragToPos[2] ?? 0];
                     setPositions((prev) => ({
                       ...prev,
-                      [mesh.id]: [dragToPos[0] ?? 0, dragToPos[1] ?? 0, dragToPos[2] ?? 0],
+                      [mesh.id]: newPos,
                     }));
+                    if (onMeshMoved) onMeshMoved(mesh.id, newPos);
                   }
                 : undefined
             }

@@ -1,3 +1,5 @@
+import { MeshInfo } from '../../shared/core/types';
+
 /**
  * Shared AR types used by ARViewScreen and ARMeshScene.
  * Positions are NOT stored here — ARMeshScene owns them for performance
@@ -5,6 +7,7 @@
  */
 export interface PlacedMesh {
   id: string;
+  meshInfo: MeshInfo;
   meshSource: any;
   meshType: 'GLB' | 'OBJ';
   meshName: string;

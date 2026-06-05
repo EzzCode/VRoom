@@ -1,15 +1,19 @@
 import { type NativeStackScreenProps } from '@react-navigation/native-stack';
 
+import { RoomLayout } from '../services/mesh/layoutStorage';
+
 export type RootStackParamList = {
   Home: undefined;
   Capture: undefined;
   MeshGallery: undefined;
+  SavedLayouts: undefined;
   ARView: {
-    meshId: string;
-    meshName: string;
-    meshUri: string;
-    meshType: 'GLB' | 'OBJ';
-    isBundled: boolean;
+    meshId?: string;
+    meshName?: string;
+    meshUri?: string;
+    meshType?: 'GLB' | 'OBJ';
+    isBundled?: boolean;
+    layout?: RoomLayout;
   };
   Export: undefined;
   ReconstructionStatus: { jobId: string };

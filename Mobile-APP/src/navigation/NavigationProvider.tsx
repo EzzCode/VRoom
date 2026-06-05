@@ -9,6 +9,7 @@ import ARViewScreen from '../features/ar/ARViewScreen';
 import ExportScreen from '../features/export/ExportScreen';
 import ReconstructionStatusScreen from '../features/export/ReconstructionStatusScreen';
 import CoverageDemoScreen from '../features/coverage/CoverageDemoScreen';
+import SavedLayoutsScreen from '../features/home/SavedLayoutsScreen';
 import { RootStackParamList } from './types';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -44,6 +45,7 @@ export default function NavigationProvider() {
         }}
       >
         <Stack.Screen name="Home" component={HomeScreen} />
+        <Stack.Screen name="SavedLayouts" component={SavedLayoutsScreen} />
         <Stack.Screen name="Capture" component={CaptureScreen} />
         <Stack.Screen name="MeshGallery" component={MeshGallery} />
         <Stack.Screen

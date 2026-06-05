@@ -8,6 +8,7 @@ import { MeshInfo } from '../../shared/core/types';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../navigation/types';
 import type { PlacedMesh } from './arTypes';
+import { saveLayout, RoomLayout } from '../../services/mesh/layoutStorage';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ARView'>;
 
@@ -33,36 +34,51 @@ export default function ARViewScreen({ navigation, route }: Props) {
   const [resetCounter, setResetCounter] = useState(0);
   const [reticleVisible, setReticleVisible] = useState(false);
   const [availableMeshes, setAvailableMeshes] = useState<MeshInfo[]>([]);
+  const [initialPositions, setInitialPositions] = useState<Record<string, [number, number, number]>>({});
 
-  // Build initial PlacedMesh synchronously from route params
-  const initialMesh = useMemo<PlacedMesh>(() => {
-    const config = getMeshSource({
+  const meshInfo: MeshInfo | null = useMemo(() => {
+    if (!meshId || !meshName || !meshType || !meshUri) return null;
+    return {
       id: meshId,
       name: meshName,
       format: meshType,
       size: 0,
       uri: meshUri,
-      isBundled,
-    } as MeshInfo);
+      isBundled: !!isBundled,
+    };
+  }, [meshId, meshName, meshType, meshUri, isBundled]);
+
+  // Build initial PlacedMesh synchronously from route params
+  const initialMesh = useMemo<PlacedMesh | null>(() => {
+    if (!meshInfo) return null;
+    const config = getMeshSource(meshInfo);
     return {
-      id: meshId,
+      id: meshId!,
+      meshInfo,
       meshSource: config.source,
-      meshType,
-      meshName,
+      meshType: meshType!,
+      meshName: meshName!,
       rotation: [0, 0, 0],
       scale: [0.2, 0.2, 0.2],
       isPlaced: false,
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // only once on mount
+  }, [meshInfo]); // only once on mount
 
-  const [meshes, setMeshes] = useState<PlacedMesh[]>([initialMesh]);
-  const [activeMeshId, setActiveMeshId] = useState<string | null>(meshId);
+  const [meshes, setMeshes] = useState<PlacedMesh[]>(initialMesh ? [initialMesh] : []);
+  const [activeMeshId, setActiveMeshId] = useState<string | null>(initialMesh ? meshId! : null);
 
   // Per-mesh rotation accumulation — keyed by mesh id, avoids re-creating PanResponder
-  const meshRotationRefs = useRef<Record<string, [number, number, number]>>({
-    [meshId]: [0, 0, 0],
-  });
+  const meshRotationRefs = useRef<Record<string, [number, number, number]>>(
+    initialMesh ? { [meshId!]: [0, 0, 0] } : {}
+  );
+
+  // Track positions to save layout without forcing re-renders
+  const meshPositionsRef = useRef<Record<string, [number, number, number]>>({});
+
+  // Layouts
+  // Ghost Image Alignment
+  const [aligningLayout, setAligningLayout] = useState<RoomLayout | null>(null);
 
   // Derived state
   const hasUnplacedMesh = meshes.some((m) => !m.isPlaced);
@@ -74,6 +90,12 @@ export default function ARViewScreen({ navigation, route }: Props) {
     getAvailableMeshes()
       .then(setAvailableMeshes)
       .catch(() => {});
+      
+    // If a layout was passed via route params, load it on mount
+    if (route.params.layout) {
+      handleLoadLayout(route.params.layout);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Refs so stable PanResponder closures can read fresh values
@@ -152,8 +174,21 @@ export default function ARViewScreen({ navigation, route }: Props) {
   }, []);
 
   const handleReset = useCallback(() => {
+    if (!initialMesh) {
+      setMeshes([]);
+      setActiveMeshId(null);
+      meshRotationRefs.current = {};
+      meshPositionsRef.current = {};
+      setInitialPositions({});
+      setInteractionMode('select');
+      setReticleVisible(false);
+      setResetCounter((c) => c + 1);
+      return;
+    }
     // Reset to just the original mesh, unplaced
-    meshRotationRefs.current = { [meshId]: [0, 0, 0] };
+    meshRotationRefs.current = { [initialMesh.id]: [0, 0, 0] };
+    meshPositionsRef.current = {};
+    setInitialPositions({});
     const freshMesh: PlacedMesh = {
       ...initialMesh,
       rotation: [0, 0, 0],
@@ -161,11 +196,11 @@ export default function ARViewScreen({ navigation, route }: Props) {
       isPlaced: false,
     };
     setMeshes([freshMesh]);
-    setActiveMeshId(meshId);
+    setActiveMeshId(initialMesh.id);
     setInteractionMode('place');
     setReticleVisible(false);
     setResetCounter((c) => c + 1);
-  }, [initialMesh, meshId]);
+  }, [initialMesh]);
 
   const handleScaleChange = useCallback((scale: number) => {
     const id = activeMeshIdRef.current;
@@ -185,6 +220,14 @@ export default function ARViewScreen({ navigation, route }: Props) {
     setActiveMeshId(id);
     setInteractionMode('move-floor');
     setReticleVisible(false);
+  }, []);
+
+  const handleMeshPlacedExt = useCallback((id: string, position: [number, number, number]) => {
+    meshPositionsRef.current[id] = position;
+  }, []);
+
+  const handleMeshMoved = useCallback((id: string, position: [number, number, number]) => {
+    meshPositionsRef.current[id] = position;
   }, []);
 
   /** Called by scene in Select mode when user taps a placed mesh */
@@ -215,6 +258,7 @@ export default function ARViewScreen({ navigation, route }: Props) {
     const newId = `${prepared.id}-${Date.now()}`;
     const newMesh: PlacedMesh = {
       id: newId,
+      meshInfo: prepared,
       meshSource: config.source,
       meshType: prepared.format as 'GLB' | 'OBJ',
       meshName: prepared.name,
@@ -226,6 +270,136 @@ export default function ARViewScreen({ navigation, route }: Props) {
     setMeshes((prev) => [...prev, newMesh]);
     setActiveMeshId(newId);
     setInteractionMode('place');
+  }, []);
+
+  const handleSaveLayout = useCallback(async (name: string) => {
+    const layoutMeshes = meshes.filter(m => m.isPlaced).map(m => ({
+      meshInfo: m.meshInfo,
+      position: meshPositionsRef.current[m.id] ?? [0, 0, -1],
+      rotation: meshRotationRefs.current[m.id] ?? [0, 0, 0],
+      scale: m.scale,
+    }));
+
+    if (layoutMeshes.length === 0) {
+      Alert.alert('No meshes placed', 'Place at least one mesh to save a layout.');
+      return;
+    }
+
+    let screenshotUri: string | undefined;
+    
+    // Briefly hide UI to take a clean screenshot of the room
+    setInteractionMode('select');
+    
+    try {
+      const nav = arNavigatorRef.current as any;
+      if (nav && nav._takeScreenshot) {
+        // give scene a tiny moment to hide reticle/UI
+        await new Promise(r => setTimeout(r, 100));
+        const res = await nav._takeScreenshot(`layout_${Date.now()}`, false);
+        if (res?.success && res.url) {
+          // ViroReact returns a direct file:// URL to the cached screenshot
+          // Using it directly avoids ExponentFileSystem.moveAsync rejections
+          // Ensure it starts with file:// for the Image component
+          screenshotUri = res.url.startsWith('file://') ? res.url : `file://${res.url}`;
+        }
+      }
+    } catch (e) {
+      console.warn('Ghost screenshot failed:', e);
+    }
+
+    const layout: RoomLayout = {
+      id: `layout_${Date.now()}`,
+      name: name || `Layout ${new Date().toLocaleTimeString()}`,
+      createdAt: Date.now(),
+      meshes: layoutMeshes,
+      screenshotUri,
+    };
+
+    try {
+      await saveLayout(layout);
+      if (screenshotUri) {
+        Alert.alert('Saved', 'Room layout and ghost image saved successfully.');
+      } else {
+        Alert.alert('Saved', 'Room layout saved, but ghost image capture failed.');
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Failed to save room layout.');
+    }
+  }, [meshes]);
+
+  const executeLoadLayout = useCallback(async (layout: RoomLayout) => {
+    try {
+      const newMeshes: PlacedMesh[] = [];
+      const newPositions: Record<string, [number, number, number]> = {};
+      
+      meshRotationRefs.current = {};
+      meshPositionsRef.current = {};
+
+      for (let i = 0; i < layout.meshes.length; i++) {
+        const item = layout.meshes[i];
+        if (!item) continue;
+        let prepared = item.meshInfo;
+        try {
+          prepared = await prepareMeshForViro(item.meshInfo);
+        } catch (e) {
+          console.warn('prepareMeshForViro failed during load, using local URI:', e);
+        }
+
+        const config = getMeshSource(prepared);
+        const newId = `${prepared.id}-${i}`;
+        
+        newMeshes.push({
+          id: newId,
+          meshInfo: prepared,
+          meshSource: config.source,
+          meshType: prepared.format as 'GLB' | 'OBJ',
+          meshName: prepared.name,
+          rotation: item.rotation,
+          scale: item.scale,
+          isPlaced: true,
+        });
+
+        meshRotationRefs.current[newId] = item.rotation;
+        meshPositionsRef.current[newId] = item.position;
+        newPositions[newId] = item.position;
+      }
+
+      setInitialPositions(newPositions);
+      setMeshes(newMeshes);
+      setActiveMeshId(newMeshes[0]?.id ?? null);
+      setInteractionMode('select');
+      setResetCounter((c) => c + 1); // Not really needed if we restart AR session, but good to keep
+    } catch (e) {
+      console.warn('Failed to load layout:', e);
+      Alert.alert('Error', 'Could not load the saved layout.');
+    }
+  }, []);
+
+  const handleLoadLayout = useCallback((layout: RoomLayout) => {
+    if (layout.screenshotUri) {
+      setAligningLayout(layout);
+    } else {
+      // Legacy layouts without a screenshot
+      executeLoadLayout(layout);
+    }
+  }, [executeLoadLayout]);
+
+  const confirmAlignment = useCallback(() => {
+    if (aligningLayout) {
+      // Instead of completely unmounting the Navigator (which crashes ViroReact),
+      // we reset the AR session tracking. This clears anchors and makes [0,0,0] the current camera position.
+      const nav = arNavigatorRef.current as any;
+      if (nav && nav.resetARSession) {
+        nav.resetARSession(true, true);
+      }
+      
+      executeLoadLayout(aligningLayout);
+      setAligningLayout(null);
+    }
+  }, [aligningLayout, executeLoadLayout]);
+
+  const cancelAlignment = useCallback(() => {
+    setAligningLayout(null);
   }, []);
 
   return (
@@ -243,8 +417,11 @@ export default function ARViewScreen({ navigation, route }: Props) {
           meshes,
           activeMeshId,
           interactionMode,
+          initialPositions,
           onTrackingChanged: handleTrackingChanged,
           onMeshPlaced: handleMeshPlaced,
+          onMeshPlacedExt: handleMeshPlacedExt,
+          onMeshMoved: handleMeshMoved,
           onMeshSelected: handleMeshSelected,
           onMeshLoading: handleMeshLoading,
           onReticleVisible: handleReticleVisible,
@@ -264,7 +441,7 @@ export default function ARViewScreen({ navigation, route }: Props) {
         onBack={() => navigation.goBack()}
         onScreenshot={handleScreenshot}
         onReset={handleReset}
-        activeMeshName={activeMesh?.meshName ?? meshName}
+        activeMeshName={activeMesh?.meshName ?? meshName ?? 'AR Scene'}
         interactionMode={interactionMode}
         setInteractionMode={setInteractionMode}
         trackingState={trackingState}
@@ -276,6 +453,11 @@ export default function ARViewScreen({ navigation, route }: Props) {
         onScaleChange={handleScaleChange}
         availableMeshes={availableMeshes}
         onAddMesh={handleAddMesh}
+        onSaveLayout={handleSaveLayout}
+        onLoadLayout={handleLoadLayout}
+        aligningLayout={aligningLayout ?? undefined}
+        onConfirmAlignment={confirmAlignment}
+        onCancelAlignment={cancelAlignment}
       />
     </View>
   );
