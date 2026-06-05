@@ -136,10 +136,10 @@ class _RasterizerFirstPass(torch.autograd.Function):
         ctx,
         grad_rendered_color_feat,  # Image rendering loss
         grad_rendered_aux,  # Aux outputs gradients
-        grad_projected_centers_acc,  # None (doesn't carry gradients but was a fwd pass output)
+        grad_projected_centers_acc,  # Accumulated grads from earlier rendering passes (if any)
         dumm_grad_asymmetric_radii,  # None
-        grad_splat2pix_mats_acc,  # Carries accumulated gradients from rendering passes
-        grad_normal_opacity_acc,  # Carries accumulated gradients from rendering passes
+        grad_splat2pix_mats_acc,  # Accumulated grads from earlier rendering passes (if any)
+        grad_normal_opacity_acc,  # Accumulated grads from earlier rendering passes (if any)
         dumm_grad_sorted_indices,  # None
         dumm_grad_tile_ranges,  # None
         dumm_grad_contrib_state,  # None
@@ -204,6 +204,7 @@ class _RasterizerFirstPass(torch.autograd.Function):
         ) = _C.rasterize_surfels_bwd_render(*args_render)
 
         # Accumulate last rendering's pass gradients manually
+        # If this was a singular pass then the accumulators would be None
         if grad_splat2pix_mats_acc is not None:
             grad_splat2pix_mats = grad_splat2pix_mats + grad_splat2pix_mats_acc
 
