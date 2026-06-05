@@ -158,5 +158,5 @@ The repository includes a mobile application located in the `Mobile-APP/` direct
 ```bash
 cd Mobile-APP
 npm install
-npx expo start
+npx expo run:android
 ```
