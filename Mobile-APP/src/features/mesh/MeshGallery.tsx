@@ -5,9 +5,9 @@ import { Header, MeshCard, Button } from '../../shared/components';
 import {
   getAvailableMeshes,
   importMeshFromFilePicker,
+  deleteImportedMesh,
   formatFileSize,
   prepareMeshForViro,
-  deleteImportedMesh,
 } from '../../services/mesh/meshStorage';
 import { MeshInfo } from '../../shared/core/types';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -43,6 +43,10 @@ export default function MeshGallery({ navigation }: Props) {
 
   const handleMeshPress = useCallback(
     async (mesh: MeshInfo) => {
+      if (mesh.format === 'PLY') {
+        Alert.alert('Format Not Supported', 'PLY files cannot be viewed in AR. Convert to GLB first.', [{ text: 'OK' }]);
+        return;
+      }
       let prepared = mesh;
       try {
         prepared = await prepareMeshForViro(mesh);
@@ -53,7 +57,7 @@ export default function MeshGallery({ navigation }: Props) {
         meshId: prepared.id,
         meshName: prepared.name,
         meshUri: prepared.uri,
-        meshType: prepared.format,
+        meshType: prepared.format as 'GLB' | 'OBJ',
         isBundled: prepared.isBundled,
       });
     },

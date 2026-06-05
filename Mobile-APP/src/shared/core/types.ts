@@ -56,7 +56,7 @@ export interface VoxelData {
 export interface MeshInfo {
   id: string;
   name: string;
-  format: 'GLB' | 'OBJ';
+  format: 'GLB' | 'OBJ' | 'PLY';
   size: number;
   uri: string;
   thumbnailUri?: string;
