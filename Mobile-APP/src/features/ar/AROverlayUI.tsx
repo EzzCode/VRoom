@@ -1,45 +1,75 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import React, { useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ActivityIndicator,
+  Modal,
+  FlatList,
+  SafeAreaView,
+} from 'react-native';
 import { useTheme } from '../../shared/theme';
 import { IconButton, TrackingIndicator } from '../../shared/components';
+import { MeshInfo } from '../../shared/core/types';
 
-type InteractionMode = 'place' | 'move-floor' | 'move-lift' | 'rotate-horiz' | 'rotate-vert' | 'rotate-roll' | 'scale';
+export type InteractionMode =
+  | 'select'
+  | 'place'
+  | 'move-floor'
+  | 'move-lift'
+  | 'rotate-horiz'
+  | 'rotate-vert'
+  | 'rotate-roll'
+  | 'scale';
+
 type TrackingState = 'unavailable' | 'limited' | 'normal';
 
 interface AROverlayUIProps {
   onBack: () => void;
   onScreenshot: () => void;
   onReset: () => void;
-  meshName: string;
+  /** Name of the currently active (selected) mesh */
+  activeMeshName: string;
   interactionMode: InteractionMode;
   setInteractionMode: (mode: InteractionMode) => void;
   trackingState: TrackingState;
-  isMeshPlaced: boolean;
+  /** At least one mesh has been placed in the scene */
+  anyMeshPlaced: boolean;
+  /** There is currently a mesh waiting to be placed */
+  hasUnplacedMesh: boolean;
   isMeshLoading: boolean;
   reticleVisible: boolean;
   currentScale: number;
   onScaleChange: (scale: number) => void;
+  /** All meshes available in the library (PLY filtered out by parent) */
+  availableMeshes: MeshInfo[];
+  onAddMesh: (mesh: MeshInfo) => void;
 }
-
 
 export default function AROverlayUI({
   onBack,
   onScreenshot,
   onReset,
-  meshName,
+  activeMeshName,
   interactionMode,
   setInteractionMode,
   trackingState,
-  isMeshPlaced,
+  anyMeshPlaced,
+  hasUnplacedMesh,
   isMeshLoading,
   reticleVisible,
   currentScale,
   onScaleChange,
+  availableMeshes,
+  onAddMesh,
 }: AROverlayUIProps) {
   const { theme } = useTheme();
+  const [showMeshPicker, setShowMeshPicker] = useState(false);
 
+  // Main mode bar — Place is auto-set, not a button
   const modes: { key: InteractionMode; label: string }[] = [
-    { key: 'place', label: 'Place' },
+    { key: 'select', label: 'Select' },
     { key: 'move-floor', label: 'Move' },
     { key: 'rotate-horiz', label: 'Rotate' },
     { key: 'scale', label: 'Scale' },
@@ -61,16 +91,20 @@ export default function AROverlayUI({
     interactionMode === 'rotate-horiz' ||
     interactionMode === 'rotate-vert' ||
     interactionMode === 'rotate-roll';
-  // Highlight the correct main button
-  const effectiveModeKey = isMoveActive
+
+  // Which main bar button to highlight
+  const effectiveModeKey: InteractionMode = isMoveActive
     ? 'move-floor'
     : isRotateActive
       ? 'rotate-horiz'
       : interactionMode;
 
+  // AR-compatible meshes for the picker (PLY cannot be displayed)
+  const arCompatibleMeshes = availableMeshes.filter((m) => m.format !== 'PLY');
+
   return (
     <View style={styles.container} pointerEvents="box-none">
-      {/* Top Bar */}
+      {/* ── Top Bar ─────────────────────────────────────────────────────────── */}
       <View
         style={[
           styles.topBar,
@@ -93,14 +127,14 @@ export default function AROverlayUI({
               }}
               numberOfLines={1}
             >
-              {meshName}
+              {activeMeshName}
             </Text>
           </View>
           <TrackingIndicator state={trackingState} size={12} />
         </View>
       </View>
 
-      {/* Tracking guidance */}
+      {/* ── Tracking banners ────────────────────────────────────────────────── */}
       {trackingState === 'unavailable' && (
         <View
           style={[
@@ -159,7 +193,7 @@ export default function AROverlayUI({
         </View>
       )}
 
-      {/* Loading overlay */}
+      {/* ── Loading overlay ──────────────────────────────────────────────────── */}
       {isMeshLoading && (
         <View style={styles.loadingOverlay} pointerEvents="none">
           <View
@@ -186,8 +220,8 @@ export default function AROverlayUI({
         </View>
       )}
 
-      {/* Placement guidance */}
-      {!isMeshPlaced && trackingState === 'normal' && (
+      {/* ── Placement guidance ───────────────────────────────────────────────── */}
+      {hasUnplacedMesh && trackingState === 'normal' && (
         <View style={styles.tooltip} pointerEvents="none">
           <View
             style={[
@@ -208,15 +242,15 @@ export default function AROverlayUI({
               }}
             >
               {reticleVisible
-                ? 'Tap the target to place your object'
+                ? `Tap to place "${activeMeshName}"`
                 : 'Move closer to a flat surface'}
             </Text>
           </View>
         </View>
       )}
 
-      {/* Mode selector */}
-      {isMeshPlaced && (
+      {/* ── Mode selector (shown once at least one mesh is placed) ──────────── */}
+      {anyMeshPlaced && (
         <View style={styles.modeBar} pointerEvents="box-none">
           {/* Move sub-bar */}
           {isMoveActive && (
@@ -250,7 +284,8 @@ export default function AROverlayUI({
                 >
                   <Text
                     style={{
-                      color: interactionMode === sub.key ? '#FFFFFF' : theme.colors.textSecondary,
+                      color:
+                        interactionMode === sub.key ? '#FFFFFF' : theme.colors.textSecondary,
                       fontSize: theme.typography.caption.fontSize,
                       fontWeight: interactionMode === sub.key ? '700' : '400',
                     }}
@@ -294,7 +329,8 @@ export default function AROverlayUI({
                 >
                   <Text
                     style={{
-                      color: interactionMode === sub.key ? '#FFFFFF' : theme.colors.textSecondary,
+                      color:
+                        interactionMode === sub.key ? '#FFFFFF' : theme.colors.textSecondary,
                       fontSize: theme.typography.caption.fontSize,
                       fontWeight: interactionMode === sub.key ? '700' : '400',
                     }}
@@ -308,21 +344,38 @@ export default function AROverlayUI({
 
           {/* Scale +/- buttons */}
           {interactionMode === 'scale' && (
-            <View style={[styles.scalePill, { backgroundColor: theme.colors.overlay, borderRadius: theme.radii.xl }]}>
+            <View
+              style={[
+                styles.scalePill,
+                { backgroundColor: theme.colors.overlay, borderRadius: theme.radii.xl },
+              ]}
+            >
               <TouchableOpacity
                 style={[styles.scaleBtn, { backgroundColor: theme.colors.primary }]}
                 onPress={() => onScaleChange(Math.max(0.05, currentScale / 1.1))}
               >
-                <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>−</Text>
+                <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>
+                  −
+                </Text>
               </TouchableOpacity>
-              <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '600', minWidth: 52, textAlign: 'center' }}>
+              <Text
+                style={{
+                  color: '#FFFFFF',
+                  fontSize: 13,
+                  fontWeight: '600',
+                  minWidth: 52,
+                  textAlign: 'center',
+                }}
+              >
                 {currentScale.toFixed(2)}×
               </Text>
               <TouchableOpacity
                 style={[styles.scaleBtn, { backgroundColor: theme.colors.primary }]}
                 onPress={() => onScaleChange(Math.min(3.0, currentScale * 1.1))}
               >
-                <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>+</Text>
+                <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>
+                  +
+                </Text>
               </TouchableOpacity>
             </View>
           )}
@@ -357,7 +410,8 @@ export default function AROverlayUI({
               >
                 <Text
                   style={{
-                    color: effectiveModeKey === mode.key ? '#FFFFFF' : theme.colors.textSecondary,
+                    color:
+                      effectiveModeKey === mode.key ? '#FFFFFF' : theme.colors.textSecondary,
                     fontSize: theme.typography.caption.fontSize,
                     fontWeight: effectiveModeKey === mode.key ? '700' : '400',
                   }}
@@ -370,7 +424,7 @@ export default function AROverlayUI({
         </View>
       )}
 
-      {/* Bottom bar */}
+      {/* ── Bottom bar ──────────────────────────────────────────────────────── */}
       <View
         style={[
           styles.bottomBar,
@@ -382,10 +436,173 @@ export default function AROverlayUI({
         pointerEvents="box-none"
       >
         <IconButton icon="camera-outline" onPress={onScreenshot} color="#FFFFFF" size="lg" />
-        {isMeshPlaced && (
+
+        {/* Add Object button — always visible so user can add more */}
+        <TouchableOpacity
+          style={[
+            styles.addButton,
+            { backgroundColor: theme.colors.primary, borderRadius: theme.radii.xl },
+          ]}
+          onPress={() => setShowMeshPicker(true)}
+        >
+          <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>
+            +
+          </Text>
+          <Text
+            style={{
+              color: '#FFFFFF',
+              fontSize: theme.typography.caption.fontSize,
+              fontWeight: '600',
+              marginLeft: 4,
+            }}
+          >
+            Add Object
+          </Text>
+        </TouchableOpacity>
+
+        {anyMeshPlaced && (
           <IconButton icon="refresh-outline" onPress={onReset} color="#FFFFFF" size="lg" />
         )}
       </View>
+
+      {/* ── Mesh Picker Modal ────────────────────────────────────────────────── */}
+      <Modal
+        visible={showMeshPicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowMeshPicker(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowMeshPicker(false)}
+        />
+        <SafeAreaView style={styles.modalSheet}>
+          <View
+            style={[
+              styles.modalContent,
+              { backgroundColor: theme.colors.surface },
+            ]}
+          >
+            {/* Handle bar */}
+            <View
+              style={[styles.modalHandle, { backgroundColor: theme.colors.textTertiary }]}
+            />
+
+            <Text
+              style={{
+                color: theme.colors.textPrimary,
+                fontSize: theme.typography.h4.fontSize,
+                fontWeight: '700',
+                marginBottom: theme.spacing.md,
+                paddingHorizontal: theme.spacing.lg,
+              }}
+            >
+              Add Object
+            </Text>
+
+            {arCompatibleMeshes.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text
+                  style={{
+                    color: theme.colors.textTertiary,
+                    fontSize: theme.typography.body.fontSize,
+                    textAlign: 'center',
+                    paddingHorizontal: theme.spacing.xl,
+                  }}
+                >
+                  No objects in your library.{'\n'}Import a .glb or .obj file from the Mesh
+                  Gallery.
+                </Text>
+              </View>
+            ) : (
+              <FlatList
+                data={arCompatibleMeshes}
+                keyExtractor={(item) => item.id}
+                style={{ maxHeight: 320 }}
+                contentContainerStyle={{ paddingHorizontal: theme.spacing.lg }}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={[
+                      styles.meshPickerItem,
+                      {
+                        borderBottomColor: theme.colors.border,
+                      },
+                    ]}
+                    onPress={() => {
+                      setShowMeshPicker(false);
+                      onAddMesh(item);
+                    }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{
+                          color: theme.colors.textPrimary,
+                          fontSize: theme.typography.body.fontSize,
+                          fontWeight: '600',
+                        }}
+                        numberOfLines={1}
+                      >
+                        {item.name}
+                      </Text>
+                      <Text
+                        style={{
+                          color: theme.colors.textSecondary,
+                          fontSize: theme.typography.caption.fontSize,
+                          marginTop: 2,
+                        }}
+                      >
+                        {item.format}
+                      </Text>
+                    </View>
+                    <View
+                      style={[
+                        styles.formatBadge,
+                        { backgroundColor: theme.colors.primary + '22' },
+                      ]}
+                    >
+                      <Text
+                        style={{
+                          color: theme.colors.primary,
+                          fontSize: 11,
+                          fontWeight: '700',
+                        }}
+                      >
+                        {item.format}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                )}
+              />
+            )}
+
+            <TouchableOpacity
+              style={[
+                styles.cancelButton,
+                {
+                  marginHorizontal: theme.spacing.lg,
+                  marginTop: theme.spacing.md,
+                  marginBottom: theme.spacing.sm,
+                  borderRadius: theme.radii.lg,
+                  backgroundColor: theme.colors.errorBackground ?? 'rgba(255,80,80,0.12)',
+                },
+              ]}
+              onPress={() => setShowMeshPicker(false)}
+            >
+              <Text
+                style={{
+                  color: theme.colors.error,
+                  fontSize: theme.typography.body.fontSize,
+                  fontWeight: '600',
+                  textAlign: 'center',
+                }}
+              >
+                Cancel
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
     </View>
   );
 }
@@ -444,6 +661,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  addButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
   scalePill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -458,5 +681,45 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  // Modal
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  modalSheet: {
+    backgroundColor: 'transparent',
+  },
+  modalContent: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 12,
+    paddingBottom: 8,
+  },
+  modalHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  emptyState: {
+    paddingVertical: 40,
+    alignItems: 'center',
+  },
+  meshPickerItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  formatBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  cancelButton: {
+    paddingVertical: 14,
   },
 });
