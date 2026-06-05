@@ -106,6 +106,44 @@ export default function HomeScreen({ navigation }: Props) {
             </View>
           </View>
         </Card>
+
+        <Card
+          onPress={() => navigation.navigate('CoverageDemo')}
+          style={{ borderLeftWidth: 4, borderLeftColor: theme.colors.warning }}
+        >
+          <View style={[styles.actionIconRow, { gap: theme.spacing.md }]}>
+            <View
+              style={[
+                styles.iconCircle,
+                {
+                  backgroundColor: theme.colors.warning + '20',
+                  borderRadius: theme.radii.md,
+                },
+              ]}
+            >
+              <Text style={{ fontSize: 24 }}>🗺️</Text>
+            </View>
+            <View style={styles.actionText}>
+              <Text
+                style={{
+                  color: theme.colors.textPrimary,
+                  fontSize: theme.typography.h4.fontSize,
+                  fontWeight: theme.typography.h4.fontWeight,
+                }}
+              >
+                Coverage Demo
+              </Text>
+              <Text
+                style={{
+                  color: theme.colors.textTertiary,
+                  fontSize: theme.typography.caption.fontSize,
+                }}
+              >
+                Visualise scan coverage as voxels in AR
+              </Text>
+            </View>
+          </View>
+        </Card>
       </View>
     </View>
   );

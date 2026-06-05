@@ -7,7 +7,7 @@ import Badge from './Badge';
 
 interface MeshCardProps {
   name: string;
-  format: 'GLB' | 'OBJ';
+  format: 'GLB' | 'OBJ' | 'PLY';
   size: string;
   onPress: () => void;
   onDelete?: () => void;

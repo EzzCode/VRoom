@@ -9,6 +9,7 @@ import {
 import { useRunOnJS } from 'react-native-worklets-core';
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import { processBlur } from './gates/BlurGate';
+import { useDeviceMotionPose } from './hooks/useDeviceMotionPose';
 import { CAPTURE_CONFIG } from './config/captureConfig';
 import { saveCapturedPhoto } from './services/captureStorage';
 import { useSession, SessionProvider } from '../../providers/SessionProvider';
@@ -45,17 +46,25 @@ function CaptureScreenInner({ navigation }: Props) {
 
   const captureIntervalMs = 1200;
 
-  const { isRecording, startSession, stopSession, keyframes, addKeyframe, extractor, currentPose } =
+  const { isRecording, startSession, stopSession, keyframes, addKeyframe, extractor, currentPose, setCurrentPose, coveragePercent } =
     useSession();
+
+  // Feed phone IMU into SessionProvider so AngleGate has rotation data.
+  useDeviceMotionPose({ onPose: setCurrentPose, enabled: isRecording });
 
   const isRecordingRef = useRef(false);
   const isBlurryRef = useRef(false);
   const blurScoreRef = useRef(0);
+  const currentPoseRef = useRef(currentPose);
+  useEffect(() => {
+    currentPoseRef.current = currentPose;
+  }, [currentPose]);
 
   const handleCapture = useCallback(async () => {
     if (!camera.current || !isRecordingRef.current) return;
 
-    const { shouldCapture, results } = extractor.evaluate(currentPose);
+    const pose = currentPoseRef.current;
+    const { shouldCapture, results } = extractor.evaluate(pose);
 
     if (!shouldCapture) {
       const failed = results.find((r) => !r.result.passed);
@@ -71,7 +80,7 @@ function CaptureScreenInner({ navigation }: Props) {
 
       addKeyframe({
         imagePath: savedPath,
-        pose: currentPose ?? {
+        pose: pose ?? {
           position: [0, 0, 0],
           rotation: [0, 0, 0],
           forward: [0, 0, -1],
@@ -84,7 +93,7 @@ function CaptureScreenInner({ navigation }: Props) {
     } catch (e) {
       console.error('Failed to save frame:', e);
     }
-  }, [extractor, currentPose, addKeyframe, keyframes.length]);
+  }, [extractor, addKeyframe, keyframes.length]);
 
   useEffect(() => {
     if (!isRecording) {
@@ -172,6 +181,10 @@ function CaptureScreenInner({ navigation }: Props) {
     if (isRecording) {
       stopSession();
       isRecordingRef.current = false;
+      // Jump to summary so the user can review + upload.
+      if (keyframes.length > 0) {
+        navigation.navigate('Export');
+      }
     } else {
       startSession();
       isRecordingRef.current = true;
@@ -244,6 +257,36 @@ function CaptureScreenInner({ navigation }: Props) {
             style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
           >
             {blurScore.toFixed(0)}
+          </Text>
+        </View>
+
+        <View
+          style={[
+            styles.statsBar,
+            {
+              backgroundColor: theme.colors.overlay,
+              borderRadius: theme.radii.md,
+              padding: theme.spacing.md,
+              marginTop: theme.spacing.sm,
+            },
+          ]}
+        >
+          <Text
+            style={{
+              color: theme.colors.textPrimary,
+              fontSize: theme.typography.body.fontSize,
+              fontWeight: '700',
+            }}
+          >
+            Coverage
+          </Text>
+          <View style={{ flex: 1, marginHorizontal: 12 }}>
+            <ProgressBar progress={coveragePercent} color={theme.colors.primary} />
+          </View>
+          <Text
+            style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
+          >
+            {Math.round(coveragePercent * 100)}%
           </Text>
         </View>
 
