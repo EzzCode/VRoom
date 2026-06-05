@@ -9,7 +9,8 @@ The full pipeline is coordinated via `full_pipeline_runner.py`, which executes t
 1. **SfM (Structure-from-Motion)**: Camera pose estimation and sparse point cloud generation via COLMAP.
 2. **Masks & Tracking**: 2D semantic segmentation (using SAM3), object tracking across frames, and 3D voting for label consensus.
 3. **Gaussian Splatting Training (`gstrain`)**: 3D Gaussian Splatting training on the reconstructed scene.
-4. **Mesh Generation**: Extraction of RGB, depth, and semantics to generate final 3D meshes for objects.
+4. **Object Refiner**: Optional Per-object quality enhancement by selecting the best real observation, generating a novel-view orbit with SV3D, and training a dedicated per-object Gaussian model from the combined real and synthetic views.
+5. **Mesh Generation**: Extraction of RGB, depth, and semantics to generate final 3D meshes for objects.
 
 ## Repository Structure
 
@@ -19,6 +20,7 @@ The full pipeline is coordinated via `full_pipeline_runner.py`, which executes t
 - `masks_and_tracking/`: Segmentation and object tracking scripts.
 - `gstrain/`: Gaussian Splatting training module.
 - `mesh_generation/`: Utilities for extracting meshes from the trained model.
+- `object_refiner/`: Per-object Gaussian refinement using SV3D novel-view synthesis.
 - `diff-surfel-rasterization/`: CUDA rasterizer backend.
 - `Mobile-APP/`: React Native (Expo) companion mobile application.
 
@@ -38,6 +40,12 @@ Before building and running the pipeline, ensure you have the following installe
 
 - **CUDA Toolkit**: Required for the CUDA rasterizer and GPU acceleration. Download and install the appropriate CUDA Toolkit version for your system. Ensure that the CUDA binary directory (e.g., `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin` on Windows or `/usr/local/cuda/bin` on Linux) is added to your system's `PATH` environment variable.
 - **COLMAP**: Required for the Structure-from-Motion (SfM) stage. Download the COLMAP binaries or build from source. Ensure the directory containing the `colmap` executable is added to your system's `PATH` so it can be invoked from the command line.
+- **SAM3 / Ultralytics**: Required for the Masks & Tracking stage. The segmentation model weights are downloaded automatically by Ultralytics on first use. Set the `--ultralytics_home` argument (or the `ULTRALYTICS_HOME` environment variable) to a directory with sufficient storage space for the checkpoint cache. A CUDA-capable GPU is strongly recommended.
+- **SV3D (sv3d-diffusers)**: Required for the Object Refiner stage. Clone the `chenguolin/sv3d-diffusers` repository into `external_deps/sv3d-diffusers/` inside the workspace root:
+  ```bash
+  git clone https://github.com/chenguolin/sv3d-diffusers external_deps/sv3d-diffusers
+  ```
+  Model weights are downloaded from Hugging Face on first use. Set the `HF_HOME` environment variable (or update `HF_CACHE_DIR` in `object_refiner/constants.py`) to point to a directory with sufficient storage space.
 
 ### 3. Build the CUDA Rasterizer
 
@@ -109,6 +117,30 @@ If you only want to run the COLMAP reconstruction and semantic labeling, use:
 
 ```bash
 python sfm_label_runner.py --data_path /path/to/scene_folder
+```
+
+### Object Refiner
+
+After full-scene Gaussian training, run the object refiner to produce per-object high-quality Gaussian models. The refiner requires the trained scene model path and the scene output directory:
+
+```bash
+python refine_all_objects.py \
+  --model_path /path/to/training/gs_model/<run_timestamp> \
+  --scene_dir /path/to/scene_output \
+  --iterations 20000
+```
+
+**Key Arguments:**
+- `--model_path`: Path to the trained scene Gaussian model directory.
+- `--scene_dir`: Root output directory of the pipeline run (contains `labeled_output/`, `tracking_output/`, etc.).
+- `--object_ids`: (Optional) Space-separated list of object IDs to refine. Refines all objects if omitted.
+- `--iterations`: Number of training iterations per object.
+- `--reuse_sv3d`: Skip SV3D generation if outputs already exist on disk.
+- `--debug`: Enable visual debugging artifacts.
+
+For a full list of options, run:
+```bash
+python refine_all_objects.py --help
 ```
 
 ### Manual Training (3DOVS)

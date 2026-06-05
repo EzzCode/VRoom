@@ -6,7 +6,7 @@ rewritten object_refiner modules.
 Usage::
 
     python -m object_refiner \\
-        --model_path temp_deps/ObjectGS/outputs/3dovs/2d_crossentropy_loss_01/2026-03-19_04-01-38 \\
+        --model_path external_deps/ObjectGS/outputs/3dovs/2d_crossentropy_loss_01/2026-03-19_04-01-38 \\
         --scene_dir  data/3dovs/bed \\
         --output_root object_refiner/outputs \\
         --object_id  8 \\

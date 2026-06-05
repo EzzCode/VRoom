@@ -10,7 +10,7 @@ Outputs under ``<obj_dir>/debug/scope/``::
 Run standalone::
 
     python -m object_refiner.debug.debug_scope \\
-        --model_path temp_deps/ObjectGS/outputs/3dovs/.../2026-03-19_04-01-38 \\
+    --model_path outputs/3dovs/.../2026-03-19_04-01-38 \\
         --object_id 8 \\
         --output_root object_refiner/outputs
 """

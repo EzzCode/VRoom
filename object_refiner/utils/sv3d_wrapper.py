@@ -29,15 +29,15 @@ def _setup_hf_cache():
 
 def _add_sv3d_to_path():
     for parent in Path(__file__).resolve().parents:
-        candidate = parent / "temp_deps" / "sv3d-diffusers"
+        candidate = parent / "external_deps" / "sv3d-diffusers"
         if candidate.exists() and (candidate / "diffusers_sv3d").exists():
             if str(candidate) not in sys.path:
                 sys.path.insert(0, str(candidate))
             return
     raise RuntimeError(
-        "Could not find temp_deps/sv3d-diffusers/diffusers_sv3d/. "
+        "Could not find external_deps/sv3d-diffusers/diffusers_sv3d/. "
         "Clone https://github.com/chenguolin/sv3d-diffusers into "
-        "<workspace>/temp_deps/sv3d-diffusers/."
+        "<workspace>/external_deps/sv3d-diffusers/."
     )
 
 
