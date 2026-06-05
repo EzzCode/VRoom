@@ -16,6 +16,7 @@ python refine_all_objects.py \\
 Flags
 -----
 --debug       Forward --debug to object_refiner (saves per-step debug artefacts).
+--skip_refine Skip refinement and use existing <output_root>/obj_<ID>/06_model/.
 --skip_mesh   Run refinement only; skip mesh extraction.
 --dry_run     Print commands without executing them.
 """
@@ -166,6 +167,8 @@ def main():
     p.add_argument("--debug", action="store_true",
                    help="Enable object_refiner debug mode (saves per-step artefacts "
                         "and pipeline summary JSON)")
+    p.add_argument("--skip_refine", action="store_true",
+                   help="Skip refinement and use existing 06_model outputs")
 
     # ── Mesh options ──────────────────────────────────────────────────────────
     p.add_argument("--skip_mesh", action="store_true",
@@ -180,6 +183,10 @@ def main():
                    help="Print commands without executing them")
 
     args = p.parse_args()
+
+    if args.skip_refine and args.skip_mesh:
+        print("ERROR: both --skip_refine and --skip_mesh are set; nothing to do.")
+        sys.exit(2)
 
     script_dir = Path(__file__).resolve().parent
 
@@ -243,30 +250,37 @@ def main():
         obj_mesh_dir  = output_root / f"obj_{obj_id}" / "07_mesh"
 
         # ── Step 1: Refinement ────────────────────────────────────────────────
-        refine_cmd = [
-            "python", "-m", "object_refiner",
-            "--model_path",  str(args.model_path),
-            "--scene_dir",   str(args.scene_dir),
-            "--output_root", str(output_root),
-            "--object_id",   str(obj_id),
-            "--iterations",  str(args.iterations),
-        ]
-        if ply_path is not None:
-            refine_cmd += ["--ply_path", str(ply_path)]
-        if tracked_id_map_dir is not None:
-            refine_cmd += ["--tracked_id_map_dir", str(tracked_id_map_dir)]
-        if args.reuse_sv3d:
-            refine_cmd.append("--reuse_sv3d")
-        if args.debug:
-            refine_cmd.append("--debug")
+        if args.skip_refine:
+            print(f"  --skip_refine set, skipping refinement for object {obj_id}.")
+            if not obj_model_dir.exists():
+                print(f"  [ERROR] Missing refined model directory: {obj_model_dir}")
+                failed.append((obj_id, "refinement (skipped but missing 06_model)"))
+                continue
+        else:
+            refine_cmd = [
+                "python", "-m", "object_refiner",
+                "--model_path",  str(args.model_path),
+                "--scene_dir",   str(args.scene_dir),
+                "--output_root", str(output_root),
+                "--object_id",   str(obj_id),
+                "--iterations",  str(args.iterations),
+            ]
+            if ply_path is not None:
+                refine_cmd += ["--ply_path", str(ply_path)]
+            if tracked_id_map_dir is not None:
+                refine_cmd += ["--tracked_id_map_dir", str(tracked_id_map_dir)]
+            if args.reuse_sv3d:
+                refine_cmd.append("--reuse_sv3d")
+            if args.debug:
+                refine_cmd.append("--debug")
 
-        try:
-            _run(f"Refine object {obj_id}", refine_cmd,
-                 conda_env=args.conda_env, dry_run=args.dry_run)
-        except RuntimeError as e:
-            print(f"[ERROR] {e}")
-            failed.append((obj_id, "refinement"))
-            continue  # still try the next object
+            try:
+                _run(f"Refine object {obj_id}", refine_cmd,
+                     conda_env=args.conda_env, dry_run=args.dry_run)
+            except RuntimeError as e:
+                print(f"[ERROR] {e}")
+                failed.append((obj_id, "refinement"))
+                continue  # still try the next object
 
         # ── Step 2: Mesh extraction ───────────────────────────────────────────
         if args.skip_mesh:
