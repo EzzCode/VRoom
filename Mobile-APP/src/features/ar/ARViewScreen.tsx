@@ -76,6 +76,12 @@ export default function ARViewScreen({ navigation, route }: Props) {
   // Track positions to save layout without forcing re-renders
   const meshPositionsRef = useRef<Record<string, [number, number, number]>>({});
 
+  // Track camera pose to calculate layout coordinates relative to camera at save moment
+  const cameraPoseRef = useRef<{position: number[], rotation: number[], forward: number[]} | null>(null);
+  const handleCameraPoseUpdate = useCallback((pose: any) => {
+    cameraPoseRef.current = pose;
+  }, []);
+
   // Layouts
   // Ghost Image Alignment
   const [aligningLayout, setAligningLayout] = useState<RoomLayout | null>(null);
@@ -273,12 +279,58 @@ export default function ARViewScreen({ navigation, route }: Props) {
   }, []);
 
   const handleSaveLayout = useCallback(async (name: string) => {
-    const layoutMeshes = meshes.filter(m => m.isPlaced).map(m => ({
-      meshInfo: m.meshInfo,
-      position: meshPositionsRef.current[m.id] ?? [0, 0, -1],
-      rotation: meshRotationRefs.current[m.id] ?? [0, 0, 0],
-      scale: m.scale,
-    }));
+    const cam = cameraPoseRef.current;
+    
+    // Default to origin looking down -Z if camera pose isn't available
+    let cx = 0, cy = 0, cz = 0;
+    let fx = 0, fz = -1; // Forward vector (projected to XZ)
+    
+    if (cam && cam.position && cam.forward) {
+      cx = cam.position[0] ?? 0;
+      cy = cam.position[1] ?? 0;
+      cz = cam.position[2] ?? 0;
+      
+      const rawFx = cam.forward[0] ?? 0;
+      const rawFz = cam.forward[2] ?? -1;
+      
+      // Normalize forward vector on XZ plane
+      const len = Math.sqrt(rawFx * rawFx + rawFz * rawFz);
+      if (len > 0.001) {
+        fx = rawFx / len;
+        fz = rawFz / len;
+      }
+    }
+
+    // Calculate camera yaw in degrees based on the forward vector
+    // atan2(-fx, -fz) gives 0 when facing [0,0,-1], +90deg when facing [-1,0,0] (Left)
+    const cameraYawDeg = Math.atan2(-fx, -fz) * (180 / Math.PI);
+
+    const layoutMeshes = meshes.filter(m => m.isPlaced).map(m => {
+      const pos = meshPositionsRef.current[m.id] ?? [0, 0, -1];
+      const rot = meshRotationRefs.current[m.id] ?? [0, 0, 0];
+
+      // 1. Get relative vector from camera to object
+      const dx = pos[0] - cx;
+      const dy = pos[1] - cy;
+      const dz = pos[2] - cz;
+
+      // 2. Project onto camera's local axes
+      // Camera's local +X (Right) = [-fz, 0, fx]
+      // Camera's local -Z (Forward) = [fx, 0, fz], so +Z = [-fx, 0, -fz]
+      const local_x = dx * (-fz) + dz * (fx);
+      const local_y = dy;
+      const local_z = dx * (-fx) + dz * (-fz);
+
+      // 3. Subtract camera yaw from object yaw
+      const new_yaw = rot[1] - cameraYawDeg;
+
+      return {
+        meshInfo: m.meshInfo,
+        position: [local_x, local_y, local_z] as [number, number, number],
+        rotation: [rot[0], new_yaw, rot[2]] as [number, number, number],
+        scale: m.scale,
+      };
+    });
 
     if (layoutMeshes.length === 0) {
       Alert.alert('No meshes placed', 'Place at least one mesh to save a layout.');
@@ -418,14 +470,15 @@ export default function ARViewScreen({ navigation, route }: Props) {
           activeMeshId,
           interactionMode,
           initialPositions,
+          resetRequested: resetCounter > 0,
           onTrackingChanged: handleTrackingChanged,
           onMeshPlaced: handleMeshPlaced,
-          onMeshPlacedExt: handleMeshPlacedExt,
-          onMeshMoved: handleMeshMoved,
           onMeshSelected: handleMeshSelected,
           onMeshLoading: handleMeshLoading,
           onReticleVisible: handleReticleVisible,
-          resetRequested: resetCounter,
+          onMeshPlacedExt: handleMeshPlacedExt,
+          onMeshMoved: handleMeshMoved,
+          onCameraPoseUpdate: handleCameraPoseUpdate,
         }}
         style={StyleSheet.absoluteFill}
       />

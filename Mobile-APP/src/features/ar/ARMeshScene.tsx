@@ -41,6 +41,7 @@ export default function ARMeshScene(arSceneProps: any) {
   const onReticleVisible: ((visible: boolean) => void) | undefined = props.onReticleVisible;
   const onMeshPlacedExt: ((id: string, position: [number, number, number]) => void) | undefined = props.onMeshPlacedExt;
   const onMeshMoved: ((id: string, position: [number, number, number]) => void) | undefined = props.onMeshMoved;
+  const onCameraPoseUpdate: ((pose: any) => void) | undefined = props.onCameraPoseUpdate;
 
   // Scene-local positions (keyed by mesh id) — avoids parent re-renders on every drag
   const [positions, setPositions] = useState<Record<string, [number, number, number]>>(props.initialPositions ?? {});
@@ -134,6 +135,9 @@ export default function ARMeshScene(arSceneProps: any) {
       onTrackingUpdated={handleTrackingUpdated}
       onCameraARHitTest={handleCameraARHitTest}
       onClick={handleSceneClick}
+      onCameraTransformUpdate={(e: any) => {
+        if (onCameraPoseUpdate) onCameraPoseUpdate(e.cameraTransform);
+      }}
       anchorDetectionTypes={['PlanesHorizontal', 'PlanesVertical']}
     >
       <ViroAmbientLight color="#FFFFFF" intensity={1000} />
