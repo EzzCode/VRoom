@@ -1,3 +1,4 @@
+#include "ATen/core/TensorBody.h"
 #include "torch/types.h"
 #include "types.cuh"
 #include <cstdint>
@@ -102,36 +103,48 @@ namespace PytorchAllocators
         }
     }; // struct ForwardAllocationContext
 
-    // This struct handles all PyTorch tensor allocations in backward pass.
-    struct BackwardAllocationContext
+    // This struct handles all PyTorch tensor allocations in rendering backward pass.
+    struct RenderBackwardAllocationContext
     {
-        // Intermediate tensor gradients
+        // Output tensor gradients
+        torch::Tensor grad_projected_centers;
+        torch::Tensor grad_splat2pix_mats;
         torch::Tensor grad_normal;
+        torch::Tensor grad_opacity;
+        torch::Tensor grad_colors_feat;
 
+        RenderBackwardAllocationContext(const torch::TensorOptions &base_opts,
+                                        int num_color_feat_channels,
+                                        int surfel_count)
+        {
+            // Allocate output tensors
+            grad_projected_centers = torch::zeros({surfel_count, 2}, base_opts.dtype(torch::kFloat32));
+            grad_splat2pix_mats = torch::zeros({surfel_count, 3, 3}, base_opts.dtype(torch::kFloat32));
+            grad_normal = torch::zeros({surfel_count, 3}, base_opts.dtype(torch::kFloat32));
+            grad_opacity = torch::zeros({surfel_count, 1}, base_opts.dtype(torch::kFloat32));
+            grad_colors_feat = torch::zeros({surfel_count, num_color_feat_channels}, base_opts.dtype(torch::kFloat32));
+        }
+    }; // struct RenderBackwardAllocationContext
+
+    // This struct handles all PyTorch tensor allocations in preprocessing backward pass.
+    struct PreprocessBackwardAllocationContext
+    {
         // Output tensor gradients
         torch::Tensor grad_points_world_space;
         torch::Tensor grad_scale_vecs;
         torch::Tensor grad_quats;
-        torch::Tensor grad_projected_centers;
-        torch::Tensor grad_splat2pix_mats;
-        torch::Tensor grad_opacity;
-        torch::Tensor grad_colors_feat;
+        torch::Tensor grad_mod_projected_centers; // Cloned from original accumulated gradient
 
-        BackwardAllocationContext(const torch::TensorOptions &base_opts, int num_color_feat_channels,
-                                  int surfel_count)
+        PreprocessBackwardAllocationContext(const torch::TensorOptions &base_opts,
+                                            const torch::Tensor &grad_projected_center,
+                                            int surfel_count)
         {
-            // Allocate intermediate tensor
-            grad_normal = torch::zeros({surfel_count, 3}, base_opts.dtype(torch::kFloat32));
-
             // Allocate output tensors
             grad_points_world_space = torch::zeros({surfel_count, 3}, base_opts.dtype(torch::kFloat32));
             grad_scale_vecs = torch::zeros({surfel_count, 2}, base_opts.dtype(torch::kFloat32));
             grad_quats = torch::zeros({surfel_count, 4}, base_opts.dtype(torch::kFloat32));
-            grad_projected_centers = torch::zeros({surfel_count, 2}, base_opts.dtype(torch::kFloat32));
-            grad_splat2pix_mats = torch::zeros({surfel_count, 3, 3}, base_opts.dtype(torch::kFloat32));
-            grad_opacity = torch::zeros({surfel_count, 1}, base_opts.dtype(torch::kFloat32));
-            grad_colors_feat = torch::zeros({surfel_count, num_color_feat_channels}, base_opts.dtype(torch::kFloat32));
+            grad_mod_projected_centers = grad_projected_center.clone();
         }
-    }; // struct BackwardAllocationContext
+    }; // struct PreprocessBackwardAllocationContext
 
 } // namespace PytorchAllocators

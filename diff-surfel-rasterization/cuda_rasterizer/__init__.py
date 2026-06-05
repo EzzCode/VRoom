@@ -136,10 +136,10 @@ class _RasterizerFirstPass(torch.autograd.Function):
         ctx,
         grad_rendered_color_feat,  # Image rendering loss
         grad_rendered_aux,  # Aux outputs gradients
-        dumm_grad_projected_centers,  # None (doesn't carry gradients but was a fwd pass output)
+        grad_projected_centers_acc,  # None (doesn't carry gradients but was a fwd pass output)
         dumm_grad_asymmetric_radii,  # None
-        dumm_grad_splat2pix_mats,  # None
-        dumm_grad_normal_opacity,  # None
+        grad_splat2pix_mats_acc,  # Carries accumulated gradients from rendering passes
+        grad_normal_opacity_acc,  # Carries accumulated gradients from rendering passes
         dumm_grad_sorted_indices,  # None
         dumm_grad_tile_ranges,  # None
         dumm_grad_contrib_state,  # None
@@ -168,15 +168,11 @@ class _RasterizerFirstPass(torch.autograd.Function):
             transmittance_and_moments,
         ) = ctx.saved_tensors
 
-        # Prepare the args for CUDA rasterizer
-        args = (
+        # Perform the last rendering bwd pass
+
+        # 1. Prepare the args for CUDA rasterizer bwd render
+        args_render = (
             # Forward pass saved state
-            points_world_space,
-            scale_vecs,
-            raster_settings.glob_scale_mod,
-            quats,
-            raster_settings.w2cam_mat,
-            raster_settings.w2clip_mat,
             raster_settings.img_W,
             raster_settings.img_H,
             colors_feat,
@@ -184,7 +180,6 @@ class _RasterizerFirstPass(torch.autograd.Function):
             # Saved forward pass buffers
             # Preprocess buffers
             projected_centers,
-            asymmetric_radii,
             splat2pix_mats,
             normal_opacity,
             # Binning buffers
@@ -199,20 +194,65 @@ class _RasterizerFirstPass(torch.autograd.Function):
             raster_settings.debug,
         )
 
+        # 2. Call render bwd
+        (
+            grad_projected_centers,
+            grad_splat2pix_mats,
+            grad_normal,
+            grad_opacity,
+            grad_colors_feat,
+        ) = _C.rasterize_surfels_bwd_render(*args_render)
+
+        # Accumulate last rendering's pass gradients manually
+        if grad_splat2pix_mats_acc is not None:
+            grad_splat2pix_mats = grad_splat2pix_mats + grad_splat2pix_mats_acc
+
+        if grad_normal_opacity_acc is not None:
+            grad_normal = (
+                grad_normal
+                + grad_normal_opacity_acc[:, :3]  # Use only normals gradients
+            )
+            grad_opacity = (
+                grad_opacity
+                + grad_normal_opacity_acc[:, 3:4]  # Use only opacity gradients
+            )
+
+        if grad_projected_centers_acc is not None:
+            grad_projected_centers = grad_projected_centers + grad_projected_centers_acc
+
+        # Prepare the args for CUDA rasterizer bwd preprocess
+        args_preprocess = (
+            # Forward pass saved state
+            points_world_space,
+            scale_vecs,
+            raster_settings.glob_scale_mod,
+            quats,
+            raster_settings.w2cam_mat,
+            raster_settings.w2clip_mat,
+            raster_settings.img_W,
+            raster_settings.img_H,
+            # Saved forward pass buffers
+            # Preprocess buffers
+            asymmetric_radii,
+            splat2pix_mats,
+            # Input gradients
+            grad_normal,
+            grad_projected_centers,
+            grad_splat2pix_mats,
+            raster_settings.debug,
+        )
+
         # Call rasterizer
         (
             grad_points_world_space,
             grad_scale_vecs,
             grad_quats,
-            grad_projected_centers,
-            grad_splat2pix_mats,
-            grad_opacity,
-            grad_colors_feat,
-        ) = _C.rasterize_surfels_bwd(*args)
+            grad_mod_projected_centers,
+        ) = _C.rasterize_surfels_bwd_preprocess(*args_preprocess)
 
         # Ensure that the order of returning outputs is the same
         # as the order of the forward function's inputs.
-        # Regarding the tensor leaf trick, now trick_projected_centers
+        # Regarding the tensor leaf trick, now grad_mod_projected_centers
         # actually has gradients.
         return (
             grad_points_world_space,
@@ -221,7 +261,7 @@ class _RasterizerFirstPass(torch.autograd.Function):
             grad_opacity,
             grad_colors_feat,
             None,  # background
-            grad_projected_centers,  # tensor leaf trick
+            grad_mod_projected_centers,  # tensor leaf trick
             None,  # raster settings
         )
 
@@ -348,14 +388,15 @@ class _RasterizerSubsequent(torch.autograd.Function):
 
         # Call rasterizer
         (
-            grad_points_world_space,
-            grad_scale_vecs,
-            grad_quats,
             grad_projected_centers,
             grad_splat2pix_mats,
+            grad_normal,
             grad_opacity,
             grad_colors_feat,
-        ) = _C.rasterize_surfels_bwd_subsequent(*args)
+        ) = _C.rasterize_surfels_bwd_render(*args)
+
+        # Concat gradients of normals and opacity since they were concatenated in fwd
+        grad_normal_opacity = torch.cat([grad_normal, grad_opacity], dim=-1)
 
         # Ensure that the order of returning outputs is the same
         # as the order of the forward function's inputs.
@@ -363,11 +404,11 @@ class _RasterizerSubsequent(torch.autograd.Function):
         # actually has gradients.
         return (
             grad_colors_feat,
-            # Rest are dummy gradients
-            None,  # background
-            None,  # projected_centers
-            None,  # splat2pix_mats
-            None,  # normal_opacity
+            None,  # background (dummy)
+            grad_projected_centers,  # projected_centers
+            grad_splat2pix_mats,  # splat2pix_mats
+            grad_normal_opacity,  # normal_opacity
+            # Rest are dummies; no grads
             None,  # sorted_surfel_indices
             None,  # tile_ranges
             None,  # contrib_state
@@ -559,7 +600,9 @@ def rasterize_2dgs(
             if backgrounds is not None:
                 bg = backgrounds[cam_id]
                 if bg.shape[0] < channel_count:
-                    bg = torch.cat([bg, torch.zeros(channel_count - bg.shape[0], device=device)])
+                    bg = torch.cat(
+                        [bg, torch.zeros(channel_count - bg.shape[0], device=device)]
+                    )
                 elif bg.shape[0] > channel_count:
                     bg = bg[:channel_count]
             else:

@@ -666,22 +666,22 @@ __forceinline__ __device__ void grad_compute_aabb(
 
 // Backpropagate through the preprocessing steps. 1 surfel per thread.
 __global__ void preprocess_kernel_bwd(
-    const int surfel_count,                        // Surfel / Points count
-    const float3 *__restrict__ points_world_space, // All points (surfels) in world space
-    const float2 *__restrict__ scale_vecs,         // Scale vectors
-    const float glob_scale_mod,                    // Global scale modifier
-    const float4 *__restrict__ quats,              // Quaternions
-    const float *__restrict__ w2cam_mat,           // World to Cam space matrix
-    const float *__restrict__ w2clip_mat,          // World to Clip space matrix
-    const int img_W, const int img_H,              // Image width and height
-    const uint32_t *__restrict__ asymmetric_radii, // Both surfel radii for tighter bounding boxes
-    const float3 *__restrict__ splat2pix_mats,     // Splat to pixel space matrices for each surfel
-    const float3 *__restrict__ grad_normal,        // Gradients of 3D normals (cam space)
-    float3 *__restrict__ grad_points_world_space,  // Computed gradients of points (world space)
-    float2 *__restrict__ grad_scale_vecs,          // Computed gradients of scale vectors
-    float4 *__restrict__ grad_quats,               // Computed gradients of quaternions
-    float2 *__restrict__ grad_projected_centers,   // Computed gradients of projected centers (pix space)
-    float3 *__restrict__ grad_splat2pix_mats       // Computed gradients of splat 2 pixel space matrices
+    const int surfel_count,                          // Surfel / Points count
+    const float3 *__restrict__ points_world_space,   // All points (surfels) in world space
+    const float2 *__restrict__ scale_vecs,           // Scale vectors
+    const float glob_scale_mod,                      // Global scale modifier
+    const float4 *__restrict__ quats,                // Quaternions
+    const float *__restrict__ w2cam_mat,             // World to Cam space matrix
+    const float *__restrict__ w2clip_mat,            // World to Clip space matrix
+    const int img_W, const int img_H,                // Image width and height
+    const uint32_t *__restrict__ asymmetric_radii,   // Both surfel radii for tighter bounding boxes
+    const float3 *__restrict__ splat2pix_mats,       // Splat to pixel space matrices for each surfel
+    const float3 *__restrict__ grad_normal,          // Gradients of 3D normals (cam space)
+    float3 *__restrict__ grad_points_world_space,    // Computed gradients of points (world space)
+    float2 *__restrict__ grad_scale_vecs,            // Computed gradients of scale vectors
+    float4 *__restrict__ grad_quats,                 // Computed gradients of quaternions
+    float2 *__restrict__ grad_mod_projected_centers, // To be modified computed gradients of projected centers (pix space)
+    float3 *__restrict__ grad_splat2pix_mats         // Computed gradients of splat 2 pixel space matrices
 )
 {
     auto surfel_idx = cg::this_grid().thread_rank();
@@ -718,7 +718,7 @@ __global__ void preprocess_kernel_bwd(
         g_splat2pix_mat_base[1].x, g_splat2pix_mat_base[1].y, g_splat2pix_mat_base[1].z,
         g_splat2pix_mat_base[2].x, g_splat2pix_mat_base[2].y, g_splat2pix_mat_base[2].z);
 
-    float2 &grad_projected_center = grad_projected_centers[surfel_idx];
+    float2 &grad_projected_center = grad_mod_projected_centers[surfel_idx];
     if (grad_projected_center.x != 0 || grad_projected_center.y != 0)
     {
         grad_compute_aabb(splat2pix_mat, grad_projected_center, grad_splat2pix_mat);
@@ -779,14 +779,17 @@ void BWD::preprocess(
     const float *w2cam_mat,           // World to Cam space matrix
     const float *w2clip_mat,          // World to Clip space matrix
     const int img_W, const int img_H, // Image width and height
+    // Preprocess buffers
     const uint32_t *asymmetric_radii, // Both surfel radii for tighter bounding boxes
     const float3 *splat2pix_mats,     // Splat to pixel space matrices for each surfel
-    const float3 *grad_normal,        // Gradients of 3D normals (cam space)
-    float3 *grad_points_world_space,  // Computed gradients of points (world space)
-    float2 *grad_scale_vecs,          // Computed gradients of scale vectors
-    float4 *grad_quats,               // Computed gradients of quaternions
-    float2 *grad_projected_centers,   // Computed gradients of projected centers (pix space)
-    float3 *grad_splat2pix_mats       // Computed gradients of splat 2 pixel space matrices
+    // Input Gradients
+    const float3 *grad_normal,       // Gradients of 3D normals (cam space)
+    float3 *grad_points_world_space, // Computed gradients of points (world space)
+    // Output Gradients
+    float2 *grad_scale_vecs,            // Computed gradients of scale vectors
+    float4 *grad_quats,                 // Computed gradients of quaternions
+    float2 *grad_mod_projected_centers, // Computed gradients of projected centers (pix space)
+    float3 *grad_splat2pix_mats         // Computed gradients of splat 2 pixel space matrices
 )
 {
     // Call kernel. 1 surfel per thread.
@@ -798,6 +801,6 @@ void BWD::preprocess(
         img_W, img_H, asymmetric_radii,
         splat2pix_mats,
         grad_normal, grad_points_world_space,
-        grad_scale_vecs, grad_quats, grad_projected_centers,
+        grad_scale_vecs, grad_quats, grad_mod_projected_centers,
         grad_splat2pix_mats);
 }

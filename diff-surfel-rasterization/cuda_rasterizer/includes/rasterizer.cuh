@@ -55,33 +55,23 @@ torch::Tensor rasterize_surfels_fwd_subsequent(
     const bool debug = false                        // Scalar
 );
 
-// Py-CUDA backward first pass bridge function. Note: P is surfel count.
-// Returns:
-// 1. grad_points_world_space:  [P, 3] float32 - Computed gradients of points (world space)
-// 2. grad_scale_vecs:          [P, 2] float32 - Computed gradients of scale vectors
-// 3. grad_quats:               [P, 4] float32 - Computed gradients of quaternions
-// 4. grad_projected_centers:   [P, 2] float32 - Computed gradients of projected centers (pix space)
-// 5. grad_splat2pix_mats:      [P, 3, 3] float32 - Computed gradients of splat 2 pixel space matrices
-// 6. grad_opacity:             [P, 1] float32 - Computed surfel opacity gradients
-// 7. grad_colors_feat:         [P, C] float32 - Computed surfel color gradients
+// Py-CUDA backward rendering kernel bridge function. Note: P is surfel count.
+// Returns: The 2D pixel-space grads to be accumulated before backward preprocessing
+// 1. grad_projected_centers:   [P, 2] float32 - Computed gradients of projected centers (pix space)
+// 2. grad_splat2pix_mats:      [P, 3, 3] float32 - Computed gradients of splat 2 pixel space matrices
+// 3. grad_normal:              [P, 3] float32 - Computed surfel normals gradients concatenated
+// 4. grad_opacity:             [P, 1] float32 - Computed surfel opacity gradients concatenated
+// 5. grad_colors_feat:         [P, C] float32 - Computed surfel color gradients
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor>
-rasterize_surfels_bwd(
+rasterize_surfels_bwd_render(
     // Forward pass saved state
-    const torch::Tensor &points_world_space, // [P, 3] float32
-    const torch::Tensor &scale_vecs,         // [P, 2] float32
-    const float glob_scale_mod,              // Scalar
-    const torch::Tensor &quats,              // [P, 4] float32
-    const torch::Tensor &w2cam_mat,          // [4, 4] float32
-    const torch::Tensor &w2clip_mat,         // [4, 4] float32
-    const int img_W, const int img_H,        // Scalars
-    const torch::Tensor &colors_feat,        // [P, C] float32
-    const torch::Tensor &background,         // [C] float32
+    const int img_W, const int img_H, // Scalars
+    const torch::Tensor &colors_feat, // [P, C] float32
+    const torch::Tensor &background,  // [C] float32
     // Saved forward pass buffers
     // Preprocess buffers
     const torch::Tensor &projected_centers, // [P, 2] float32
-    const torch::Tensor &asymmetric_radii,  // [P] int32
     const torch::Tensor &splat2pix_mats,    // [P, 3, 3] float32
     const torch::Tensor &normal_opacity,    // [P, 4] float32
     // Binning buffers
@@ -96,32 +86,33 @@ rasterize_surfels_bwd(
     const bool debug = false                       // Scalar
 );
 
-// Py-CUDA backward subsequent pass bridge function. Note: P is surfel count.
-// Returns the same tensors as the first pass, however all of them are dummies
-// except grad_colors_feat.
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor, torch::Tensor,
+// Py-CUDA backward preprocessing kernel bridge function.
+// Returns: Converts accumulated gradients (from render bwd) into
+// world-space gradients (surfel learnable params).
+// 1. grad_points_world_space:      [P, 3] float32 - Computed gradients of points (world space)
+// 2. grad_scale_vecs:              [P, 2] float32 - Computed gradients of scale vectors
+// 3. grad_quats:                   [P, 4] float32 - Computed gradients of quaternions
+// 4. grad_mod_projected_centers:   [P, 2] float32 - Modified Computed gradients of projected centers (pix space)
+std::tuple<torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor>
-rasterize_surfels_bwd_subsequent(
+rasterize_surfels_bwd_preprocess(
     // Forward pass saved state
-    const int img_W, const int img_H, // Scalars
-    const torch::Tensor &colors_feat, // [P, C] float32
-    const torch::Tensor &background,  // [C] float32
+    const torch::Tensor &points_world_space, // [P, 3] float32
+    const torch::Tensor &scale_vecs,         // [P, 2] float32
+    const float glob_scale_mod,              // Scalar
+    const torch::Tensor &quats,              // [P, 4] float32
+    const torch::Tensor &w2cam_mat,          // [4, 4] float32
+    const torch::Tensor &w2clip_mat,         // [4, 4] float32
+    const int img_W, const int img_H,        // Scalars
     // Saved forward pass buffers
     // Preprocess buffers
-    const torch::Tensor &projected_centers, // [P, 2] float32
-    const torch::Tensor &splat2pix_mats,    // [P, 3, 3] float32
-    const torch::Tensor &normal_opacity,    // [P, 4] float32
-    // Binning buffers
-    const torch::Tensor &sorted_surfel_indices, // [n_isects] int32
-    // Image buffers
-    const torch::Tensor &tile_ranges,               // [grid_size, 2] int32
-    const torch::Tensor &contrib_state,             // [2 * img_H * img_W] int32
-    const torch::Tensor &transmittance_and_moments, // [3 * img_H * img_W] float32
-    // Input gradients from PyTorch
-    const torch::Tensor &grad_rendered_color_feat, // [C, H, W] float32 - Pytorch rendered pixel's gradients (image rendering loss)
-    const torch::Tensor &grad_rendered_aux,        // [7, H, W] float32 - dummy; subsequent passes' calculations are coupled with 1st pass
-    const bool debug = false                       // Scalar
+    const torch::Tensor &asymmetric_radii, // [P] int32
+    const torch::Tensor &splat2pix_mats,   // [P, 3, 3] float32
+    // Input gradients from PyTorch (accumulated from all bwd rendering passes)
+    const torch::Tensor &grad_normal,            // [P, 3] float32
+    const torch::Tensor &grad_projected_centers, // [P, 2] float32
+    const torch::Tensor &grad_splat2pix_mats,    // [P, 3, 3] float32
+    const bool debug = false                     // Scalar
 );
 
 // Py-CUDA frustum culling bridge function.

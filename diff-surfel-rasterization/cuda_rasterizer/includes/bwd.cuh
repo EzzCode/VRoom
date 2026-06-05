@@ -10,10 +10,10 @@ namespace BWD
 {
     // Backpropagate gradients through rendering process
     void render(
-        const int img_W, const int img_H,       // Image width and height
-        const int num_color_feat_channels,      // Number of channels in the concat of colors + features
-        const float *colors_feat,               // Concatenation of colors and features per surfel
-        const float *background,                // Background values
+        const int img_W, const int img_H,  // Image width and height
+        const int num_color_feat_channels, // Number of channels in the concat of colors + features
+        const float *colors_feat,          // Concatenation of colors and features per surfel
+        const float *background,           // Background values
         // Preprocess buffers
         const float2 *projected_centers, // Mapped pixel locations of each surfel's center
         const float3 *splat2pix_mats,    // Splat to pixel space matrices buffer for each surfel
@@ -47,13 +47,16 @@ namespace BWD
         const float *w2cam_mat,           // World to Cam space matrix
         const float *w2clip_mat,          // World to Clip space matrix
         const int img_W, const int img_H, // Image width and height
+        // Preprocess buffers
         const uint32_t *asymmetric_radii, // Both surfel radii for tighter bounding boxes
         const float3 *splat2pix_mats,     // Splat to pixel space matrices for each surfel
-        const float3 *grad_normal,        // Gradients of 3D normals (cam space)
-        float3 *grad_points_world_space,  // Computed gradients of points (world space)
-        float2 *grad_scale_vecs,          // Computed gradients of scale vectors
-        float4 *grad_quats,               // Computed gradients of quaternions
-        float2 *grad_projected_centers,   // Computed gradients of projected centers (pix space)
-        float3 *grad_splat2pix_mats       // Computed gradients of splat 2 pixel space matrices
+        // Input Gradients
+        const float3 *grad_normal, // Gradients of 3D normals (cam space)
+        // Output Gradients
+        float3 *grad_points_world_space,    // Computed gradients of points (world space)
+        float2 *grad_scale_vecs,            // Computed gradients of scale vectors
+        float4 *grad_quats,                 // Computed gradients of quaternions
+        float2 *grad_mod_projected_centers, // To be modified computed gradients of projected centers (pix space)
+        float3 *grad_splat2pix_mats         // Computed gradients of splat 2 pixel space matrices
     );
 } // namespace BWD
