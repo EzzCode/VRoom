@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'rea
 import { useTheme } from '../../shared/theme';
 import { IconButton, TrackingIndicator } from '../../shared/components';
 
-type InteractionMode = 'place' | 'move' | 'rotate' | 'scale';
+type InteractionMode = 'place' | 'move-floor' | 'move-lift' | 'rotate-horiz' | 'rotate-vert' | 'rotate-roll' | 'scale';
 type TrackingState = 'unavailable' | 'limited' | 'normal';
 
 interface AROverlayUIProps {
@@ -17,7 +17,10 @@ interface AROverlayUIProps {
   isMeshPlaced: boolean;
   isMeshLoading: boolean;
   reticleVisible: boolean;
+  currentScale: number;
+  onScaleChange: (scale: number) => void;
 }
+
 
 export default function AROverlayUI({
   onBack,
@@ -30,15 +33,40 @@ export default function AROverlayUI({
   isMeshPlaced,
   isMeshLoading,
   reticleVisible,
+  currentScale,
+  onScaleChange,
 }: AROverlayUIProps) {
   const { theme } = useTheme();
 
   const modes: { key: InteractionMode; label: string }[] = [
     { key: 'place', label: 'Place' },
-    { key: 'move', label: 'Move' },
-    { key: 'rotate', label: 'Rotate' },
+    { key: 'move-floor', label: 'Move' },
+    { key: 'rotate-horiz', label: 'Rotate' },
     { key: 'scale', label: 'Scale' },
   ];
+
+  const moveSubModes: { key: InteractionMode; label: string }[] = [
+    { key: 'move-floor', label: 'Floor' },
+    { key: 'move-lift', label: 'Lift' },
+  ];
+
+  const rotateSubModes: { key: InteractionMode; label: string }[] = [
+    { key: 'rotate-horiz', label: 'Spin' },
+    { key: 'rotate-vert', label: 'Tilt' },
+    { key: 'rotate-roll', label: 'Roll' },
+  ];
+
+  const isMoveActive = interactionMode === 'move-floor' || interactionMode === 'move-lift';
+  const isRotateActive =
+    interactionMode === 'rotate-horiz' ||
+    interactionMode === 'rotate-vert' ||
+    interactionMode === 'rotate-roll';
+  // Highlight the correct main button
+  const effectiveModeKey = isMoveActive
+    ? 'move-floor'
+    : isRotateActive
+      ? 'rotate-horiz'
+      : interactionMode;
 
   return (
     <View style={styles.container} pointerEvents="box-none">
@@ -190,6 +218,116 @@ export default function AROverlayUI({
       {/* Mode selector */}
       {isMeshPlaced && (
         <View style={styles.modeBar} pointerEvents="box-none">
+          {/* Move sub-bar */}
+          {isMoveActive && (
+            <View
+              style={[
+                styles.modeBarInner,
+                {
+                  backgroundColor: theme.colors.overlay,
+                  borderRadius: theme.radii.xl,
+                  paddingVertical: theme.spacing.sm,
+                  paddingHorizontal: theme.spacing.sm,
+                  marginBottom: theme.spacing.sm,
+                },
+              ]}
+              pointerEvents="box-none"
+            >
+              {moveSubModes.map((sub) => (
+                <TouchableOpacity
+                  key={sub.key}
+                  style={[
+                    styles.modeButton,
+                    {
+                      backgroundColor:
+                        interactionMode === sub.key ? theme.colors.primary : 'transparent',
+                      borderRadius: theme.radii.lg,
+                      paddingHorizontal: theme.spacing.lg,
+                      paddingVertical: theme.spacing.sm,
+                    },
+                  ]}
+                  onPress={() => setInteractionMode(sub.key)}
+                >
+                  <Text
+                    style={{
+                      color: interactionMode === sub.key ? '#FFFFFF' : theme.colors.textSecondary,
+                      fontSize: theme.typography.caption.fontSize,
+                      fontWeight: interactionMode === sub.key ? '700' : '400',
+                    }}
+                  >
+                    {sub.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          {/* Rotate sub-bar */}
+          {isRotateActive && (
+            <View
+              style={[
+                styles.modeBarInner,
+                {
+                  backgroundColor: theme.colors.overlay,
+                  borderRadius: theme.radii.xl,
+                  paddingVertical: theme.spacing.sm,
+                  paddingHorizontal: theme.spacing.sm,
+                  marginBottom: theme.spacing.sm,
+                },
+              ]}
+              pointerEvents="box-none"
+            >
+              {rotateSubModes.map((sub) => (
+                <TouchableOpacity
+                  key={sub.key}
+                  style={[
+                    styles.modeButton,
+                    {
+                      backgroundColor:
+                        interactionMode === sub.key ? theme.colors.primary : 'transparent',
+                      borderRadius: theme.radii.lg,
+                      paddingHorizontal: theme.spacing.lg,
+                      paddingVertical: theme.spacing.sm,
+                    },
+                  ]}
+                  onPress={() => setInteractionMode(sub.key)}
+                >
+                  <Text
+                    style={{
+                      color: interactionMode === sub.key ? '#FFFFFF' : theme.colors.textSecondary,
+                      fontSize: theme.typography.caption.fontSize,
+                      fontWeight: interactionMode === sub.key ? '700' : '400',
+                    }}
+                  >
+                    {sub.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+
+          {/* Scale +/- buttons */}
+          {interactionMode === 'scale' && (
+            <View style={[styles.scalePill, { backgroundColor: theme.colors.overlay, borderRadius: theme.radii.xl }]}>
+              <TouchableOpacity
+                style={[styles.scaleBtn, { backgroundColor: theme.colors.primary }]}
+                onPress={() => onScaleChange(Math.max(0.05, currentScale / 1.1))}
+              >
+                <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>−</Text>
+              </TouchableOpacity>
+              <Text style={{ color: '#FFFFFF', fontSize: 13, fontWeight: '600', minWidth: 52, textAlign: 'center' }}>
+                {currentScale.toFixed(2)}×
+              </Text>
+              <TouchableOpacity
+                style={[styles.scaleBtn, { backgroundColor: theme.colors.primary }]}
+                onPress={() => onScaleChange(Math.min(3.0, currentScale * 1.1))}
+              >
+                <Text style={{ color: '#FFFFFF', fontSize: 22, lineHeight: 26, fontWeight: '300' }}>+</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Main mode bar */}
           <View
             style={[
               styles.modeBarInner,
@@ -209,7 +347,7 @@ export default function AROverlayUI({
                   styles.modeButton,
                   {
                     backgroundColor:
-                      interactionMode === mode.key ? theme.colors.primary : 'transparent',
+                      effectiveModeKey === mode.key ? theme.colors.primary : 'transparent',
                     borderRadius: theme.radii.lg,
                     paddingHorizontal: theme.spacing.lg,
                     paddingVertical: theme.spacing.sm,
@@ -219,9 +357,9 @@ export default function AROverlayUI({
               >
                 <Text
                   style={{
-                    color: interactionMode === mode.key ? '#FFFFFF' : theme.colors.textSecondary,
+                    color: effectiveModeKey === mode.key ? '#FFFFFF' : theme.colors.textSecondary,
                     fontSize: theme.typography.caption.fontSize,
-                    fontWeight: interactionMode === mode.key ? '700' : '400',
+                    fontWeight: effectiveModeKey === mode.key ? '700' : '400',
                   }}
                 >
                   {mode.label}
@@ -305,5 +443,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  scalePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    marginBottom: 10,
+    gap: 4,
+  },
+  scaleBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

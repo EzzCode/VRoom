@@ -34,14 +34,15 @@ export default function ARMeshScene(arSceneProps: any) {
 
   const [isMeshPlaced, setIsMeshPlaced] = useState(false);
   const [meshPosition, setMeshPosition] = useState<[number, number, number]>([0, 0, -1]);
-  const [meshRotation, setMeshRotation] = useState<[number, number, number]>([0, 0, 0]);
-  const [meshScale, setMeshScale] = useState<[number, number, number]>([0.2, 0.2, 0.2]);
   const [planeAnchorPos, setPlaneAnchorPos] = useState<[number, number, number]>([0, 0, -1]);
+
+  // Scale and rotation are owned by ARViewScreen and passed via props
+  const meshRotation: [number, number, number] = props.meshRotation ?? [0, 0, 0];
+  const meshScale: [number, number, number] = props.meshScale ?? [0.2, 0.2, 0.2];
 
   const [reticlePosition, setReticlePosition] = useState<[number, number, number]>([0, 0, -1]);
   const [reticleVisible, setReticleVisible] = useState(false);
 
-  const currentRotationY = useRef(0);
   const latestHitPosition = useRef<[number, number, number] | null>(null);
 
   const handleTrackingUpdated = useCallback(
@@ -120,33 +121,13 @@ export default function ARMeshScene(arSceneProps: any) {
     setMeshPosition([dragToPos[0] ?? 0, dragToPos[1] ?? 0, dragToPos[2] ?? 0]);
   }, []);
 
-  const handleRotate = useCallback((rotateState: number, rotationFactor: number, _source: any) => {
-    if (rotateState === 2) {
-      currentRotationY.current += rotationFactor * 0.5;
-      setMeshRotation([0, currentRotationY.current, 0]);
-    }
-  }, []);
 
-  const handlePinch = useCallback((pinchState: number, scaleFactor: number, _source: any) => {
-    if (pinchState === 2) {
-      setMeshScale((prev) => {
-        const newScale = Math.max(0.01, Math.min(5, prev[0] * scaleFactor));
-        return [newScale, newScale, newScale];
-      });
-    }
-  }, []);
-
-  const enableDrag = interactionMode === 'move' && isMeshPlaced;
-  const enableRotate = interactionMode === 'rotate' && isMeshPlaced;
-  const enablePinch = interactionMode === 'scale' && isMeshPlaced;
+  const enableDrag = (interactionMode === 'move-floor' || interactionMode === 'move-lift') && isMeshPlaced;
 
   useEffect(() => {
     if (props.resetRequested) {
       setIsMeshPlaced(false);
       setMeshPosition([0, 0, -1]);
-      setMeshRotation([0, 0, 0]);
-      setMeshScale([0.2, 0.2, 0.2]);
-      currentRotationY.current = 0;
       setReticleVisible(false);
       latestHitPosition.current = null;
     }
@@ -168,9 +149,13 @@ export default function ARMeshScene(arSceneProps: any) {
           position={meshPosition}
           rotation={meshRotation}
           scale={meshScale}
-          dragType={enableDrag ? 'FixedToPlane' : 'FixedDistance'}
+          dragType={enableDrag
+            ? interactionMode === 'move-lift'
+              ? 'FixedDistance'
+              : 'FixedToPlane'
+            : 'FixedDistance'}
           dragPlane={
-            enableDrag
+            enableDrag && interactionMode === 'move-floor'
               ? {
                   planePoint: planeAnchorPos,
                   planeNormal: [0, 1, 0],
@@ -179,8 +164,6 @@ export default function ARMeshScene(arSceneProps: any) {
               : undefined
           }
           onDrag={enableDrag ? handleDrag : undefined}
-          onRotate={enableRotate ? handleRotate : undefined}
-          onPinch={enablePinch ? handlePinch : undefined}
         >
           <Viro3DObject
             source={meshSource}
