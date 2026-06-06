@@ -57,6 +57,12 @@ def run_step(cmd, step_name):
     logger.debug(f"[CMD] {cmd_str}")
 
     try:
+        # If running on a headless Linux server (like Modal), COLMAP's Qt requirements 
+        # will crash OpenGL initialization. We use xvfb-run if available to provide a dummy display.
+        import shutil
+        if shutil.which("xvfb-run") and cmd[0] == "colmap":
+            cmd = ["xvfb-run", "-a"] + cmd
+            
         # By omitting stdout and stderr, the child process inherits the parent's 
         # terminal handles natively. This preserves COLMAP's \r line-replacement!
         result = subprocess.run(cmd, check=False)
