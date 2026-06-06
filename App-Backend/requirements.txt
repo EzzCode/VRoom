@@ -1,0 +1,10 @@
+# VRoom Backend — Python dependencies
+# Install with: pip install -r requirements.txt
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.18
+boto3>=1.35.0
+pydantic-settings[dotenv]>=2.7.0
+modal>=0.64.0
+python-dotenv

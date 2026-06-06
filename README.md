@@ -40,7 +40,7 @@ Before building and running the pipeline, ensure you have the following installe
 
 - **CUDA Toolkit**: Required for the CUDA rasterizer and GPU acceleration. Download and install the appropriate CUDA Toolkit version for your system. Ensure that the CUDA binary directory (e.g., `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin` on Windows or `/usr/local/cuda/bin` on Linux) is added to your system's `PATH` environment variable.
 - **COLMAP**: Required for the Structure-from-Motion (SfM) stage. Download the COLMAP binaries or build from source. Ensure the directory containing the `colmap` executable is added to your system's `PATH` so it can be invoked from the command line.
-- **SAM3 / Ultralytics**: Required for the Masks & Tracking stage. The segmentation model weights are downloaded automatically by Ultralytics on first use. Set the `--ultralytics_home` argument (or the `ULTRALYTICS_HOME` environment variable) to a directory with sufficient storage space for the checkpoint cache. A CUDA-capable GPU is strongly recommended.
+- **SAM3 / Ultralytics**: Required for the Masks & Tracking stage. The `./sam3.pt` segmentation model weights are downloaded automatically by Ultralytics on first use (it will be saved to your current working directory). Set the `--ultralytics_home` argument (or the `ULTRALYTICS_HOME` environment variable) to a directory with sufficient storage space for the checkpoint cache. A CUDA-capable GPU is strongly recommended.
 - **SV3D (sv3d-diffusers)**: Required for the Object Refiner stage. Clone the `chenguolin/sv3d-diffusers` repository into `external_deps/sv3d-diffusers/` inside the workspace root:
   ```bash
   git clone https://github.com/chenguolin/sv3d-diffusers external_deps/sv3d-diffusers
@@ -150,6 +150,14 @@ If there is a specific make target for training, you can use:
 make run_train DATASET=3dovs
 ```
 *(Note: Ensure you have the `pipeline` environment activated when running standalone training commands).*
+
+## Backend Deployment
+
+The VRoom 2DGS pipeline can be deployed as a serverless backend using [Modal](https://modal.com/). This allows you to offload the heavy CUDA-accelerated processing (COLMAP, SAM3, and Gaussian Splatting) to an A10G cloud GPU while exposing a clean REST API.
+
+Detailed instructions on how to configure, deploy, and interact with the backend API are **not** included in this file. Please refer to the dedicated backend guide:
+
+👉 **[Vroom_BE.md](App-Backend.md)**
 
 ## Mobile App
 

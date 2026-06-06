@@ -1,0 +1,39 @@
+# Version control
+.git/
+.gitignore
+
+# Python caching and environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+modal_env/
+gs_env/
+*.egg-info/
+.pytest_cache/
+
+# Modal and IDEs
+.modalignore
+.idea/
+.vscode/
+
+# Local build artifacts and outputs
+App-Backend/output/
+./output/
+build/
+dist/
+*.so
+*.dylib
+
+# Data and large files
+data/
+datasets/
+models/
+weights/
+*.mp4
+*.zip
+*.tar.gz

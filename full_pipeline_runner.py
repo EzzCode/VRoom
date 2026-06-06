@@ -129,7 +129,7 @@ def main():
     parser.add_argument("--matcher_type", default="sequential", choices=["exhaustive", "sequential", "spatial"])
 
     # Masks/Tracking arguments (passed to masks_and_tracking runner)
-    parser.add_argument("--sam_ckpt", default="masks_and_tracking/models/sam3.pt")
+    parser.add_argument("--sam_ckpt", default="sam3.pt")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--ultralytics_home", default="")
     parser.add_argument("--text_prompts", nargs="+", default=["chair", "table", "sofa", "bed", "desk", "cabinet"])
