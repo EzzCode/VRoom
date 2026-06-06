@@ -107,6 +107,7 @@ export default function HomeScreen({ navigation }: Props) {
           </View>
         </Card>
 
+        {/* Coverage Demo button temporarily hidden as per user request
         <Card
           onPress={() => navigation.navigate('CoverageDemo')}
           style={{ borderLeftWidth: 4, borderLeftColor: theme.colors.warning }}
@@ -144,6 +145,7 @@ export default function HomeScreen({ navigation }: Props) {
             </View>
           </View>
         </Card>
+        */}
 
         <Card
           onPress={() => navigation.navigate('SavedLayouts')}
