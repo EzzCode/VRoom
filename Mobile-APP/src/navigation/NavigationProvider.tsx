@@ -4,6 +4,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useTheme } from '../shared/theme';
 import HomeScreen from '../features/home/HomeScreen';
 import CaptureScreen from '../features/capture/CaptureScreen';
+import ARCaptureScreen from '../features/capture/ar/ARCaptureScreen';
 import MeshGallery from '../features/mesh/MeshGallery';
 import ARViewScreen from '../features/ar/ARViewScreen';
 import ExportScreen from '../features/export/ExportScreen';
@@ -49,6 +50,11 @@ export default function NavigationProvider() {
         <Stack.Screen name="SavedLayouts" component={SavedLayoutsScreen} />
         <Stack.Screen name="CapturedPhotos" component={CapturedPhotosScreen} />
         <Stack.Screen name="Capture" component={CaptureScreen} />
+        <Stack.Screen
+          name="ARCapture"
+          component={ARCaptureScreen}
+          options={{ animation: 'slide_from_bottom', orientation: 'portrait' }}
+        />
         <Stack.Screen name="MeshGallery" component={MeshGallery} />
         <Stack.Screen
           name="ARView"

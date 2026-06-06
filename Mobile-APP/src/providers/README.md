@@ -1,5 +1,10 @@
-# App Layer
+# Providers
 
-Application-level wiring belongs here (providers, navigation root, and composition).
+React context providers holding app-level shared state.
 
-`App.tsx` should stay minimal and delegate to this layer as the app grows.
+| File | Purpose |
+|---|---|
+| `SessionProvider.tsx` | Owns the capture session: recording state, keyframes, the shared `CoverageTracker`, the `KeyframeExtractor` (with `AngleGate` + `CoverageGate` registered), current pose, and `getMetadata()` for export. Exposes the `useSession()` hook. |
+| `ARProvider.tsx` | Owns AR mesh-placement state (selected mesh, interaction mode, tracking state, placement transform). Exposes the `useAR()` hook. |
+
+Navigation lives separately in [src/navigation](../navigation), and the theme provider in [src/shared/theme](../shared/theme). `App.tsx` composes these providers and stays minimal.

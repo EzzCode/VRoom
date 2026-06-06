@@ -12,7 +12,7 @@ import { processBlur } from './gates/BlurGate';
 import { useDeviceMotionPose } from './hooks/useDeviceMotionPose';
 import { CAPTURE_CONFIG } from './config/captureConfig';
 import { saveCapturedPhoto } from './services/captureStorage';
-import { useSession, SessionProvider } from '../../providers/SessionProvider';
+import { useSession } from '../../providers/SessionProvider';
 import { useTheme } from '../../shared/theme';
 import { Header, Button, ProgressBar } from '../../shared/components';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -358,11 +358,7 @@ function CaptureScreenInner({ navigation }: Props) {
 }
 
 export default function CaptureScreen(props: Props) {
-  return (
-    <SessionProvider>
-      <CaptureScreenInner {...props} />
-    </SessionProvider>
-  );
+  return <CaptureScreenInner {...props} />;
 }
 
 const styles = StyleSheet.create({

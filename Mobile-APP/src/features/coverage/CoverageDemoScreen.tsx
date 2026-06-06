@@ -14,7 +14,7 @@ import { ViroARSceneNavigator } from '@reactvision/react-viro';
 import CoverageDemoScene from '../../features/coverage/CoverageDemoScene';
 import { CoverageTracker, VoxelView } from '../../features/coverage/CoverageTracker';
 import { CAPTURE_CONFIG } from '../../features/capture/config/captureConfig';
-import { CameraPose } from '../../shared/core/types';
+import { Vec3 } from '../../shared/core/types';
 import { useTheme } from '../../shared/theme';
 import { Header, ProgressBar } from '../../shared/components';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -42,31 +42,20 @@ export default function CoverageDemoScreen({ navigation }: Props) {
   const [voxels, setVoxels] = useState<VoxelView[]>([]);
   const [coveragePercent, setCoveragePercent] = useState(0);
   const [tracking, setTracking] = useState<'unavailable' | 'limited' | 'normal'>('unavailable');
-  const observeIntervalMs = 800;
+  const observeIntervalMs = 200;
   const lastObserveRef = useRef(0);
-  // Require at least this much movement (metres) before accumulating an observation.
-  const MIN_MOVE_M = 0.1;
-  const lastPositionRef = useRef<[number, number, number] | null>(null);
 
-  const handlePose = useCallback(
-    (pose: CameraPose) => {
+  // Each hit point is a real surface location along the camera's centre ray.
+  // We mark the voxel containing it, so coverage coats geometry the user has
+  // actually pointed at — dwelling on a spot fills (greens) it, panning across
+  // leaves a trail of partials.
+  const handleHitPoint = useCallback(
+    (point: Vec3) => {
       const now = Date.now();
       if (now - lastObserveRef.current < observeIntervalMs) return;
-
-      // Skip if camera hasn't moved enough — prevents stationary green-ing.
-      const [px, py, pz] = pose.position;
-      const last = lastPositionRef.current;
-      if (last) {
-        const dist = Math.sqrt(
-          (px - last[0]) ** 2 + (py - last[1]) ** 2 + (pz - last[2]) ** 2,
-        );
-        if (dist < MIN_MOVE_M) return;
-      }
-
       lastObserveRef.current = now;
-      lastPositionRef.current = [px, py, pz];
 
-      tracker.observe(pose);
+      tracker.observePoint(point);
       setVoxels(tracker.getVoxels());
       setCoveragePercent(tracker.coveragePercent);
     },
@@ -77,10 +66,10 @@ export default function CoverageDemoScreen({ navigation }: Props) {
     () => ({
       voxels,
       voxelSize: VOXEL_CFG.voxelSize,
-      onPose: handlePose,
+      onHitPoint: handleHitPoint,
       onTracking: setTracking,
     }),
-    [voxels, handlePose],
+    [voxels, handleHitPoint],
   );
 
   return (

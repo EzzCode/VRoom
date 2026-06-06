@@ -2,7 +2,7 @@
 // Session Provider — Singleton context for capture state
 // ────────────────────────────────────────────────────────────
 import React, { createContext, useContext, useRef, useState, useCallback, useMemo } from 'react';
-import { Keyframe, CameraPose, SessionMetadata } from '../shared/core/types';
+import { Keyframe, CameraPose, SessionMetadata, Vec3 } from '../shared/core/types';
 import { KeyframeExtractor } from '../features/capture/KeyframeExtractor';
 import { AngleGate } from '../features/capture/gates/AngleGate';
 import { CoverageGate } from '../features/capture/gates/CoverageGate';
@@ -19,8 +19,15 @@ export interface SessionContextValue {
   stopSession: () => void;
   /** All saved keyframes in the current session */
   keyframes: Keyframe[];
-  /** Add a keyframe to the session */
-  addKeyframe: (kf: Keyframe) => void;
+  /**
+   * Add a keyframe to the session. By default this also commits the pose's
+   * frustum voxel observations to the coverage tracker. The AR (surface)
+   * capture path passes `{ observeCoverage: false }` and marks coverage
+   * separately via `addCoveragePoint`.
+   */
+  addKeyframe: (kf: Keyframe, opts?: { observeCoverage?: boolean }) => void;
+  /** Mark coverage at a real surface point (AR hit-test path). */
+  addCoveragePoint: (point: Vec3) => void;
   /** The keyframe extractor with all registered gates */
   extractor: KeyframeExtractor;
   /** Latest camera pose from AR (null if unavailable) */
@@ -81,10 +88,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const addKeyframe = useCallback(
-    (kf: Keyframe) => {
+    (kf: Keyframe, opts?: { observeCoverage?: boolean }) => {
       setKeyframes((prev) => [...prev, kf]);
-      // Commit this pose's voxel observations now that the frame is saved.
-      coverageTracker.observe(kf.pose);
+      // Commit this pose's frustum voxel observations now that the frame is
+      // saved. AR (surface) capture passes observeCoverage:false and instead
+      // marks coverage continuously via addCoveragePoint().
+      if (opts?.observeCoverage !== false) {
+        coverageTracker.observe(kf.pose);
+        setCoveragePercent(coverageTracker.coveragePercent);
+      }
+    },
+    [coverageTracker],
+  );
+
+  const addCoveragePoint = useCallback(
+    (point: Vec3) => {
+      coverageTracker.observePoint(point);
       setCoveragePercent(coverageTracker.coveragePercent);
     },
     [coverageTracker],
@@ -106,6 +125,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     stopSession,
     keyframes,
     addKeyframe,
+    addCoveragePoint,
     extractor,
     currentPose,
     setCurrentPose,

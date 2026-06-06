@@ -1,5 +1,6 @@
 # OpenCV Shared Services
 
-Use this folder only when OpenCV utilities are shared by multiple features.
+OpenCV utilities shared by multiple features belong here.
 
-Feature-local OpenCV adapters should remain in their owning feature modules.
+_Currently empty._ Feature-local OpenCV adapters (e.g. the worklet blur scoring in
+the capture frame processor) stay in their owning feature modules.

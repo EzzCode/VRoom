@@ -70,6 +70,41 @@ export default function HomeScreen({ navigation }: Props) {
         </Card>
 
         <Card
+          onPress={() => navigation.navigate('ARCapture')}
+          style={{ borderLeftWidth: 4, borderLeftColor: theme.colors.secondary }}
+        >
+          <View style={[styles.actionIconRow, { gap: theme.spacing.md }]}>
+            <View
+              style={[
+                styles.iconCircle,
+                { backgroundColor: theme.colors.secondary + '20', borderRadius: theme.radii.md },
+              ]}
+            >
+              <Text style={{ fontSize: 24 }}>🧭</Text>
+            </View>
+            <View style={styles.actionText}>
+              <Text
+                style={{
+                  color: theme.colors.textPrimary,
+                  fontSize: theme.typography.h4.fontSize,
+                  fontWeight: theme.typography.h4.fontWeight,
+                }}
+              >
+                AR Scan (beta)
+              </Text>
+              <Text
+                style={{
+                  color: theme.colors.textTertiary,
+                  fontSize: theme.typography.caption.fontSize,
+                }}
+              >
+                6DoF tracking with live surface coverage
+              </Text>
+            </View>
+          </View>
+        </Card>
+
+        <Card
           onPress={() => navigation.navigate('MeshGallery')}
           style={{ borderLeftWidth: 4, borderLeftColor: theme.colors.secondary }}
         >

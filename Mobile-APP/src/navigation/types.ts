@@ -5,6 +5,7 @@ import { RoomLayout } from '../services/mesh/layoutStorage';
 export type RootStackParamList = {
   Home: undefined;
   Capture: undefined;
+  ARCapture: undefined;
   MeshGallery: undefined;
   SavedLayouts: undefined;
   CapturedPhotos: undefined;

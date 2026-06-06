@@ -33,9 +33,14 @@ export class CoverageGate implements ICaptureGate {
       return { passed: true };
     }
 
-    const { newlyTouched, wouldCover } = this.tracker.peek(pose);
+    const { newlyTouched, advancesPartial } = this.tracker.peek(pose);
 
-    if (newlyTouched < this.minNewVoxels && wouldCover === 0) {
+    // Pass when the frame either reaches new area (newlyTouched) or delivers
+    // another observation to a not-yet-covered voxel (advancesPartial). Only
+    // reject frames whose entire frustum is already fully covered — those add
+    // nothing. (advancesPartial already includes voxels that would cross into
+    // "covered" on this pass, so a separate wouldCover check is unnecessary.)
+    if (newlyTouched < this.minNewVoxels && advancesPartial === 0) {
       return {
         passed: false,
         reason: 'Aim at an uncovered area to add new coverage.',

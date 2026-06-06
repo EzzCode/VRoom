@@ -2,32 +2,34 @@
 // CoverageDemoScene — ViroARScene that drives the CoverageTracker
 // ────────────────────────────────────────────────────────────
 //
-// Subscribes to ARKit/ARCore camera transform updates, throttles them,
-// and forwards them to the SessionProvider via the `viroAppProps` callbacks.
-// Renders the live VoxelOverlay on top of the AR camera feed.
+// Runs an AR hit-test along the camera's centre ray each frame and
+// forwards the best surface hit point (throttled) to the screen, which
+// marks the voxel containing it. This coats real geometry instead of
+// filling the camera frustum with floating cubes.
 //
-// Pose flow:
-//   ViroARScene.onCameraTransformUpdate
-//     → onPose(pose)    [throttled to ~5 Hz]
-//     → SessionProvider.setCurrentPose + coverageTracker.observe(pose)
-//     → forceTick() so the overlay re-renders with new voxels
+// Hit-point flow:
+//   ViroARScene.onCameraARHitTest
+//     → pick best hit (plane > feature point) along the centre ray
+//     → onHitPoint(worldPoint)   [throttled to ~5 Hz]
+//     → CoverageDemoScreen.handleHitPoint: tracker.observePoint(point)
+//     → new `voxels` flow back in via viroAppProps so the overlay re-renders
 // ────────────────────────────────────────────────────────────
 
 import React, { useRef, useCallback } from 'react';
 import { ViroARScene } from '@reactvision/react-viro';
 import VoxelOverlay from './VoxelOverlay';
 import { VoxelView } from './CoverageTracker';
-import { CameraPose } from '../../shared/core/types';
+import { Vec3 } from '../../shared/core/types';
 
 interface SceneProps {
   sceneNavigator: {
     viroAppProps: {
       voxels: VoxelView[];
       voxelSize: number;
-      onPose: (pose: CameraPose) => void;
+      onHitPoint: (point: Vec3) => void;
       onTracking?: (state: 'unavailable' | 'limited' | 'normal') => void;
-      /** Minimum ms between forwarded poses (default ~200 = 5 Hz). */
-      poseIntervalMs?: number;
+      /** Minimum ms between forwarded hit points (default ~200 = 5 Hz). */
+      hitIntervalMs?: number;
     };
   };
 }
@@ -35,39 +37,49 @@ interface SceneProps {
 const TRACKING_NORMAL = 3;
 const TRACKING_LIMITED = 2;
 
+// Prefer real planes over estimated planes over raw feature points.
+const HIT_PRIORITY: Record<string, number> = {
+  ExistingPlaneUsingExtent: 4,
+  ExistingPlane: 3,
+  EstimatedHorizontalPlane: 2,
+  FeaturePoint: 1,
+  DepthPoint: 0,
+};
+
 export default function CoverageDemoScene(props: SceneProps) {
-  const { voxels, voxelSize, onPose, onTracking, poseIntervalMs = 200 } =
+  const { voxels, voxelSize, onHitPoint, onTracking, hitIntervalMs = 200 } =
     props.sceneNavigator.viroAppProps;
 
   const lastEmitRef = useRef(0);
-  // Only forward poses when tracking is fully initialised.
+  // Only mark coverage when tracking is fully initialised.
   const trackingOkRef = useRef(false);
 
-  const handleCameraTransformUpdate = useCallback(
-    (transform: any) => {
-      if (!trackingOkRef.current) return;          // drop poses during limited/unavailable
+  const handleCameraARHitTest = useCallback(
+    (results: any) => {
+      if (!trackingOkRef.current) return; // ignore hits during limited/unavailable
       const now = Date.now();
-      if (now - lastEmitRef.current < poseIntervalMs) return;
+      if (now - lastEmitRef.current < hitIntervalMs) return;
+
+      const hits: any[] = results?.hitTestResults ?? [];
+      if (hits.length === 0) return;
+
+      // Pick the highest-confidence hit along the camera's centre ray.
+      let best: any = null;
+      let bestPriority = -1;
+      for (const hit of hits) {
+        const priority = HIT_PRIORITY[hit.type] ?? -1;
+        if (priority > bestPriority) {
+          bestPriority = priority;
+          best = hit;
+        }
+      }
+      const position = best?.transform?.position;
+      if (!position) return;
+
       lastEmitRef.current = now;
-
-      // ViroCameraTransform exposes both legacy (cameraTransform.*) and flat keys.
-      const position = transform.position ?? transform.cameraTransform?.position;
-      const rotation = transform.rotation ?? transform.cameraTransform?.rotation;
-      const forward = transform.forward ?? transform.cameraTransform?.forward;
-      const up = transform.up ?? transform.cameraTransform?.up;
-      if (!position || !forward || !up) return;
-
-      onPose({
-        position: [position[0], position[1], position[2]],
-        rotation: rotation
-          ? [rotation[0], rotation[1], rotation[2]]
-          : [0, 0, 0],
-        forward: [forward[0], forward[1], forward[2]],
-        up: [up[0], up[1], up[2]],
-        timestamp: now,
-      });
+      onHitPoint([position[0], position[1], position[2]]);
     },
-    [onPose, poseIntervalMs],
+    [onHitPoint, hitIntervalMs],
   );
 
   const handleTrackingUpdated = useCallback(
@@ -83,8 +95,9 @@ export default function CoverageDemoScene(props: SceneProps) {
 
   return (
     <ViroARScene
-      onCameraTransformUpdate={handleCameraTransformUpdate}
       onTrackingUpdated={handleTrackingUpdated}
+      onCameraARHitTest={handleCameraARHitTest}
+      anchorDetectionTypes={['PlanesHorizontal', 'PlanesVertical']}
     >
       <VoxelOverlay voxels={voxels} voxelSize={voxelSize} />
     </ViroARScene>

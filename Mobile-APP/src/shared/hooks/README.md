@@ -1,3 +1,6 @@
 # Shared Hooks
 
-Put hooks here only when they are framework-level or used by multiple features.
+Framework-level hooks reused by multiple features belong here.
+
+_Currently empty._ Feature-specific hooks (e.g. `useDeviceMotionPose`) stay in their
+owning feature until reuse is proven.

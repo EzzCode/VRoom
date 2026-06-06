@@ -89,18 +89,9 @@ export class CoverageTracker {
       if (seenThisFrame.has(key)) continue;
       seenThisFrame.add(key);
 
-      let entry = this.voxels.get(key);
-      if (!entry) {
-        entry = { ix, iy, iz, observationCount: 0 };
-        this.voxels.set(key, entry);
-        newlyTouched += 1;
-      }
-      const before = entry.observationCount;
-      entry.observationCount = before + 1;
-      if (before < this.config.minObservations && entry.observationCount >= this.config.minObservations) {
-        this.coveredCount += 1;
-        newlyCovered += 1;
-      }
+      const { touched, covered } = this.markVoxel(ix, iy, iz, key);
+      if (touched) newlyTouched += 1;
+      if (covered) newlyCovered += 1;
     }
 
     return {
@@ -111,13 +102,76 @@ export class CoverageTracker {
   }
 
   /**
+   * Mark the single voxel that contains a world-space point — e.g. an AR
+   * hit-test result on a real surface. Unlike observe(), this does NOT fill
+   * the camera frustum volume, so voxels coat actual geometry instead of
+   * empty air. Intended for hit-test-driven coverage (the demo).
+   */
+  observePoint(point: Vec3): ObserveResult {
+    const s = this.config.voxelSize;
+    const ix = Math.floor(point[0] / s);
+    const iy = Math.floor(point[1] / s);
+    const iz = Math.floor(point[2] / s);
+    const key: VoxelKey = `${ix}_${iy}_${iz}`;
+    const { touched, covered } = this.markVoxel(ix, iy, iz, key);
+    return {
+      newlyCovered: covered ? 1 : 0,
+      newlyTouched: touched ? 1 : 0,
+      observedKeys: [key],
+    };
+  }
+
+  /**
+   * Apply one observation to a single voxel, creating it if new and updating
+   * the covered count when it crosses the threshold. Shared by observe() and
+   * observePoint(). Returns whether the voxel was newly touched / newly covered.
+   */
+  private markVoxel(
+    ix: number,
+    iy: number,
+    iz: number,
+    key: VoxelKey,
+  ): { touched: boolean; covered: boolean } {
+    let entry = this.voxels.get(key);
+    let touched = false;
+    if (!entry) {
+      entry = { ix, iy, iz, observationCount: 0 };
+      this.voxels.set(key, entry);
+      touched = true;
+    }
+    const before = entry.observationCount;
+    entry.observationCount = before + 1;
+    let covered = false;
+    if (before < this.config.minObservations && entry.observationCount >= this.config.minObservations) {
+      this.coveredCount += 1;
+      covered = true;
+    }
+    return { touched, covered };
+  }
+
+  /**
    * Predict what `observe(pose)` would yield without mutating state.
    * Used by CoverageGate to decide pass/fail before the frame is saved.
+   *
+   * - `newlyTouched`: voxels never observed before (count 0 → 1).
+   * - `advancesPartial`: already-touched voxels still below the covered
+   *   threshold that this pose would push one observation closer (includes
+   *   the ones that would cross into "covered"). These are the essential
+   *   second/third passes — a frame that only delivers these still adds
+   *   real information and must not be discarded.
+   * - `wouldCover`: subset of `advancesPartial` that would reach the
+   *   covered threshold on this observation.
    */
-  peek(pose: CameraPose): { newlyTouched: number; wouldCover: number; observedKeys: VoxelKey[] } {
+  peek(pose: CameraPose): {
+    newlyTouched: number;
+    advancesPartial: number;
+    wouldCover: number;
+    observedKeys: VoxelKey[];
+  } {
     const keys = this.sampleFrustumVoxels(pose);
     const seen = new Set<VoxelKey>();
     let newlyTouched = 0;
+    let advancesPartial = 0;
     let wouldCover = 0;
     for (const { key } of keys) {
       if (seen.has(key)) continue;
@@ -127,12 +181,14 @@ export class CoverageTracker {
         newlyTouched += 1;
         continue;
       }
-      if (entry.observationCount < this.config.minObservations &&
-          entry.observationCount + 1 >= this.config.minObservations) {
-        wouldCover += 1;
+      if (entry.observationCount < this.config.minObservations) {
+        advancesPartial += 1;
+        if (entry.observationCount + 1 >= this.config.minObservations) {
+          wouldCover += 1;
+        }
       }
     }
-    return { newlyTouched, wouldCover, observedKeys: Array.from(seen) };
+    return { newlyTouched, advancesPartial, wouldCover, observedKeys: Array.from(seen) };
   }
 
   /** covered / touched, in [0,1]. Returns 0 if nothing observed yet. */
