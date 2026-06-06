@@ -7,6 +7,7 @@ export type RootStackParamList = {
   Capture: undefined;
   MeshGallery: undefined;
   SavedLayouts: undefined;
+  CapturedPhotos: undefined;
   ARView: {
     meshId?: string;
     meshName?: string;

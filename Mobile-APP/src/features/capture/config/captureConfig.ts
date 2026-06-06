@@ -1,6 +1,6 @@
 export const CAPTURE_CONFIG = {
   /** Process every Nth frame in the worklet to save CPU/battery */
-  frameSamplingInterval: 15,
+  frameSamplingInterval: 10,
 
   /** Resolution for the downscaled frame sent to OpenCV */
   resize: {
@@ -17,9 +17,9 @@ export const CAPTURE_CONFIG = {
   /** Angle diversity gate thresholds */
   angleDiversity: {
     /** Minimum Euclidean distance (metres) to allow a new capture */
-    minDistance: 0.10,
-    /** Max cosine similarity (above this = "same direction"). 0.98 ≈ 11° */
-    maxSimilarity: 0.98,
+    minDistance: 0.025, // Extremely dense: every 2.5cm
+    /** Max cosine similarity (above this = "same direction"). 0.996 ≈ 5° */
+    maxSimilarity: 0.996, // Extremely dense: every 5 degrees
   },
 
   /** Coverage voxel grid configuration (Build 3) */

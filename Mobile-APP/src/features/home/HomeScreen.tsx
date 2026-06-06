@@ -182,6 +182,41 @@ export default function HomeScreen({ navigation }: Props) {
             </View>
           </View>
         </Card>
+
+        <Card
+          onPress={() => navigation.navigate('CapturedPhotos')}
+          style={{ borderLeftWidth: 4, borderLeftColor: theme.colors.error }}
+        >
+          <View style={[styles.actionIconRow, { gap: theme.spacing.md }]}>
+            <View
+              style={[
+                styles.iconCircle,
+                { backgroundColor: theme.colors.error + '20', borderRadius: theme.radii.md },
+              ]}
+            >
+              <Text style={{ fontSize: 24 }}>🖼️</Text>
+            </View>
+            <View style={styles.actionText}>
+              <Text
+                style={{
+                  color: theme.colors.textPrimary,
+                  fontSize: theme.typography.h4.fontSize,
+                  fontWeight: theme.typography.h4.fontWeight,
+                }}
+              >
+                Scan Gallery
+              </Text>
+              <Text
+                style={{
+                  color: theme.colors.textTertiary,
+                  fontSize: theme.typography.caption.fontSize,
+                }}
+              >
+                View photos captured during scans
+              </Text>
+            </View>
+          </View>
+        </Card>
       </View>
     </View>
   );
