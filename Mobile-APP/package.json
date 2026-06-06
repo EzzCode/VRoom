@@ -55,5 +55,8 @@
     "prettier": "^3.5.3",
     "typescript": "~5.9.2"
   },
+  "overrides": {
+    "expo-font": "55.0.8"
+  },
   "private": true
 }
