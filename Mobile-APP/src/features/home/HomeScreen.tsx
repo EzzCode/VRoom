@@ -71,7 +71,7 @@ export default function HomeScreen({ navigation }: Props) {
 
         <Card
           onPress={() => navigation.navigate('ARCapture')}
-          style={{ borderLeftWidth: 4, borderLeftColor: theme.colors.secondary }}
+          style={{ borderLeftWidth: 4, borderLeftColor: theme.colors.primary }}
         >
           <View style={[styles.actionIconRow, { gap: theme.spacing.md }]}>
             <View
@@ -80,7 +80,7 @@ export default function HomeScreen({ navigation }: Props) {
                 { backgroundColor: theme.colors.secondary + '20', borderRadius: theme.radii.md },
               ]}
             >
-              <Text style={{ fontSize: 24 }}>🧭</Text>
+              <Text style={{ fontSize: 24 }}>📸</Text>
             </View>
             <View style={styles.actionText}>
               <Text
@@ -98,7 +98,7 @@ export default function HomeScreen({ navigation }: Props) {
                   fontSize: theme.typography.caption.fontSize,
                 }}
               >
-                6DoF tracking with live surface coverage
+                Capture with 6DoF tracking & live surface coverage
               </Text>
             </View>
           </View>
