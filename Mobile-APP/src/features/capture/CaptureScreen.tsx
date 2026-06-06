@@ -95,6 +95,33 @@ function CaptureScreenInner({ navigation }: Props) {
     }
   }, [extractor, addKeyframe, keyframes.length]);
 
+  const handleManualCapture = useCallback(async () => {
+    if (!camera.current || !isRecordingRef.current) return;
+    try {
+      const photo = await camera.current.takePhoto({ flash: 'off' });
+      const savedPath = await saveCapturedPhoto(photo.path);
+      
+      const pose = currentPoseRef.current;
+      addKeyframe({
+        imagePath: savedPath,
+        pose: pose ?? {
+          position: [0, 0, 0],
+          rotation: [0, 0, 0],
+          forward: [0, 0, -1],
+          up: [0, 1, 0],
+          timestamp: Date.now(),
+        },
+        blurScore: blurScoreRef.current,
+        index: keyframes.length,
+      });
+      // Flash a quick guidance message so user knows it worked
+      setGuidance('📸 Manual capture saved!');
+      setTimeout(() => setGuidance(null), 1000);
+    } catch (e) {
+      console.error('Failed to save manual frame:', e);
+    }
+  }, [addKeyframe, keyframes.length]);
+
   useEffect(() => {
     if (!isRecording) {
       return;
@@ -346,6 +373,14 @@ function CaptureScreenInner({ navigation }: Props) {
       </View>
 
       <View style={styles.controls}>
+        {isRecording && (
+          <TouchableOpacity 
+            style={[styles.manualButton, { backgroundColor: theme.colors.card }]} 
+            onPress={handleManualCapture}
+          >
+            <Text style={{ fontSize: 24 }}>📸</Text>
+          </TouchableOpacity>
+        )}
         <Button
           title={isRecording ? 'Stop Capture' : 'Start Capture'}
           onPress={toggleRecording}
@@ -396,5 +431,20 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 50,
     alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  manualButton: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
   },
 });
