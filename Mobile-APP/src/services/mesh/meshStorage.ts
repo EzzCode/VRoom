@@ -45,18 +45,7 @@ export async function prepareMeshForViro(mesh: MeshInfo): Promise<MeshInfo> {
   return { ...mesh, uri: httpUri };
 }
 
-const SUPER_CLEAN_GLB = require('../../../assets/meshes/super_clean.glb');
-
-const BUNDLED_MESHES: MeshInfo[] = [
-  {
-    id: 'bundled_super_clean',
-    name: 'Super Clean',
-    format: 'GLB',
-    size: 928736,
-    uri: 'bundled://super_clean',
-    isBundled: true,
-  },
-];
+const BUNDLED_MESHES: MeshInfo[] = [];
 
 export function getBundledMeshes(): MeshInfo[] {
   return BUNDLED_MESHES;
@@ -185,10 +174,7 @@ export function getMeshSource(mesh: MeshInfo): {
   type: 'GLB' | 'OBJ';
 } {
   if (mesh.isBundled) {
-    return {
-      source: SUPER_CLEAN_GLB,
-      type: mesh.format,
-    };
+    throw new Error('Bundled meshes are no longer supported. Please import a mesh.');
   }
   // http(s):// URIs (Metro-served) are passed through as-is.
   // Local paths get file:// prefix as a fallback.
