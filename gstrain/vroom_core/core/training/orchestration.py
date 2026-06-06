@@ -92,6 +92,9 @@ class TrainingOrchestrator:
 
     def _clip_gradients(self):  # to avoid exploding gradients
         params = list(self.anchor_cloud.parameters()) + list(self.decoder.parameters())
+        for param in params:
+            if param.grad is not None:
+                torch.nan_to_num_(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
         torch.nn.utils.clip_grad_norm_(
             params, self.optmizer_configs["args"].max_grad_norm
         )
