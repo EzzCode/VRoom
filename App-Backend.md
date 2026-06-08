@@ -130,6 +130,10 @@ Logs automatically stream to the Modal dashboard. To view them locally via CLI:
 ```bash
 modal app logs vroom-2dgs-pipeline
 ```
+For a constant stream use:
+```bash
+modal app logs -f vroom-2dgs-pipeline
+```
 
 ### Debugging Active Containers
 If you need to enter an actively running GPU container to inspect files or processes:

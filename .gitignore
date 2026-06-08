@@ -198,3 +198,6 @@ diff-gaussian-rasterization/
 gsplat-object/
 ObjectGS/
 colmap-x64-windows-cuda/
+
+# Backend
+.modal_job_id

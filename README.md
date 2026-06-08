@@ -28,18 +28,26 @@ The full pipeline is coordinated via `full_pipeline_runner.py`, which executes t
 
 ### 1. Clone the Repository
 
+```bash
+git clone --recursive https://github.com/EzzCode/VRoom.git
+```
+
 If you cloned the repository without `--recursive`, pull the necessary submodules first:
 
 ```bash
 git submodule update --init --recursive
 ```
 
+The required submodules are defined in .gitmodules
+
 ### 2. External Dependencies (CUDA & COLMAP)
 
 Before building and running the pipeline, ensure you have the following installed and configured on your system:
 
 - **CUDA Toolkit**: Required for the CUDA rasterizer and GPU acceleration. Download and install the appropriate CUDA Toolkit version for your system. Ensure that the CUDA binary directory (e.g., `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v11.8\bin` on Windows or `/usr/local/cuda/bin` on Linux) is added to your system's `PATH` environment variable.
-- **COLMAP**: Required for the Structure-from-Motion (SfM) stage. Download the COLMAP binaries or build from source. Ensure the directory containing the `colmap` executable is added to your system's `PATH` so it can be invoked from the command line.
+- **COLMAP**: Required for the Structure-from-Motion (SfM) stage. Ensure the directory containing the `colmap` executable is added to your system's `PATH`.
+  - **Windows**: Download the [COLMAP binaries](https://colmap.github.io/install.html).
+  - **Linux / WSL**: We provide a helper script to build COLMAP 3.10 from source with CUDA enabled. Run `./environments/install_colmap_linux.sh` from the repository root.
 - **SAM3 / Ultralytics**: Required for the Masks & Tracking stage. The `./sam3.pt` segmentation model weights are downloaded automatically by Ultralytics on first use (it will be saved to your current working directory). Set the `--ultralytics_home` argument (or the `ULTRALYTICS_HOME` environment variable) to a directory with sufficient storage space for the checkpoint cache. A CUDA-capable GPU is strongly recommended.
 - **SV3D (sv3d-diffusers)**: Required for the Object Refiner stage. Clone the `chenguolin/sv3d-diffusers` repository into `external_deps/sv3d-diffusers/` inside the workspace root:
   ```bash
@@ -70,12 +78,22 @@ The pipeline requires specific Conda environments to run different stages:
 
 You can create these environments using the provided configuration files in the repository:
 
+**For Windows:**
 ```bash
 # 1. Create the masks environment
-conda env create -f environment_masks.yml
+conda env create -f environments/environment_masks.yml
 
 # 2. Create the pipeline environment
-conda env create -f environment_pipeline.yml
+conda env create -f environments/environment_pipeline.yml
+```
+
+**For Linux / WSL:**
+```bash
+# 1. Create the masks environment
+conda env create -f environments/linux_environment_masks.yml
+
+# 2. Create the pipeline environment
+conda env create -f environments/linux_environment_pipeline.yml
 ```
 
 ### 5. Install VRoom Package

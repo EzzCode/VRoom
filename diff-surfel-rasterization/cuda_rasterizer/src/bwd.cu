@@ -8,7 +8,7 @@ namespace cg = cooperative_groups;
 // Rendering backpropagation kernel.
 // 1 pixel per thread and 1 tile per block.
 template <uint8_t CHANNELS>
-__global__ void __launch_bounds__(BLOCK_SIZE)
+__global__ void __launch_bounds__(BLOCK_SIZE, 2)
     render_kernel_bwd(
         // __restrict__ tells the compiler that no two pointers alias the same memory.
         const int img_W, const int img_H,      // Image width and height
@@ -94,10 +94,10 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
     // Fetch the actual final contributor ID
     int last_contributor_idx = contrib_state[pixel_idx]; // (1-based)
 
-    // Track accumulated colors+features behind the current
+    // Track accumulated colors+features dot products behind the current
     // processed surfel
-    float residual_color_feat_acc[CHANNELS] = {0};
-    float prev_color_feat[CHANNELS] = {0};
+    float grad_residual_color_feat = 0.f;
+    float grad_prev_color_feat = 0.f;
 
     // Track previous surfel's alpha
     float prev_alpha = 0;
@@ -313,7 +313,6 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
                 continue;
 
             // Define gradient accumulators
-            float grad_colors_feat[CHANNELS] = {0.f};
             float3 grad_normal = {0.f, 0.f, 0.f};
             float grad_splat2pix_mats[9] = {0.f};
             float2 grad_projected_centers = {0.f, 0.f};
@@ -321,6 +320,9 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
             // Precomputations
             float inv_one_minus_alpha = __fdividef(1.f, 1.f - alpha);
+            
+            float blending_weight = 0.f;
+            float grad_color_feat = 0.f;
 
             // Compute gradients for valid surfels
             if (valid_surfel)
@@ -330,26 +332,50 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
                 // Blending weight for surfel.
                 // It is also rendered color/feat loss w.r.t. surfel's color/feat.
-                const float blending_weight = alpha * transmittance;
+                blending_weight = alpha * transmittance;
+            }
 
-                // To compute alpha gradient, we must do so through all its paths.
+            int glob_surf_idx;
+            if (warp.thread_rank() == 0)
+            {
+                glob_surf_idx = surfel_idx_batch[batch_surf_idx];
+            }
 
-                // Define the alpha (accumulated opacity) gradient accumulator
-                float grad_alpha = 0.f;
+            // Path A: Recursively accumulate gradients from colors+features channels
+            for (int ch = 0; ch < CHANNELS; ch++)
+            {
+                float grad_colors_feat_ch = 0.f;
 
-                // Path A: Recursively accumulate gradients from colors+features channels
-                for (int ch = 0; ch < CHANNELS; ch++)
+                if (valid_surfel)
                 {
                     const float curr_color_feat = color_feat_batch[batch_surf_idx + ch * color_feat_stride];
-                    residual_color_feat_acc[ch] = prev_alpha * prev_color_feat[ch] +
-                                                  (1.f - prev_alpha) * residual_color_feat_acc[ch];
-                    grad_alpha += (curr_color_feat - residual_color_feat_acc[ch]) *
-                                  grad_pixel_color_feat[ch];
-                    prev_color_feat[ch] = curr_color_feat;
+
+                    // Accumulate the dot product
+                    grad_color_feat += curr_color_feat * grad_pixel_color_feat[ch];
 
                     // Also compute gradients w.r.t. colors+features
-                    grad_colors_feat[ch] = blending_weight * grad_pixel_color_feat[ch];
+                    grad_colors_feat_ch = blending_weight * grad_pixel_color_feat[ch];
                 }
+
+                // 1. Reduce and write colors+features grad inline to save registers
+                grad_colors_feat_ch = cg::reduce(warp, grad_colors_feat_ch, cg::plus<float>());
+                if (warp.thread_rank() == 0 && grad_colors_feat_ch != 0.f)
+                {
+                    atomicAdd(&(grad_colors_feat_buff[ch + glob_surf_idx * CHANNELS]), grad_colors_feat_ch);
+                }
+            }
+
+            // To compute alpha gradient, we must do so through all its paths.
+            // Define the alpha (accumulated opacity) gradient accumulator
+            float grad_alpha = 0.f;
+
+            if (valid_surfel)
+            {
+
+                grad_residual_color_feat = prev_alpha * grad_prev_color_feat +
+                                           (1.f - prev_alpha) * grad_residual_color_feat;
+                grad_alpha += grad_color_feat - grad_residual_color_feat;
+                grad_prev_color_feat = grad_color_feat;
 
                 // Path B: Accumulate gradients from aux outputs.
 #if RENDER_AUX
@@ -458,56 +484,46 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
                 }
             }
 
-            // Accumulate gradients to global memory.
+            // Accumulate gradients to global memory inline to reduce register pressure.
+            // By doing reduce -> write immediately, the compiler can reuse registers
+            // for subsequent gradients instead of keeping all 18 alive simultaneously.
 
-            // 1. Accumulate gradients for warp through warp reduce.
-            // 1.1. Reduce surfel colors+features grad
-            for (int ch = 0; ch < CHANNELS; ch++)
-                grad_colors_feat[ch] = cg::reduce(warp, grad_colors_feat[ch], cg::plus<float>());
-            // 1.2. Reduce splat 2 pixel space matrix grad
+            // 2. Reduce and write splat 2 pixel space matrix grad
             for (int idx = 0; idx < 9; idx++)
-                grad_splat2pix_mats[idx] = cg::reduce(warp, grad_splat2pix_mats[idx], cg::plus<float>());
-            // 1.3. Reduce normals grad
-            grad_normal.x = cg::reduce(warp, grad_normal.x, cg::plus<float>());
-            grad_normal.y = cg::reduce(warp, grad_normal.y, cg::plus<float>());
-            grad_normal.z = cg::reduce(warp, grad_normal.z, cg::plus<float>());
-            // 1.4. Reduce projected centers grad
-            grad_projected_centers.x = cg::reduce(warp, grad_projected_centers.x, cg::plus<float>());
-            grad_projected_centers.y = cg::reduce(warp, grad_projected_centers.y, cg::plus<float>());
-            // 1.5. Reduce surfel opacity grad
-            grad_opacity = cg::reduce(warp, grad_opacity, cg::plus<float>());
-
-            // 2. Lane 0 of each warp writes to global memory (reduces locking overhead)
-            if (warp.thread_rank() == 0)
             {
-                const int glob_surf_idx = surfel_idx_batch[batch_surf_idx];
-
-                // Only accumulate gradients if they are non-zero
-                // to save locking overhead.
-                // 2.1. Write to global colors+features grad buffer
-                for (int ch = 0; ch < CHANNELS; ch++)
-                    if (grad_colors_feat[ch] != 0.f)
-                        atomicAdd(&(grad_colors_feat_buff[ch + glob_surf_idx * CHANNELS]), grad_colors_feat[ch]);
-                // 2.2. Write to global splat 2 pixel space matrix grad buffer
-                for (int idx = 0; idx < 9; idx++)
-                    if (grad_splat2pix_mats[idx] != 0.f)
-                        atomicAdd(&(grad_splat2pix_mats_buff[idx + glob_surf_idx * 9]), grad_splat2pix_mats[idx]);
-                // 2.3. Write to global normals grad buffer
-                if (grad_normal.x != 0.f)
-                    atomicAdd(&(grad_normal_buff[glob_surf_idx].x), grad_normal.x);
-                if (grad_normal.y != 0.f)
-                    atomicAdd(&(grad_normal_buff[glob_surf_idx].y), grad_normal.y);
-                if (grad_normal.z != 0.f)
-                    atomicAdd(&(grad_normal_buff[glob_surf_idx].z), grad_normal.z);
-                // 2.4. Write to global projected centers grad buffer
-                if (grad_projected_centers.x != 0.f)
-                    atomicAdd(&(grad_projected_centers_buff[glob_surf_idx].x), grad_projected_centers.x);
-                if (grad_projected_centers.y != 0.f)
-                    atomicAdd(&(grad_projected_centers_buff[glob_surf_idx].y), grad_projected_centers.y);
-                // 2.5. Write to global opacity grads buffer
-                if (grad_opacity != 0.f)
-                    atomicAdd(&(grad_opacity_buff[glob_surf_idx]), grad_opacity);
+                grad_splat2pix_mats[idx] = cg::reduce(warp, grad_splat2pix_mats[idx], cg::plus<float>());
+                if (warp.thread_rank() == 0 && grad_splat2pix_mats[idx] != 0.f)
+                {
+                    atomicAdd(&(grad_splat2pix_mats_buff[idx + glob_surf_idx * 9]), grad_splat2pix_mats[idx]);
+                }
             }
+
+            // 3. Reduce and write normals grad
+            grad_normal.x = cg::reduce(warp, grad_normal.x, cg::plus<float>());
+            if (warp.thread_rank() == 0 && grad_normal.x != 0.f)
+                atomicAdd(&(grad_normal_buff[glob_surf_idx].x), grad_normal.x);
+
+            grad_normal.y = cg::reduce(warp, grad_normal.y, cg::plus<float>());
+            if (warp.thread_rank() == 0 && grad_normal.y != 0.f)
+                atomicAdd(&(grad_normal_buff[glob_surf_idx].y), grad_normal.y);
+
+            grad_normal.z = cg::reduce(warp, grad_normal.z, cg::plus<float>());
+            if (warp.thread_rank() == 0 && grad_normal.z != 0.f)
+                atomicAdd(&(grad_normal_buff[glob_surf_idx].z), grad_normal.z);
+
+            // 4. Reduce and write projected centers grad
+            grad_projected_centers.x = cg::reduce(warp, grad_projected_centers.x, cg::plus<float>());
+            if (warp.thread_rank() == 0 && grad_projected_centers.x != 0.f)
+                atomicAdd(&(grad_projected_centers_buff[glob_surf_idx].x), grad_projected_centers.x);
+
+            grad_projected_centers.y = cg::reduce(warp, grad_projected_centers.y, cg::plus<float>());
+            if (warp.thread_rank() == 0 && grad_projected_centers.y != 0.f)
+                atomicAdd(&(grad_projected_centers_buff[glob_surf_idx].y), grad_projected_centers.y);
+
+            // 5. Reduce and write surfel opacity grad
+            grad_opacity = cg::reduce(warp, grad_opacity, cg::plus<float>());
+            if (warp.thread_rank() == 0 && grad_opacity != 0.f)
+                atomicAdd(&(grad_opacity_buff[glob_surf_idx]), grad_opacity);
         }
     }
 }

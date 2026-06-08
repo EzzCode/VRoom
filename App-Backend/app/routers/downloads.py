@@ -42,6 +42,16 @@ def _require_completed_job(job_id: str) -> Path:
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Job '{job_id}' is not completed (status: {entry.status.value}).",
         )
+
+    # If running in Modal, reload the volume so we can see the newly written outputs
+    import os
+    if os.environ.get("RUNNING_IN_MODAL") == "1":
+        try:
+            from modal_app import jobs_volume
+            jobs_volume.reload()
+        except ImportError:
+            pass
+
     return entry.work_dir
 
 
@@ -121,7 +131,7 @@ async def download_splat(job_id: str) -> DownloadUrlResponse:
     dependencies=[Depends(require_api_key)],
     summary="Get download URLs for individual mesh .ply files.",
 )
-async def download_meshes(job_id: str) -> MeshDownloadResponse:
+def download_meshes(job_id: str) -> MeshDownloadResponse:
     work_dir = _require_completed_job(job_id)
     mesh_dir = work_dir / "output" / "mesh_objects"
 
@@ -153,7 +163,7 @@ async def download_meshes(job_id: str) -> MeshDownloadResponse:
     dependencies=[Depends(require_api_key)],
     summary="Get download URL for a .zip of all meshes.",
 )
-async def download_meshes_bulk(job_id: str) -> DownloadUrlResponse:
+def download_meshes_bulk(job_id: str) -> DownloadUrlResponse:
     work_dir = _require_completed_job(job_id)
     zip_path = work_dir / "output" / "meshes.zip"
 
@@ -174,7 +184,7 @@ async def download_meshes_bulk(job_id: str) -> DownloadUrlResponse:
     dependencies=[Depends(require_api_key)],
     summary="Serve a local file directly (fallback when S3 is disabled).",
 )
-async def download_local_file(job_id: str, filename: str) -> FileResponse:
+def download_local_file(job_id: str, filename: str) -> FileResponse:
     """Serve a file from the job output directory.
 
     The filename is validated against the actual output directory to

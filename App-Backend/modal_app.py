@@ -64,7 +64,7 @@ vroom_image = (
     # 1. Compile COLMAP 3.10 from source with CUDA enabled and GUI disabled
     .run_commands(
         "git clone --branch 3.10 --depth 1 https://github.com/colmap/colmap.git /opt/colmap-source",
-        "cd /opt/colmap-source && mkdir build && cd build && cmake .. -GNinja -DCUDA_ENABLED=ON -DGUI_ENABLED=OFF -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release && ninja install"
+        "cd /opt/colmap-source && mkdir build && cd build && cmake .. -GNinja -DCUDA_ENABLED=ON -DGUI_ENABLED=OFF -DCMAKE_CUDA_ARCHITECTURES=\"80;86\" -DCMAKE_BUILD_TYPE=Release && ninja install"
     )
     # 2. Install Miniconda directly onto the NVIDIA devel image
     .run_commands(
@@ -76,7 +76,7 @@ vroom_image = (
     # Force PyTorch to compile extensions for A10G architecture (Compute 8.6), add conda to PATH, and add PyTorch indexes
     .env({
         "PATH": "/opt/conda/bin:$PATH", 
-        "TORCH_CUDA_ARCH_LIST": "8.6",
+        "TORCH_CUDA_ARCH_LIST": "8.0;8.6",
         "PIP_EXTRA_INDEX_URL": "https://download.pytorch.org/whl/cu118 https://download.pytorch.org/whl/cu126",
         "PIP_FIND_LINKS": "https://data.pyg.org/whl/torch-2.1.2+cu118.html",
         "MAX_JOBS": "4"
@@ -149,7 +149,7 @@ jobs_volume = modal.Volume.from_name("vroom-jobs-data", create_if_missing=True)
 # ── GPU Pipeline Function ───────────────────────────────────────────────
 @app.function(
     image=vroom_image,
-    gpu="A10G",
+    gpu="A100",
     timeout=10800,  # 3 hours max per job
     secrets=[modal.Secret.from_dotenv()],
     volumes={"/app/jobs_data": jobs_volume},
@@ -166,30 +166,41 @@ def run_pipeline_on_gpu(cli_args: list[str], work_dir: str) -> dict:
     env = os.environ.copy()
     env["PYTHONPATH"] = "/app"
 
-    import subprocess
+    env["PYTHONUNBUFFERED"] = "1"
+
+    import pty
     log_content = []
 
-    with subprocess.Popen(
+    master_fd, slave_fd = pty.openpty()
+
+    process = subprocess.Popen(
         cli_args,
-        stdout=subprocess.PIPE,
+        stdout=slave_fd,
         stderr=subprocess.STDOUT,
         cwd=work_dir,
         env=env,
-        text=True,
-    ) as process:
-        with open(log_file, "w") as lf:
-            for line in process.stdout:
-                # 1. Print to container stdout so it streams to the Modal Dashboard
-                print(line, end="", flush=True)
-                # 2. Write to the persistent log file
-                lf.write(line)
-                
-                # Keep a rolling buffer of the last 5000 lines
-                log_content.append(line)
-                if len(log_content) > 5000:
-                    log_content.pop(0)
+    )
+    os.close(slave_fd)
+
+    with open(log_file, "w") as lf:
+        while True:
+            try:
+                data = os.read(master_fd, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            text = data.decode("utf-8", errors="replace")
+            print(text, end="", flush=True)
+            lf.write(text)
+            lf.flush()
+            
+            log_content.append(text)
+            if len(log_content) > 1000:
+                log_content = log_content[-1000:]
 
     returncode = process.wait()
+    os.close(master_fd)
 
     # VERY IMPORTANT: Modal Volumes do not automatically sync changes made
     # inside a container to the cloud. We must explicitly commit the volume

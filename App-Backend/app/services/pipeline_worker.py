@@ -249,9 +249,10 @@ async def run_pipeline(
             )
         finally:
             images_dir = entry.work_dir / "images"
-            if images_dir.exists():
-                shutil.rmtree(images_dir, ignore_errors=True)
-            logger.info("Cleaned up images directory %s to conserve space.", images_dir)
+            if entry.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+                if images_dir.exists():
+                    shutil.rmtree(images_dir, ignore_errors=True)
+                logger.info("Cleaned up images directory %s to conserve space.", images_dir)
 
 
 def run_pipeline_modal_logic(job_id: str, cli_args: list[str], work_dir: str):
@@ -320,10 +321,12 @@ def run_pipeline_modal_logic(job_id: str, cli_args: list[str], work_dir: str):
             error_message=str(e)[:1000],
         )
     finally:
+        entry = job_store.get_job(job_id)
         work_dir_path = Path(work_dir)
         images_dir = work_dir_path / "images"
-        if images_dir.exists():
-            shutil.rmtree(images_dir, ignore_errors=True)
-            logger.info("Cleaned up images directory %s to conserve space.", images_dir)
+        if entry and entry.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+            if images_dir.exists():
+                shutil.rmtree(images_dir, ignore_errors=True)
+                logger.info("Cleaned up images directory %s to conserve space.", images_dir)
         jobs_volume.commit()
 

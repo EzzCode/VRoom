@@ -43,7 +43,7 @@ def clean_yml(input_file, output_file, excludes, extra_index, replacements=None)
 
 # Generate pipeline
 clean_yml(
-    str(ROOT_DIR / "environment_pipeline.yml"), 
+    str(ROOT_DIR / "environments" / "environment_pipeline.yml"), 
     str(BACKEND_DIR / "modal_pipeline.yml"),
     excludes=['ucrt', 'vc', 'vc14_runtime', 'vs2015_runtime', 'pywin32', 'vroom', 'custom-differentiable-rasterizer', 'diff-surfel-rasterization'],
     extra_index="https://download.pytorch.org/whl/cu118"
@@ -51,7 +51,7 @@ clean_yml(
 
 # Generate masks
 clean_yml(
-    str(ROOT_DIR / "environment_masks.yml"),
+    str(ROOT_DIR / "environments" / "environment_masks.yml"),
     str(BACKEND_DIR / "modal_masks.yml"),
     excludes=['ucrt', 'vc', 'vc14_runtime', 'vs2015_runtime', 'pywin32'],
     extra_index="https://download.pytorch.org/whl/cu126",
