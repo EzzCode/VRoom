@@ -108,5 +108,5 @@ async def get_bulk_upload_urls(
 
     return BulkUploadResponse(
         urls=responses,
-        s3_uri=f"s3://{settings.s3_bucket}/uploads/{session_id}/"
+        s3_uri=f"s3://{settings.aws_s3_bucket}/uploads/{session_id}/"
     )

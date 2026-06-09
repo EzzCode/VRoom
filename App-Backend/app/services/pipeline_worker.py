@@ -59,7 +59,14 @@ def _build_cli_args(job: "JobStore", job_id: str) -> List[str]:
         args.append("--force_colmap")
 
     # Masks & Tracking
-    args.extend(["--text_prompts"] + params.masks_tracking.text_prompts)
+    # If the caller supplied a top-level sam_prompt, parse it into individual
+    # prompts and override the nested defaults.  Ignore empty / whitespace.
+    text_prompts = params.masks_tracking.text_prompts  # defaults
+    if params.sam_prompt and params.sam_prompt.strip():
+        parsed = [p.strip() for p in params.sam_prompt.split(",") if p.strip()]
+        if parsed:
+            text_prompts = parsed
+    args.extend(["--text_prompts"] + text_prompts)
     args.extend(["--min_mask_area", str(params.masks_tracking.min_mask_area)])
     args.extend(["--max_area_ratio", str(params.masks_tracking.max_area_ratio)])
     args.extend(["--border_threshold", str(params.masks_tracking.border_threshold)])
