@@ -9,7 +9,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.config import settings
-from app.models.job import PresignedPostResponse
+from app.models.job import PresignedPostResponse, BulkUploadRequest, BulkUploadResponse
 from app.security import require_api_key
 from app.services import s3 as s3_service
 
@@ -60,3 +60,53 @@ async def get_upload_url(
         )
 
     return PresignedPostResponse(**result)
+
+
+@router.post(
+    "/upload-urls/bulk",
+    response_model=BulkUploadResponse,
+    dependencies=[Depends(require_api_key)],
+    summary="Generate multiple S3 presigned POST URLs for client-side upload.",
+)
+async def get_bulk_upload_urls(
+    request: BulkUploadRequest,
+) -> BulkUploadResponse:
+    if not settings.s3_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="S3 is not configured. Use multipart upload or local path instead.",
+        )
+
+    import os
+    responses = []
+    
+    session_id = uuid.uuid4().hex
+    
+    for filename in request.filenames:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in settings.allowed_image_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File extension '{ext}' in filename '{filename}' not allowed. "
+                f"Allowed: {settings.allowed_image_extensions}",
+            )
+
+        safe_key = f"uploads/{session_id}/{uuid.uuid4().hex}{ext}"
+        result = s3_service.generate_presigned_post(
+            object_key=safe_key,
+            content_type="image/jpeg" if ext in (".jpg", ".jpeg") else "image/png",
+            max_size_mb=settings.max_upload_size_mb,
+        )
+        
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate presigned URL for {filename}.",
+            )
+            
+        responses.append(PresignedPostResponse(**result))
+
+    return BulkUploadResponse(
+        urls=responses,
+        s3_uri=f"s3://{settings.s3_bucket}/uploads/{session_id}/"
+    )
