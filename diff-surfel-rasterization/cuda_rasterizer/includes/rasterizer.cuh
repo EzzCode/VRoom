@@ -66,6 +66,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor>
 rasterize_surfels_bwd_render(
     // Forward pass saved state
+    const bool render_aux,            // Scalar
     const int img_W, const int img_H, // Scalars
     const torch::Tensor &colors_feat, // [P, C] float32
     const torch::Tensor &background,  // [C] float32

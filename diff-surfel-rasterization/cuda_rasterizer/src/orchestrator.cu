@@ -248,6 +248,7 @@ int RasterizerOrchestrator::forward(
 
     // Render image
     CUDA_SAFE_CALL(FWD::render(
+                       true,
                        img_W, img_H, num_color_feat_channels, colors_feat, background,
                        prep_buffers.projected_centers, prep_buffers.splat2pix_mats,
                        prep_buffers.normal_opacity, bin_buffers.sorted_surfel_indices,

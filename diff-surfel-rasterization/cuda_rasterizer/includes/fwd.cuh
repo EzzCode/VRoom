@@ -30,6 +30,7 @@ namespace FWD
 
     // Rendering image (RGB + features) using surfels
     void render(
+        const bool render_aux,             // Whether to render auxiliary channels
         const int img_W, const int img_H,  // Image width and height
         const int num_color_feat_channels, // Number of channels in the concat of colors + features
         const float *colors_feat,          // Concatenation of colors and features per surfel
