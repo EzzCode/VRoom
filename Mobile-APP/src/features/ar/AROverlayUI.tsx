@@ -350,7 +350,7 @@ export default function AROverlayUI({
           >
             <Text
               style={{
-                color: theme.colors.textSecondary,
+                color: 'rgba(255,255,255,0.7)',
                 fontSize: theme.typography.caption.fontSize,
                 fontWeight: '600',
               }}
@@ -391,7 +391,7 @@ export default function AROverlayUI({
                   <Text
                     style={{
                       color:
-                        interactionMode === sub.key ? '#FFFFFF' : theme.colors.textSecondary,
+                        interactionMode === sub.key ? '#FFFFFF' : 'rgba(255,255,255,0.7)',
                       fontSize: theme.typography.caption.fontSize,
                       fontWeight: interactionMode === sub.key ? '700' : '400',
                     }}
@@ -436,7 +436,7 @@ export default function AROverlayUI({
                   <Text
                     style={{
                       color:
-                        interactionMode === sub.key ? '#FFFFFF' : theme.colors.textSecondary,
+                        interactionMode === sub.key ? '#FFFFFF' : 'rgba(255,255,255,0.7)',
                       fontSize: theme.typography.caption.fontSize,
                       fontWeight: interactionMode === sub.key ? '700' : '400',
                     }}
@@ -517,7 +517,7 @@ export default function AROverlayUI({
                 <Text
                   style={{
                     color:
-                      effectiveModeKey === mode.key ? '#FFFFFF' : theme.colors.textSecondary,
+                      effectiveModeKey === mode.key ? '#FFFFFF' : 'rgba(255,255,255,0.7)',
                     fontSize: theme.typography.caption.fontSize,
                     fontWeight: effectiveModeKey === mode.key ? '700' : '400',
                   }}
@@ -570,13 +570,13 @@ export default function AROverlayUI({
           <TouchableOpacity
             style={[
               styles.addButton,
-              { backgroundColor: theme.colors.surface, borderRadius: theme.radii.xl },
+              { backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: theme.radii.xl },
             ]}
             onPress={handleOpenLayouts}
           >
             <Text
               style={{
-                color: theme.colors.textPrimary,
+                color: '#FFFFFF',
                 fontSize: theme.typography.caption.fontSize,
                 fontWeight: '600',
               }}
@@ -673,7 +673,7 @@ export default function AROverlayUI({
                       </Text>
                       <Text
                         style={{
-                          color: theme.colors.textSecondary,
+                          color: theme.colors.onSurfaceMuted,
                           fontSize: theme.typography.caption.fontSize,
                           marginTop: 2,
                         }}
@@ -795,7 +795,7 @@ export default function AROverlayUI({
                       <Text style={{ color: theme.colors.textPrimary, fontWeight: '600' }} numberOfLines={1}>
                         {item.name}
                       </Text>
-                      <Text style={{ color: theme.colors.textSecondary, fontSize: 12, marginTop: 2 }}>
+                      <Text style={{ color: theme.colors.onSurfaceMuted, fontSize: 12, marginTop: 2 }}>
                         {item.meshes.length} object{item.meshes.length !== 1 ? 's' : ''} • {new Date(item.createdAt).toLocaleDateString()}
                       </Text>
                     </View>

@@ -107,7 +107,7 @@ export default function CoverageDemoScreen({ navigation }: Props) {
           </Text>
           <Text
             style={{
-              color: theme.colors.textSecondary,
+              color: 'rgba(255,255,255,0.7)',
               fontSize: theme.typography.caption.fontSize,
               marginTop: 4,
             }}

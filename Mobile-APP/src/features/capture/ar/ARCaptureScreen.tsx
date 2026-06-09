@@ -50,6 +50,7 @@ function ARCaptureScreenInner({ navigation }: Props) {
   const [voxels, setVoxels] = useState<VoxelView[]>([]);
   const [tracking, setTracking] = useState<'unavailable' | 'limited' | 'normal'>('unavailable');
   const [guidance, setGuidance] = useState<string | null>(null);
+  const [hideVoxels, setHideVoxels] = useState(false);
 
   const isRecordingRef = useRef(false);
   const currentPoseRef = useRef(currentPose);
@@ -88,11 +89,24 @@ function ARCaptureScreenInner({ navigation }: Props) {
     setGuidance(null);
 
     try {
+      // Hide voxels temporarily so they don't get baked into the screenshot
+      setHideVoxels(true);
+      // Wait a short moment for the React render and native AR scene to update
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
       // Viro exposes _takeScreenshot (underscore-prefixed) on the navigator ref.
       // saveToCameraRoll=false keeps it out of the gallery.
       const nav = arNavigatorRef.current;
-      if (!nav?._takeScreenshot) return;
+      if (!nav?._takeScreenshot) {
+        setHideVoxels(false);
+        return;
+      }
+      
       const shot = await (nav._takeScreenshot as Function)(`vroom_kf_${Date.now()}`, false);
+      
+      // Restore voxels immediately after the shot
+      setHideVoxels(false);
+      
       const sourceUri: string | undefined = shot?.url;
       if (!shot?.success || !sourceUri) return;
 
@@ -127,13 +141,13 @@ function ARCaptureScreenInner({ navigation }: Props) {
 
   const viroAppProps = useMemo(
     () => ({
-      voxels,
+      voxels: hideVoxels ? [] : voxels,
       voxelSize: VOXEL_CFG.voxelSize,
       onPose: handlePose,
       onHitPoint: handleHitPoint,
       onTracking: setTracking,
     }),
-    [voxels, handlePose, handleHitPoint],
+    [voxels, hideVoxels, handlePose, handleHitPoint],
   );
 
   const toggleRecording = () => {
@@ -230,7 +244,7 @@ function ARCaptureScreenInner({ navigation }: Props) {
             <ProgressBar progress={coveragePercent} color={theme.colors.primary} />
           </View>
           <Text
-            style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
+            style={{ color: 'rgba(255,255,255,0.7)', fontSize: theme.typography.mono.fontSize }}
           >
             {Math.round(coveragePercent * 100)}%
           </Text>

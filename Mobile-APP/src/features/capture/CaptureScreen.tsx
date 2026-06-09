@@ -184,7 +184,7 @@ function CaptureScreenInner({ navigation }: Props) {
       <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
         <Text
           style={{
-            color: theme.colors.textSecondary,
+            color: theme.colors.onSurfaceMuted,
             fontSize: theme.typography.body.fontSize,
             textAlign: 'center',
             marginBottom: 20,
@@ -200,7 +200,7 @@ function CaptureScreenInner({ navigation }: Props) {
   if (device == null)
     return (
       <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
-        <Text style={{ color: theme.colors.textSecondary }}>Loading camera…</Text>
+        <Text style={{ color: theme.colors.onSurfaceMuted }}>Loading camera…</Text>
       </View>
     );
 
@@ -281,7 +281,7 @@ function CaptureScreenInner({ navigation }: Props) {
             />
           </View>
           <Text
-            style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
+            style={{ color: 'rgba(255,255,255,0.7)', fontSize: theme.typography.mono.fontSize }}
           >
             {blurScore.toFixed(0)}
           </Text>
@@ -311,7 +311,7 @@ function CaptureScreenInner({ navigation }: Props) {
             <ProgressBar progress={coveragePercent} color={theme.colors.primary} />
           </View>
           <Text
-            style={{ color: theme.colors.textSecondary, fontSize: theme.typography.mono.fontSize }}
+            style={{ color: 'rgba(255,255,255,0.7)', fontSize: theme.typography.mono.fontSize }}
           >
             {Math.round(coveragePercent * 100)}%
           </Text>
