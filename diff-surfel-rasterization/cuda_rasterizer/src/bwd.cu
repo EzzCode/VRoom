@@ -6,8 +6,7 @@
 namespace cg = cooperative_groups;
 
 // Rendering backpropagation kernel.
-// 1 pixel per thread and 1 tile per block.
-template <uint8_t CHANNELS>
+template <uint8_t CHANNELS, bool RENDER_AUX>
 __global__ void __launch_bounds__(BLOCK_SIZE, 2)
     render_kernel_bwd(
         // __restrict__ tells the compiler that no two pointers alias the same memory.
@@ -122,7 +121,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 2)
     }
 
     // Prepare for computing auxiliary outputs' gradients
-#if RENDER_AUX
+
     // Define per-pixel gradients and accumulators for aux outputs
 
     // 1. Depth gradients
@@ -158,7 +157,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 2)
         final_m1 = transmittance_and_moments[pixel_idx + img_H * img_W];
         final_m2 = transmittance_and_moments[pixel_idx + 2 * img_H * img_W];
     }
-#endif
+
 
     // Warp-level optimization for warp-level early exit. #warps = BLOCK_SIZE / 32.
     // Also, track the last contributor ID per warp.
@@ -378,7 +377,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 2)
                 grad_prev_color_feat = grad_color_feat;
 
                 // Path B: Accumulate gradients from aux outputs.
-#if RENDER_AUX
+                if (RENDER_AUX)
+                {
                 // 1. Depth gradients
                 residual_depth_acc = prev_alpha * prev_depth + (1.f - prev_alpha) * residual_depth_acc;
                 prev_depth = depth;
@@ -414,7 +414,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 2)
                     residual_grad_distortion_acc = grad_distortion_acc * alpha +
                                                    (1 - alpha) * residual_grad_distortion_acc;
                 }
-#endif
+                }
                 // Path C: Accumulate gradients from background.
                 grad_alpha *= transmittance;
                 grad_alpha += (-final_transmittance * inv_one_minus_alpha) * bg_dot_pixel_grad;
@@ -528,8 +528,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE, 2)
     }
 }
 
-// Backpropagate gradients through rendering process
 void BWD::render(
+    const bool render_aux,             // Whether to render auxiliary channels
     const int img_W, const int img_H,  // Image width and height
     const int num_color_feat_channels, // Number of channels in the concat of colors + features
     const float *colors_feat,          // Concatenation of colors and features per surfel
@@ -559,26 +559,27 @@ void BWD::render(
     dim3 tile_grid(DIV_CEIL(img_W, BLOCK_DIM_X), DIV_CEIL(img_H, BLOCK_DIM_Y), 1);
     dim3 tile(BLOCK_DIM_X, BLOCK_DIM_Y, 1);
 
-#define __RENDER_CALL_(CHANNELS)                          \
-    case CHANNELS:                                        \
-        render_kernel_bwd<CHANNELS><<<tile_grid, tile>>>( \
-            img_W, img_H,                                 \
-            colors_feat,                                  \
-            background,                                   \
-            projected_centers,                            \
-            splat2pix_mats,                               \
-            normal_opacity,                               \
-            sorted_surfel_indices,                        \
-            tile_ranges,                                  \
-            contrib_state,                                \
-            transmittance_and_moments,                    \
-            grad_rendered_color_feat,                     \
-            grad_rendered_aux,                            \
-            grad_splat2pix_mats_buff,                     \
-            grad_projected_centers_buff,                  \
-            grad_normal_buff,                             \
-            grad_opacity_buff,                            \
-            grad_colors_feat_buff);                       \
+#define __RENDER_CALL_(CHANNELS)                                                        \
+    case CHANNELS:                                                                      \
+        if (render_aux) {                                                               \
+            render_kernel_bwd<CHANNELS, true><<<tile_grid, tile>>>(                     \
+                img_W, img_H, colors_feat, background,                                  \
+                projected_centers, splat2pix_mats, normal_opacity,                      \
+                sorted_surfel_indices, tile_ranges,                                     \
+                contrib_state, transmittance_and_moments,                               \
+                grad_rendered_color_feat, grad_rendered_aux,                            \
+                grad_splat2pix_mats_buff, grad_projected_centers_buff,                  \
+                grad_normal_buff, grad_opacity_buff, grad_colors_feat_buff);            \
+        } else {                                                                        \
+            render_kernel_bwd<CHANNELS, false><<<tile_grid, tile>>>(                    \
+                img_W, img_H, colors_feat, background,                                  \
+                projected_centers, splat2pix_mats, normal_opacity,                      \
+                sorted_surfel_indices, tile_ranges,                                     \
+                contrib_state, transmittance_and_moments,                               \
+                grad_rendered_color_feat, grad_rendered_aux,                            \
+                grad_splat2pix_mats_buff, grad_projected_centers_buff,                  \
+                grad_normal_buff, grad_opacity_buff, grad_colors_feat_buff);            \
+        }                                                                               \
         break;
 
     switch (num_color_feat_channels)

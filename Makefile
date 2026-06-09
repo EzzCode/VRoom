@@ -40,7 +40,7 @@ profile_ncu_ckpt:
 
 # --- Modal API Commands ---
 MODAL_URL ?= https://galalmohamed2003--vroom-2dgs-pipeline-fastapi-entrypoint.modal.run
-S3_URI ?= s3://scene-recon-assets-be/images/
+S3_URI ?= s3://scene-recon-assets-be/ezz/
 JOB_ID ?= $(shell cat .modal_job_id 2>/dev/null)
 
 # Include env without exporting to shell

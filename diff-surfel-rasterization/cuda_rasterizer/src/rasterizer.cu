@@ -93,6 +93,7 @@ torch::Tensor rasterize_surfels_fwd_subsequent(
 
     // Render image
     CUDA_SAFE_CALL(FWD::render(
+                       false,
                        img_W, img_H,
                        num_color_feat_channels,
                        colors_feat.contiguous().data_ptr<float>(),
@@ -115,6 +116,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor>
 rasterize_surfels_bwd_render(
     // Forward pass saved state
+    const bool render_aux,            // Scalar
     const int img_W, const int img_H, // Scalars
     const torch::Tensor &colors_feat, // [P, C] float32
     const torch::Tensor &background,  // [C] float32
@@ -147,6 +149,7 @@ rasterize_surfels_bwd_render(
     {
         // Backpropagate gradients through rendering process
         CUDA_SAFE_CALL(BWD::render(
+                           render_aux,
                            img_W, img_H, num_color_feat_channels,
                            colors_feat.contiguous().data_ptr<float>(),
                            background.contiguous().data_ptr<float>(),

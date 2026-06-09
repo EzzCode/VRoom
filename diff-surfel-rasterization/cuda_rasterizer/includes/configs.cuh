@@ -14,7 +14,7 @@ constexpr float DEPTH_NORM_SCALE = FAR_PLANE / (FAR_PLANE - NEAR_PLANE);
 
 // Feature toggles
 #define FLIP_NORMALS_TO_CAM 1   // If 1, flip normals to always face camera (important for surfel integrity)
-#define RENDER_AUX 1            // If 1, render depth, normal, distortion auxiliary channels
+//#define RENDER_AUX 1            // If 1, render depth, normal, distortion auxiliary channels
 
 // Render auxiliary channel layout offsets (for rendered_aux_buff indexing)
 #define DEPTH_OFFSET 0

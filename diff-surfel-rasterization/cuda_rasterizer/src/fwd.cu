@@ -220,7 +220,7 @@ void FWD::preprocess(
 // One thread for one pixel with collaborative VRAM loading per tile and each
 // tile maps to a block. Each thread takes the surfels (front to back) that
 // affect its pixel and renders the pixel's (RGB + features).
-template <uint8_t CHANNELS>
+template <uint8_t CHANNELS, bool RENDER_AUX>
 __global__ void __launch_bounds__(BLOCK_SIZE)
     render_kernel_fwd(
         // __restrict__ tells the compiler that no two pointers alias the same memory.
@@ -284,7 +284,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
     uint32_t contributor_idx = 0;      // Running counter (1-based)
     uint32_t last_contributor_idx = 0; // Last surfel blended (1-based)
 
-#if RENDER_AUX
+
     // Auxiliary channel accumulators
     float3 normal_acc = {0};
     float depth_acc = 0;
@@ -295,7 +295,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
     // Median depth tracking. Track depth and surfel id when transmittance drops under .5
     float median_depth = 0;
     int median_contrib_idx = -1;
-#endif
+
 
     // Warp-level optimization for warp-level early exit.
     // #warps = BLOCK_SIZE / 32
@@ -408,7 +408,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
             float blending_weight = alpha * transmittance; // blending weight for surfel
 
-#if RENDER_AUX
+            if (RENDER_AUX)
+            {
             // Compute aux outputs
             // 1. Compute distortion loss and depth moments
             float alpha_acc = 1.f - transmittance;
@@ -434,7 +435,7 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
             normal_acc.x += normal.x * blending_weight;
             normal_acc.y += normal.y * blending_weight;
             normal_acc.z += normal.z * blending_weight;
-#endif
+            }
             // Finally, compute rendered colors and features
             for (int ch = 0; ch < CHANNELS; ch++)
                 // Fused Multiply-Add (FMA). Could be replaced with -O3 compiler option.
@@ -465,7 +466,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 
         // Store final transmittance
         transmittance_and_moments_buff[pixel_idx] = transmittance;
-#if RENDER_AUX
+        if (RENDER_AUX)
+        {
         // Store the aux outputs
         // 1. first & second moments (saved for backward distortion grad)
         transmittance_and_moments_buff[pixel_idx + img_H * img_W] = m1_acc;
@@ -484,12 +486,13 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
         rendered_aux_buff[pixel_idx + img_H * img_W * MEDIAN_DEPTH_OFFSET] = median_depth;
         // 7. Distortions
         rendered_aux_buff[pixel_idx + img_H * img_W * DISTORTION_OFFSET] = distortion_acc;
-#endif
+        }
     }
 }
 
 // Rendering image (RGB + features) using surfels
 void FWD::render(
+    const bool render_aux,             // Whether to render auxiliary channels
     const int img_W, const int img_H,  // Image width and height
     const int num_color_feat_channels, // Number of channels in the concat of colors + features
     const float *colors_feat,          // Concatenation of colors and features per surfel
@@ -513,21 +516,23 @@ void FWD::render(
     dim3 tile_grid(DIV_CEIL(img_W, BLOCK_DIM_X), DIV_CEIL(img_H, BLOCK_DIM_Y), 1);
     dim3 tile(BLOCK_DIM_X, BLOCK_DIM_Y, 1);
 
-#define __RENDER_CALL_(CHANNELS)                          \
-    case CHANNELS:                                        \
-        render_kernel_fwd<CHANNELS><<<tile_grid, tile>>>( \
-            img_W, img_H,                                 \
-            colors_feat,                                  \
-            background,                                   \
-            projected_centers,                            \
-            splat2pix_mats,                               \
-            normal_opacity,                               \
-            sorted_surfel_indices,                        \
-            tile_ranges,                                  \
-            contrib_state_buff,                           \
-            transmittance_and_moments_buff,               \
-            rendered_color_feat_buff,                     \
-            rendered_aux_buff);                           \
+#define __RENDER_CALL_(CHANNELS)                                                        \
+    case CHANNELS:                                                                      \
+        if (render_aux) {                                                               \
+            render_kernel_fwd<CHANNELS, true><<<tile_grid, tile>>>(                     \
+                img_W, img_H, colors_feat, background,                                  \
+                projected_centers, splat2pix_mats, normal_opacity,                      \
+                sorted_surfel_indices, tile_ranges,                                     \
+                contrib_state_buff, transmittance_and_moments_buff,                     \
+                rendered_color_feat_buff, rendered_aux_buff);                           \
+        } else {                                                                        \
+            render_kernel_fwd<CHANNELS, false><<<tile_grid, tile>>>(                    \
+                img_W, img_H, colors_feat, background,                                  \
+                projected_centers, splat2pix_mats, normal_opacity,                      \
+                sorted_surfel_indices, tile_ranges,                                     \
+                contrib_state_buff, transmittance_and_moments_buff,                     \
+                rendered_color_feat_buff, rendered_aux_buff);                           \
+        }                                                                               \
         break;
 
     switch (num_color_feat_channels)

@@ -149,7 +149,8 @@ jobs_volume = modal.Volume.from_name("vroom-jobs-data", create_if_missing=True)
 # ── GPU Pipeline Function ───────────────────────────────────────────────
 @app.function(
     image=vroom_image,
-    gpu="A100",
+    gpu="H100",
+    cpu=32.0,
     timeout=10800,  # 3 hours max per job
     secrets=[modal.Secret.from_dotenv()],
     volumes={"/app/jobs_data": jobs_volume},

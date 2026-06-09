@@ -173,6 +173,7 @@ class _RasterizerFirstPass(torch.autograd.Function):
         # 1. Prepare the args for CUDA rasterizer bwd render
         args_render = (
             # Forward pass saved state
+            True,
             raster_settings.img_W,
             raster_settings.img_H,
             colors_feat,
@@ -356,16 +357,17 @@ class _RasterizerSubsequent(torch.autograd.Function):
             transmittance_and_moments,
         ) = ctx.saved_tensors
 
-        # First pass and subsequent are still coupled.
-        # We need to pass a dummy tensor to hold gradients for aux outputs.
-        grad_rendered_aux = torch.zeros(
-            (7, raster_settings.img_H, raster_settings.img_W),
+        # We don't render aux outputs in subsequent passes,
+        # so we pass an empty tensor to save memory (58MB).
+        grad_rendered_aux = torch.empty(
+            0,
             device=grad_rendered_color_feat.device,
         )
 
         # Prepare the args for CUDA rasterizer
         args = (
             # Forward pass saved state
+            False,
             raster_settings.img_W,
             raster_settings.img_H,
             colors_feat,
