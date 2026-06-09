@@ -14,18 +14,7 @@ import { useTheme } from '../../shared/theme';
 import { IconButton, TrackingIndicator } from '../../shared/components';
 import { MeshInfo } from '../../shared/core/types';
 import { RoomLayout, loadLayouts, deleteLayout } from '../../services/mesh/layoutStorage';
-
-export type InteractionMode =
-  | 'select'
-  | 'place'
-  | 'move-floor'
-  | 'move-lift'
-  | 'rotate-horiz'
-  | 'rotate-vert'
-  | 'rotate-roll'
-  | 'scale';
-
-type TrackingState = 'unavailable' | 'limited' | 'normal';
+import { InteractionMode, TrackingState } from './arTypes';
 
 interface AROverlayUIProps {
   onBack: () => void;
@@ -351,6 +340,24 @@ export default function AROverlayUI({
       {/* ── Mode selector (shown once at least one mesh is placed) ──────────── */}
       {anyMeshPlaced && (
         <View style={styles.modeBar} pointerEvents="box-none">
+          {/* Direct-manipulation hint */}
+          <View
+            style={[
+              styles.gestureHint,
+              { backgroundColor: theme.colors.overlay, borderRadius: theme.radii.xl },
+            ]}
+            pointerEvents="none"
+          >
+            <Text
+              style={{
+                color: theme.colors.textSecondary,
+                fontSize: theme.typography.caption.fontSize,
+                fontWeight: '600',
+              }}
+            >
+              Pinch to scale · twist to rotate
+            </Text>
+          </View>
           {/* Move sub-bar */}
           {isMoveActive && (
             <View
@@ -877,6 +884,11 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     alignItems: 'center',
+  },
+  gestureHint: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    marginBottom: 8,
   },
   modeBarInner: {
     flexDirection: 'row',

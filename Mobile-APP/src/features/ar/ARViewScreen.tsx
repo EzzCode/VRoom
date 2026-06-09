@@ -1,5 +1,5 @@
-import React, { useRef, useCallback, useState, useEffect, useMemo } from 'react';
-import { View, StyleSheet, Alert, PanResponder } from 'react-native';
+import React, { useRef, useCallback, useState, useEffect, useMemo, Component, ErrorInfo, ReactNode } from 'react';
+import { View, StyleSheet, Alert, PanResponder, Text } from 'react-native';
 import { ViroARSceneNavigator } from '@reactvision/react-viro';
 import ARMeshScene from './ARMeshScene';
 import AROverlayUI from './AROverlayUI';
@@ -7,22 +7,49 @@ import { getMeshSource, getAvailableMeshes, prepareMeshForViro } from '../../ser
 import { MeshInfo } from '../../shared/core/types';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../navigation/types';
-import type { PlacedMesh } from './arTypes';
+import { PlacedMesh, InteractionMode, TrackingState } from './arTypes';
 import { saveLayout, RoomLayout } from '../../services/mesh/layoutStorage';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ARView'>;
 
-export type InteractionMode =
-  | 'select'
-  | 'place'
-  | 'move-floor'
-  | 'move-lift'
-  | 'rotate-horiz'
-  | 'rotate-vert'
-  | 'rotate-roll'
-  | 'scale';
+interface ErrorBoundaryProps {
+  children: ReactNode;
+}
 
-type TrackingState = 'unavailable' | 'limited' | 'normal';
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ARErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  public override state: ErrorBoundaryState = {
+    hasError: false,
+    error: null,
+  };
+
+  public static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  public override componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('AR Viewer crashed:', error, errorInfo);
+  }
+
+  public override render() {
+    if (this.state.hasError) {
+      return (
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorTitle}>AR Viewer Error</Text>
+          <Text style={styles.errorMessage}>
+            {this.state.error?.message || 'An unexpected error occurred in the AR session.'}
+          </Text>
+        </View>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 export default function ARViewScreen({ navigation, route }: Props) {
   const { meshId, meshName, meshUri, meshType, isBundled } = route.params;
@@ -91,18 +118,7 @@ export default function ARViewScreen({ navigation, route }: Props) {
   const anyMeshPlaced = meshes.some((m) => m.isPlaced);
   const activeMesh = meshes.find((m) => m.id === activeMeshId) ?? null;
 
-  // Load available meshes for the "Add Object" picker
-  useEffect(() => {
-    getAvailableMeshes()
-      .then(setAvailableMeshes)
-      .catch(() => {});
-      
-    // If a layout was passed via route params, load it on mount
-    if (route.params.layout) {
-      handleLoadLayout(route.params.layout);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+
 
   // Refs so stable PanResponder closures can read fresh values
   const lastPanX = useRef(0);
@@ -236,6 +252,19 @@ export default function ARViewScreen({ navigation, route }: Props) {
     meshPositionsRef.current[id] = position;
   }, []);
 
+  /** Two-finger pinch on an object → set absolute uniform scale. */
+  const handleMeshScaled = useCallback((id: string, scale: number) => {
+    setActiveMeshId(id);
+    setMeshes((prev) => prev.map((m) => (m.id === id ? { ...m, scale: [scale, scale, scale] } : m)));
+  }, []);
+
+  /** Two-finger twist on an object → set absolute rotation. */
+  const handleMeshRotated = useCallback((id: string, rotation: [number, number, number]) => {
+    meshRotationRefs.current[id] = rotation;
+    setActiveMeshId(id);
+    setMeshes((prev) => prev.map((m) => (m.id === id ? { ...m, rotation } : m)));
+  }, []);
+
   /** Called by scene in Select mode when user taps a placed mesh */
   const handleMeshSelected = useCallback((id: string) => {
     setActiveMeshId(id);
@@ -247,6 +276,13 @@ export default function ARViewScreen({ navigation, route }: Props) {
 
   const handleReticleVisible = useCallback((visible: boolean) => {
     setReticleVisible(visible);
+  }, []);
+
+  const handleMeshLoadError = useCallback((_id: string, name: string) => {
+    Alert.alert(
+      'Model Load Error',
+      `Failed to load "${name}". This can happen if the GLB is corrupted or if the dynamic server cannot serve the file.`
+    );
   }, []);
 
   /** Called from the overlay's mesh picker — adds and starts placing a new object */
@@ -387,6 +423,7 @@ export default function ARViewScreen({ navigation, route }: Props) {
       meshRotationRefs.current = {};
       meshPositionsRef.current = {};
 
+      let skippedCount = 0;
       for (let i = 0; i < layout.meshes.length; i++) {
         const item = layout.meshes[i];
         if (!item) continue;
@@ -397,23 +434,35 @@ export default function ARViewScreen({ navigation, route }: Props) {
           console.warn('prepareMeshForViro failed during load, using local URI:', e);
         }
 
-        const config = getMeshSource(prepared);
-        const newId = `${prepared.id}-${i}`;
-        
-        newMeshes.push({
-          id: newId,
-          meshInfo: prepared,
-          meshSource: config.source,
-          meshType: prepared.format as 'GLB' | 'OBJ',
-          meshName: prepared.name,
-          rotation: item.rotation,
-          scale: item.scale,
-          isPlaced: true,
-        });
+        try {
+          const config = getMeshSource(prepared);
+          const newId = `${prepared.id}-${i}`;
+          
+          newMeshes.push({
+            id: newId,
+            meshInfo: prepared,
+            meshSource: config.source,
+            meshType: prepared.format as 'GLB' | 'OBJ',
+            meshName: prepared.name,
+            rotation: item.rotation,
+            scale: item.scale,
+            isPlaced: true,
+          });
 
-        meshRotationRefs.current[newId] = item.rotation;
-        meshPositionsRef.current[newId] = item.position;
-        newPositions[newId] = item.position;
+          meshRotationRefs.current[newId] = item.rotation;
+          meshPositionsRef.current[newId] = item.position;
+          newPositions[newId] = item.position;
+        } catch (err: any) {
+          console.warn(`Failed to resolve source for mesh "${prepared.name}":`, err);
+          skippedCount++;
+        }
+      }
+
+      if (skippedCount > 0) {
+        Alert.alert(
+          'Layout Partially Loaded',
+          `${skippedCount} legacy or bundled mesh(es) could not be loaded because they are no longer supported.`
+        );
       }
 
       setInitialPositions(newPositions);
@@ -436,6 +485,17 @@ export default function ARViewScreen({ navigation, route }: Props) {
     }
   }, [executeLoadLayout]);
 
+  // Load available meshes for the "Add Object" picker and layout on mount
+  useEffect(() => {
+    getAvailableMeshes()
+      .then(setAvailableMeshes)
+      .catch(() => {});
+      
+    if (route.params.layout) {
+      handleLoadLayout(route.params.layout);
+    }
+  }, [route.params.layout, handleLoadLayout]);
+
   const confirmAlignment = useCallback(() => {
     if (aligningLayout) {
       // Instead of completely unmounting the Navigator (which crashes ViroReact),
@@ -456,32 +516,37 @@ export default function ARViewScreen({ navigation, route }: Props) {
 
   return (
     <View style={styles.container}>
-      <ViroARSceneNavigator
-        ref={arNavigatorRef}
-        autofocus={true}
-        shadowsEnabled={true}
-        pbrEnabled={false}
-        hdrEnabled={false}
-        initialScene={{
-          scene: ARMeshScene as any,
-        }}
-        viroAppProps={{
-          meshes,
-          activeMeshId,
-          interactionMode,
-          initialPositions,
-          resetRequested: resetCounter > 0,
-          onTrackingChanged: handleTrackingChanged,
-          onMeshPlaced: handleMeshPlaced,
-          onMeshSelected: handleMeshSelected,
-          onMeshLoading: handleMeshLoading,
-          onReticleVisible: handleReticleVisible,
-          onMeshPlacedExt: handleMeshPlacedExt,
-          onMeshMoved: handleMeshMoved,
-          onCameraPoseUpdate: handleCameraPoseUpdate,
-        }}
-        style={StyleSheet.absoluteFill}
-      />
+      <ARErrorBoundary>
+        <ViroARSceneNavigator
+          ref={arNavigatorRef}
+          autofocus={true}
+          shadowsEnabled={true}
+          pbrEnabled={true}
+          hdrEnabled={false}
+          initialScene={{
+            scene: ARMeshScene as any,
+          }}
+          viroAppProps={{
+            meshes,
+            activeMeshId,
+            interactionMode,
+            initialPositions,
+            resetCounter,
+            onTrackingChanged: handleTrackingChanged,
+            onMeshPlaced: handleMeshPlaced,
+            onMeshSelected: handleMeshSelected,
+            onMeshLoading: handleMeshLoading,
+            onReticleVisible: handleReticleVisible,
+            onMeshPlacedExt: handleMeshPlacedExt,
+            onMeshMoved: handleMeshMoved,
+            onMeshScaled: handleMeshScaled,
+            onMeshRotated: handleMeshRotated,
+            onCameraPoseUpdate: handleCameraPoseUpdate,
+            onMeshLoadError: handleMeshLoadError,
+          }}
+          style={StyleSheet.absoluteFill}
+        />
+      </ARErrorBoundary>
 
       {/* Transparent overlay: captures 1-finger drags in rotate mode only */}
       <View
@@ -519,5 +584,25 @@ export default function ARViewScreen({ navigation, route }: Props) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  errorContainer: {
+    flex: 1,
+    backgroundColor: '#1A1A1A',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  errorTitle: {
+    color: '#FF6B6B',
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  errorMessage: {
+    color: '#CCCCCC',
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
   },
 });

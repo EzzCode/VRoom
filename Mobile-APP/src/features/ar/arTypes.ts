@@ -1,5 +1,17 @@
 import { MeshInfo } from '../../shared/core/types';
 
+export type InteractionMode =
+  | 'select'
+  | 'place'
+  | 'move-floor'
+  | 'move-lift'
+  | 'rotate-horiz'
+  | 'rotate-vert'
+  | 'rotate-roll'
+  | 'scale';
+
+export type TrackingState = 'unavailable' | 'limited' | 'normal';
+
 /**
  * Shared AR types used by ARViewScreen and ARMeshScene.
  * Positions are NOT stored here — ARMeshScene owns them for performance
@@ -18,3 +30,4 @@ export interface PlacedMesh {
   /** Whether the mesh has been placed in the AR scene yet */
   isPlaced: boolean;
 }
+

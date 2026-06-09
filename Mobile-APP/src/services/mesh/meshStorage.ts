@@ -184,6 +184,6 @@ export function getMeshSource(mesh: MeshInfo): {
   }
   return {
     source: { uri },
-    type: mesh.format,
+    type: mesh.format as 'GLB' | 'OBJ',
   };
 }

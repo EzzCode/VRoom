@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Image } from 'react-native';
 import { useTheme } from '../../shared/theme';
 import { Card } from '../../shared/components';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -13,15 +13,10 @@ export default function HomeScreen({ navigation }: Props) {
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
       <View style={[styles.hero, { padding: theme.spacing.xxl }]}>
-        <Text
-          style={{
-            color: theme.colors.primary,
-            fontSize: 42,
-            fontWeight: '800',
-          }}
-        >
-          VRoom
-        </Text>
+        <Image
+          source={require('../../../assets/vroom trans.png')}
+          style={{ width: 320, height: 120, marginBottom: theme.spacing.lg }}
+        />
         <Text
           style={{
             color: theme.colors.textSecondary,
@@ -96,6 +91,7 @@ export default function HomeScreen({ navigation }: Props) {
                 style={{
                   color: theme.colors.textTertiary,
                   fontSize: theme.typography.caption.fontSize,
+                    fontWeight: 'bold',
                 }}
               >
                 Capture with 6DoF tracking & live surface coverage
@@ -134,6 +130,7 @@ export default function HomeScreen({ navigation }: Props) {
                 style={{
                   color: theme.colors.textTertiary,
                   fontSize: theme.typography.caption.fontSize,
+                  fontWeight: 'bold',
                 }}
               >
                 Project 3D meshes into your room
@@ -212,6 +209,8 @@ export default function HomeScreen({ navigation }: Props) {
                 style={{
                   color: theme.colors.textTertiary,
                   fontSize: theme.typography.caption.fontSize,
+                  fontWeight: 'bold',
+                  
                 }}
               >
                 Restore a saved room configuration
@@ -247,6 +246,7 @@ export default function HomeScreen({ navigation }: Props) {
                 style={{
                   color: theme.colors.textTertiary,
                   fontSize: theme.typography.caption.fontSize,
+                                    fontWeight: 'bold',
                 }}
               >
                 View photos captured during scans
