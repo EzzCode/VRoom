@@ -279,7 +279,7 @@ def run_pipeline_modal_logic(job_id: str, cli_args: list[str], work_dir: str):
         # 1. Download SAM3 Weights (if not already on the volume)
         sam_ckpt_path = Path("/app/jobs_data/sam3.pt")
         if not sam_ckpt_path.exists():
-            job_store.update_job(job_id, current_stage="downloading_weights")
+            job_store.update_job(job_id, current_stage="queued")
             logger.info("Downloading SAM3 from HuggingFace to %s...", sam_ckpt_path)
             hf_hub_download(
                 repo_id="facebook/sam3",
@@ -295,9 +295,9 @@ def run_pipeline_modal_logic(job_id: str, cli_args: list[str], work_dir: str):
         jobs_volume.commit()
 
         # 3. Run GPU Pipeline
-        job_store.update_job(job_id, current_stage="running_gpu")
+        job_store.update_job(job_id, current_stage="queued")
         logger.info("Executing pipeline on Modal A10G GPU for job %s", job_id)
-        result = run_pipeline_on_gpu.remote(cli_args, work_dir)
+        result = run_pipeline_on_gpu.remote(job_id, cli_args, work_dir)
 
         # 4. Reload volume to see GPU outputs (GPU container committed before returning)
         logger.info("Reloading Modal Volume to sync GPU outputs...")
@@ -311,7 +311,7 @@ def run_pipeline_modal_logic(job_id: str, cli_args: list[str], work_dir: str):
             )
 
         # 6. Upload Results to S3
-        job_store.update_job(job_id, current_stage="uploading_results")
+        job_store.update_job(job_id, current_stage="mesh-extraction")
         work_dir_path = Path(work_dir)
         _upload_results(job_id, work_dir_path)
 

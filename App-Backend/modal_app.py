@@ -202,13 +202,13 @@ def run_pipeline_on_gpu(job_id: str, cli_args: list[str], work_dir: str) -> dict
             if "=== COLMAP" in text:
                 job_store.update_job(job_id, current_stage="colmap")
             elif "=== Masks & Tracking" in text:
-                job_store.update_job(job_id, current_stage="masks_tracking")
+                job_store.update_job(job_id, current_stage="gaussian-training")
             elif "=== Voting Consensus" in text:
-                job_store.update_job(job_id, current_stage="voting")
+                job_store.update_job(job_id, current_stage="gaussian-training")
             elif "=== 2DGS" in text:
-                job_store.update_job(job_id, current_stage="training")
+                job_store.update_job(job_id, current_stage="gaussian-training")
             elif "=== Extract Mesh Inputs" in text:
-                job_store.update_job(job_id, current_stage="meshing")
+                job_store.update_job(job_id, current_stage="mesh-extraction")
 
             log_content.append(text)
             if len(log_content) > 1000:
