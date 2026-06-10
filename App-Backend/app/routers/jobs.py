@@ -207,7 +207,7 @@ async def start_job_json(request: StartJobRequest) -> StartJobResponse:
     dependencies=[Depends(require_api_key)],
     summary="Poll job status.",
 )
-async def get_job_status(job_id: str) -> JobStatusResponse:
+def get_job_status(job_id: str) -> JobStatusResponse:
     entry = job_store.get_job(job_id)
     if entry is None:
         raise HTTPException(

@@ -149,16 +149,19 @@ jobs_volume = modal.Volume.from_name("vroom-jobs-data", create_if_missing=True)
 # ── GPU Pipeline Function ───────────────────────────────────────────────
 @app.function(
     image=vroom_image,
-    gpu="H100",
-    cpu=32.0,
+    gpu="A100",
     timeout=10800,  # 3 hours max per job
     secrets=[modal.Secret.from_dotenv()],
     volumes={"/app/jobs_data": jobs_volume},
 )
-def run_pipeline_on_gpu(cli_args: list[str], work_dir: str) -> dict:
+def run_pipeline_on_gpu(job_id: str, cli_args: list[str], work_dir: str) -> dict:
     """Execute the VRoom pipeline as a subprocess on an A10G GPU container."""
     import subprocess
     from pathlib import Path
+    import sys
+    sys.path.insert(0, "/app/App-Backend")
+    from app.services.job_store import JobStore
+    job_store = JobStore()
 
     log_file = Path(work_dir) / "pipeline.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +199,17 @@ def run_pipeline_on_gpu(cli_args: list[str], work_dir: str) -> dict:
             lf.write(text)
             lf.flush()
             
+            if "=== COLMAP" in text:
+                job_store.update_job(job_id, current_stage="colmap")
+            elif "=== Masks & Tracking" in text:
+                job_store.update_job(job_id, current_stage="masks_tracking")
+            elif "=== Voting Consensus" in text:
+                job_store.update_job(job_id, current_stage="voting")
+            elif "=== 2DGS" in text:
+                job_store.update_job(job_id, current_stage="training")
+            elif "=== Extract Mesh Inputs" in text:
+                job_store.update_job(job_id, current_stage="meshing")
+
             log_content.append(text)
             if len(log_content) > 1000:
                 log_content = log_content[-1000:]
