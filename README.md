@@ -1,6 +1,6 @@
 # VRoom
 
-VRoom is a comprehensive 3D reconstruction and rendering pipeline that generates virtual rooms from scenes. The pipeline processes raw scene images through Structure-from-Motion (SfM), semantic segmentation and tracking, Gaussian Splatting training, and final mesh generation. The repository also includes a companion mobile application.
+VRoom is a comprehensive 3D reconstruction and rendering pipeline that generates virtual rooms from scenes. The pipeline processes raw scene images through Structure-from-Motion (SfM), semantic segmentation and tracking, Gaussian Splatting training, and final mesh generation. The repository also includes a custom-made differential 2DGS rasterizer and a companion mobile application.
 
 ## Features & Pipeline Stages
 
@@ -8,7 +8,7 @@ The full pipeline is coordinated via `full_pipeline_runner.py`, which executes t
 
 1. **SfM (Structure-from-Motion)**: Camera pose estimation and sparse point cloud generation via COLMAP.
 2. **Masks & Tracking**: 2D semantic segmentation (using SAM3), object tracking across frames, and 3D voting for label consensus.
-3. **Gaussian Splatting Training (`gstrain`)**: 3D Gaussian Splatting training on the reconstructed scene.
+3. **Gaussian Splatting Training (`gstrain`)**: 2D Gaussian Splatting training on the reconstructed scene using a custom-made CUDA differential rasterizer.
 4. **Object Refiner**: Optional Per-object quality enhancement by selecting the best real observation, generating a novel-view orbit with SV3D, and training a dedicated per-object Gaussian model from the combined real and synthetic views.
 5. **Mesh Generation**: Extraction of RGB, depth, and semantics to generate final 3D meshes for objects.
 
